@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SGE 监控 v2 预览</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#111217; --panel:#181b1f; --panel-2:#1f2329; --border:#2a2e35; --grid:#262a30;
+  --text:#e8e9ec; --text-2:#b4b7bd; --muted:#8a8f98; --link:#6ea6ff;
+  --ok:#3fb950; --warn:#f0883e; --warn-bg:#7a3e10; --crit:#f25d5d; --crit-bg:#8b1e1e;
+  --stop:#5c9cf5; --stop-bg:#173a66; --stale:#b48cf2; --stale-bg:#3f2a66; --fail-bg:#5b2a9e;
+  --s1:#3987e5; --s2:#199e70; --s3:#9085e9; --s4:#d55181; --s5:#c98500;
+  --chip:#262a30; --norm:#4f6a91; --norm-tl:#2c5a36;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+    --bg:#f4f5f5; --panel:#ffffff; --panel-2:#f7f7f8; --border:#dcdee1; --grid:#ececee;
+    --text:#1d1f23; --text-2:#4a4e55; --muted:#6c7079; --link:#1f62c9;
+    --ok:#1a7f37; --warn:#b4530b; --warn-bg:#ffe2c7; --crit:#c62828; --crit-bg:#ffd6d6;
+    --stop:#1f62c9; --stop-bg:#dbe8fb; --stale:#6f42c1; --stale-bg:#ebe2fa; --fail-bg:#d9c8f7;
+    --s1:#2a78d6; --s2:#1baf7a; --s3:#4a3aa7; --s4:#e87ba4; --s5:#eda100; --chip:#eceef0; --norm:#8fa7c9; --norm-tl:#b7dfc0;
+  }
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f4f5f5; --panel:#ffffff; --panel-2:#f7f7f8; --border:#dcdee1; --grid:#ececee;
+  --text:#1d1f23; --text-2:#4a4e55; --muted:#6c7079; --link:#1f62c9;
+  --ok:#1a7f37; --warn:#b4530b; --warn-bg:#ffe2c7; --crit:#c62828; --crit-bg:#ffd6d6;
+  --stop:#1f62c9; --stop-bg:#dbe8fb; --stale:#6f42c1; --stale-bg:#ebe2fa; --fail-bg:#d9c8f7;
+  --s1:#2a78d6; --s2:#1baf7a; --s3:#4a3aa7; --s4:#e87ba4; --s5:#eda100; --chip:#eceef0; --norm:#8fa7c9; --norm-tl:#b7dfc0;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--link);text-decoration:none;cursor:pointer}
+a:hover{text-decoration:underline}
+header{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--border)}
+.bar{display:flex;align-items:center;gap:12px;padding:8px 16px;flex-wrap:wrap}
+.crumb{font-size:15px;font-weight:600}
+.crumb small{color:var(--muted);font-weight:400;margin-left:6px}
+.nav{display:flex;gap:4px;flex-wrap:wrap}
+.nav a{padding:5px 12px;border-radius:4px;color:var(--text-2);border:1px solid transparent}
+.nav a.on{background:var(--chip);color:var(--text);border-color:var(--border)}
+.nav a:hover{text-decoration:none;background:var(--chip)}
+.sp{flex:1}
+.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font:inherit;cursor:pointer}
+.btn.on{border-color:var(--crit);color:var(--crit)}
+.vars{display:flex;gap:10px;padding:6px 16px 10px;flex-wrap:wrap;align-items:center}
+.var{display:flex;align-items:center;border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.var label{background:var(--panel-2);padding:4px 8px;color:var(--text-2);border-right:1px solid var(--border)}
+.var select{background:var(--panel);color:var(--text);border:0;padding:4px 8px;font:inherit}
+.note{color:var(--muted);font-size:12px}
+.mock{background:var(--stale-bg);color:var(--text);padding:6px 16px;font-size:12px}
+main{padding:12px 16px 40px}
+.grid{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:8px}
+.p{background:var(--panel);border:1px solid var(--border);border-radius:4px;display:flex;flex-direction:column;min-width:0}
+.p>h3{margin:0;padding:7px 10px 4px;font-size:13px;font-weight:500;display:flex;gap:6px;align-items:center}
+.p>h3 .tag{font-size:11px;color:var(--muted);font-weight:400}
+.p>.b{padding:4px 10px 10px;flex:1;min-height:0;overflow:auto}
+.row{grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-top:6px;color:var(--text-2);font-size:13px;font-weight:600}
+.row::after{content:"";flex:1;height:1px;background:var(--border)}
+@media (max-width:860px){.grid>*{grid-column:1/-1 !important}}
+/* stat */
+.stat{cursor:pointer}
+.stat .v{font-size:28px;font-weight:600;line-height:1.1}
+.stat .s{color:var(--muted);font-size:12px;margin-top:2px}
+.stat:hover{border-color:var(--muted)}
+.stat.bg-warn{background:var(--warn-bg)} .stat.bg-crit{background:var(--crit-bg)} .stat.bg-fail{background:var(--fail-bg)} .stat.bg-stale{background:var(--stale-bg)}
+/* state pills */
+.st{white-space:nowrap;font-size:12px;display:inline-flex;align-items:center;gap:5px;padding:1px 7px;border-radius:3px}
+.st i{width:7px;height:7px;border-radius:50%;display:inline-block;background:currentColor}
+.st-10{color:var(--ok);padding-left:0}
+.st-11,.st-12,.st-13,.st-0{color:var(--muted);padding-left:0}
+.st-12{font-style:italic}
+.st-13{border:1px dashed var(--muted);padding-left:7px}
+.st-20{background:var(--stop-bg);color:var(--text)}
+.st-30{background:var(--stale-bg);color:var(--text)}
+.st-40{background:var(--warn);color:#111}
+.st-50{background:var(--fail-bg);color:var(--text);font-weight:600}
+.st-60{background:var(--crit);color:#fff;font-weight:600}
+.oom{color:var(--warn);font-size:12px}
+/* table */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{position:sticky;top:0;background:var(--panel);text-align:left;font-weight:500;color:var(--text-2);padding:5px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:4px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+tr.click{cursor:pointer}
+tr.click:hover td{background:var(--panel-2)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.na{color:var(--muted)}
+.na.i{font-style:italic}
+.gauge{display:flex;align-items:center;gap:6px;min-width:110px}
+.gauge .t{flex:1;height:6px;background:var(--grid);border-radius:3px;overflow:hidden;min-width:50px}
+.gauge .f{height:100%;border-radius:3px;background:var(--norm)}
+.gauge .f.w{background:var(--warn)} .gauge .f.c{background:var(--crit)}
+.gauge span{font-variant-numeric:tabular-nums;width:34px;text-align:right}
+/* bar gauge list */
+.bars{display:flex;flex-direction:column;gap:5px}
+.bars .r{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,2fr) 64px;gap:8px;align-items:center;cursor:pointer}
+.bars .r .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+.bars .r .t{height:12px;background:var(--grid);border-radius:2px;overflow:hidden}
+.bars .r .f{height:100%;background:var(--norm);border-radius:0 2px 2px 0}
+.bars .r .f.w{background:var(--warn)}.bars .r .f.c{background:var(--crit)}
+.bars .r .v{text-align:right;font-variant-numeric:tabular-nums}
+/* node map */
+.node{border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--panel-2);cursor:pointer}
+.node h4{margin:0 0 6px;font-size:12.5px;display:flex;justify-content:space-between;font-weight:600}
+.chips{display:flex;flex-direction:column;gap:3px}
+.vchip{display:flex;justify-content:space-between;gap:4px;font-size:12px;padding:3px 6px;border-radius:3px;background:var(--panel);border-left:3px solid var(--norm);cursor:pointer}
+.vchip:hover{outline:1px solid var(--muted)}
+.vchip.c13{border-left:3px dashed var(--muted);color:var(--text-2)}
+.vchip.c20{border-left-color:var(--stop);background:var(--stop-bg)}
+.vchip.c40{border-left-color:var(--warn);background:var(--warn-bg)}
+.vchip.c50{border-left-color:var(--stale);background:var(--fail-bg)}
+.vchip.c60{border-left-color:var(--crit);background:var(--crit-bg)}
+.vchip em{font-style:normal;color:var(--muted);font-size:11px}
+/* legend */
+.legend{display:flex;flex-wrap:wrap;gap:10px 18px}
+.legend div{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2)}
+/* chart */
+.chart{position:relative;height:var(--ch,180px)}
+.chart svg{width:100%;height:100%;display:block}
+.chart .tip{position:absolute;pointer-events:none;background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px;display:none;z-index:5;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.25)}
+.chart .tip b{display:block;color:var(--text-2);font-weight:500;margin-bottom:2px}
+.chart .tip .k{display:inline-block;width:10px;height:2px;vertical-align:middle;margin-right:5px}
+.lg{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11.5px;color:var(--text-2);padding-top:4px}
+.lg span::before{content:"";display:inline-block;width:12px;height:2px;background:var(--c);vertical-align:middle;margin-right:5px}
+.empty{height:100%;min-height:120px;display:flex;align-items:center;justify-content:center;color:var(--muted);text-align:center;padding:10px}
+.empty.i{font-style:italic}
+.banner{grid-column:1/-1;border:1px dashed var(--muted);border-radius:4px;padding:8px 12px;color:var(--text-2);background:var(--panel)}
+/* timeline */
+.tl{display:grid;grid-template-columns:120px 1fr;gap:3px 8px;align-items:center;font-size:12px}
+.tl .lane{display:flex;height:14px;border-radius:2px;overflow:hidden;gap:1px}
+.tl .lane div{height:100%}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12.5px}
+.kv span:nth-child(odd){color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="crumb" id="crumb">SGE 运维监控 v2</div>
+    <nav class="nav" id="nav">
+      <a data-r="home">总览</a><a data-r="pve">PVE 集群</a><a data-r="vms">虚拟机</a><a data-r="docker">容器</a>
+    </nav>
+    <div class="sp"></div>
+    <div class="tools">
+      <span class="note" id="trange">最近 6 小时 · 刷新 1m</span>
+      <button class="btn" id="demo" title="把部分对象切换成异常状态，演示各种异常的显示效果">注入演示异常</button>
+      <button class="btn" id="theme">切换明暗</button>
+    </div>
+  </div>
+  <div class="vars" id="vars"></div>
+  <div class="mock">静态预览：对象数量、VMID、用途、IP、容器数来自 2026-10-04 验收快照；PVE 节点落点、容器名称、各项数值和曲线都是示意数据，不是实时采样。</div>
+</header>
+<main id="main"></main>
+
+<script>
+// ---------- seeded random ----------
+let seed=7;function rnd(){seed=(seed*16807)%2147483647;return (seed-1)/2147483646}
+function rs(s){seed=s}
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// ---------- inventory (snapshot) ----------
+const VM_INFO={
+101:["旧网管 Web","172.30.242.14","legacy"],103:["Elasticsearch-03","172.30.242.13","legacy"],104:["Elasticsearch-02","172.30.242.12","legacy"],
+105:["Elasticsearch-01","172.30.242.11","legacy"],106:["Database","172.30.242.15","legacy"],107:["Collection","172.30.242.17","legacy"],
+108:["Clickhouse / AuxData","172.30.242.16","legacy"],113:["运维核心服务","172.30.246.201","platform"],114:["监控平台","172.30.246.202","platform"],
+115:["GitLab","172.30.246.203","platform"],116:["制品仓库 Nexus","172.30.246.204","platform"],117:["DNS","172.30.246.205","platform"],
+118:["OpenSearch","172.30.246.207","platform"],119:["GitLab Runner","172.30.246.208","platform"],120:["SecOps","172.30.246.209","platform"],
+121:["SecOps Collector","172.30.246.210","platform"],122:["Arkime","172.30.246.211","platform"]};
+const ALL_IDS=[101,102,103,104,105,106,107,108,109,110,112,113,114,115,116,117,118,119,120,121,122];
+const NODES=["pve01","pve02","pve03","pve04","pve05","pve06"];
+const NODE_OF={101:"pve01",102:"pve01",103:"pve02",104:"pve03",105:"pve04",106:"pve02",107:"pve05",108:"pve06",109:"pve05",110:"pve06",112:"pve04",
+113:"pve01",114:"pve02",115:"pve03",116:"pve03",117:"pve04",118:"pve05",119:"pve06",120:"pve01",121:"pve02",122:"pve06"};
+const DOCKER_HOSTS={101:22,103:3,104:3,105:3,106:4,107:7,108:5,113:2,117:1,119:0};
+const NET_UNSUPPORTED=new Set([101,103,104,105,106,107,108]);
+const CT_NAMES={
+101:["nms-web","nms-api","nms-auth","nms-gateway","nms-scheduler","nms-worker-1","nms-worker-2","nms-worker-3","nms-report","nms-alarm","nms-topo","nms-config","nms-inventory","nms-notify","nms-ws","nms-cache","nms-mq","nms-search","nms-export","nms-import","nms-audit","nms-nginx"],
+103:["elasticsearch","es-exporter","filebeat"],104:["elasticsearch","es-exporter","filebeat"],105:["elasticsearch","es-exporter","filebeat"],
+106:["mysql","redis","pgbouncer","backup-agent"],107:["collector-snmp","collector-syslog","collector-flow","collector-trap","kafka","zookeeper","collector-legacy"],
+108:["clickhouse","clickhouse-keeper","auxdata-api","auxdata-etl","nginx"],113:["ops-api","ops-web"],117:["bind9"],119:[]};
+
+const VMS=ALL_IDS.map(id=>{
+  rs(id*31);
+  const info=VM_INFO[id]; const deep=!!info;
+  const vm={id,name:info?info[0]:"（PVE 名称）",ip:info?info[1]:"—",group:info?info[2]:"—",node:NODE_OF[id],deep,
+    cores:[2,4,8,16][Math.floor(rnd()*4)],memG:[4,8,16,32,64][Math.floor(rnd()*5)],
+    pveCpu:.05+rnd()*.45,pveMem:.3+rnd()*.5,cpu:.04+rnd()*.5,mem:.3+rnd()*.5,
+    fs:[{m:"/",size:50,u:.25+rnd()*.4,ino:.03+rnd()*.15},{m:"/data",size:[200,500,1000][Math.floor(rnd()*3)],u:.2+rnd()*.5,ino:.02+rnd()*.2},{m:"/boot",size:1,u:.2+rnd()*.15,ino:.01}],
+    rx:rnd()*60e6,tx:rnd()*20e6,dw:rnd()*30e6,uptimeD:3+Math.floor(rnd()*80)};
+  return vm;
+});
+const VM=Object.fromEntries(VMS.map(v=>[v.id,v]));
+VM[118].fs[1].u=.83; VM[105].mem=.78; VM[103].cpu=.62;
+
+let CTS=[];
+for(const [h,names] of Object.entries(CT_NAMES)){
+  names.forEach((n,i)=>{rs(+h*100+i+3);
+    CTS.push({host:+h,name:n,running:!(h==107&&n==="collector-legacy"),health:(n==="elasticsearch"||n==="mysql"||n==="clickhouse"||n==="nms-api")?"healthy":"none",
+      restarts:Math.floor(rnd()*rnd()*6),restartsWin:0,cpu:rnd()*rnd()*.6,memB:(50+rnd()*900)*2**20,pids:3+Math.floor(rnd()*60),
+      rx:rnd()*8e6,tx:rnd()*4e6,bio:rnd()*5e6,oom:(h==101&&n==="nms-report"),limitB:n==="elasticsearch"?8*2**30:(rnd()<.4?2*2**30:null)});
+  });
+}
+CTS.find(c=>c.name==="elasticsearch"&&c.host==103).memB=5.6*2**30;
+{const w=CTS.find(c=>c.name==="nms-worker-2");w.restartsWin=1;w.restarts=Math.max(w.restarts,1);}
+
+// ---------- demo anomalies ----------
+let DEMO=false;
+function upOf(v){ if(!v.deep) return null; return DEMO&&v.id===121?0:1 }
+function pveUp(v){ return DEMO&&v.id===110?0:1 }
+function dockerState(h){ if(DEMO&&h==119) return 30; if(DEMO&&h==113) return 50; return 10 }
+function dockerAge(h){ return dockerState(h)===30?420:8+((h*7)%20) }
+function alerts(){
+  const a=[{sev:"warning",name:"FilesystemSpaceLow",vmid:118,obj:"118 OpenSearch",summary:"/data 使用率 83%（阈值 80%）",since:"42 分钟"}];
+  if(DEMO){a.unshift({sev:"critical",name:"TargetDown",vmid:121,obj:"121 SecOps Collector",summary:"node_exporter 抓取失败",since:"6 分钟"});
+    a.push({sev:"warning",name:"ContainerRestarting",vmid:101,ct:"nms-worker-2",obj:"nms-worker-2 @ 101 旧网管 Web",summary:"30 分钟内重启 1 次",since:"18 分钟"});}
+  return a;
+}
+function vmState(v){
+  const al=alerts().filter(a=>a.vmid===v.id);
+  if(al.some(a=>a.sev==="critical")) return 60;
+  if(upOf(v)===0) return 50;
+  if(al.some(a=>a.sev==="warning")) return 40;
+  if(!pveUp(v)) return 20;
+  return 10;
+}
+function deepState(v){ const u=upOf(v); return u===null?13:(u?10:50) }
+
+// ---------- formatting ----------
+const ST_TXT={0:"—",10:"正常",11:"未配置",12:"不支持",13:"未接入",20:"已停止",30:"数据陈旧",40:"警告",50:"采集失败",60:"故障"};
+function st(code,txt){return `<span class="st st-${code}">${code>=10&&code!==11&&code!==12&&code!==13||code===10?"<i></i>":""}${esc(txt||ST_TXT[code])}</span>`}
+const pct=x=>Math.round(x*100)+"%";
+function lvl(x,w=.8,c=.9){return x>=c?"c":x>=w?"w":""}
+function gauge(x,w,c){return `<div class="gauge"><div class="t"><div class="f ${lvl(x,w,c)}" style="width:${Math.min(100,x*100)}%"></div></div><span>${pct(x)}</span></div>`}
+function bits(b){b*=8;const u=["b/s","Kb/s","Mb/s","Gb/s"];let i=0;while(b>=1000&&i<3){b/=1000;i++}return b.toFixed(b<10?1:0)+" "+u[i]}
+function bytesps(b){const u=["B/s","KB/s","MB/s","GB/s"];let i=0;while(b>=1024&&i<3){b/=1024;i++}return b.toFixed(b<10?1:0)+" "+u[i]}
+function iec(b){const u=["B","KiB","MiB","GiB","TiB"];let i=0;while(b>=1024&&i<4){b/=1024;i++}return b.toFixed(b<10?1:0)+" "+u[i]}
+const vmLabel=v=>`${v.id} ${v.name}`;
+const NA=t=>`<span class="na">${t}</span>`, NAi=t=>`<span class="na i">${t}</span>`;
+
+// ---------- layout helpers ----------
+function P(x,w,h,title,body,opt={}){
+  return `<section class="p ${opt.cls||""}" style="grid-column:${x+1}/span ${w};min-height:${h*30}px;--ch:${Math.max(120,h*30-72)}px" ${opt.attr||""}>
+    ${title?`<h3>${esc(title)}${opt.tag?`<span class="tag">${esc(opt.tag)}</span>`:""}</h3>`:""}<div class="b">${body}</div></section>`;
+}
+function Row(t){return `<div class="row">${esc(t)}</div>`}
+function stat(x,w,title,v,sub,cls,go){
+  return `<section class="p stat ${cls||""}" style="grid-column:${x+1}/span ${w};min-height:96px" data-go="${go||""}"><h3>${esc(title)}</h3><div class="b"><div class="v">${v}</div><div class="s">${sub||""}</div></div></section>`;
+}
+function table(cols,rows,opt={}){
+  return `<table><thead><tr>${cols.map(c=>`<th class="${c.num?"num":""}">${esc(c.t)}</th>`).join("")}</tr></thead><tbody>${
+    rows.length?rows.map(r=>`<tr class="${r.go?"click":""}" ${r.go?`data-go="${r.go}"`:""}>${r.c.map((v,i)=>`<td class="${cols[i].num?"num":""}">${v}</td>`).join("")}</tr>`).join("")
+    :`<tr><td colspan="${cols.length}" class="na" style="padding:16px;text-align:center">${opt.empty||"无数据"}</td></tr>`}</tbody></table>`;
+}
+function bars(items,w=.8,c=.9){
+  return `<div class="bars">${items.map(i=>`<div class="r" data-go="${i.go||""}"><div class="n" title="${esc(i.n)}">${esc(i.n)}</div><div class="t"><div class="f ${i.lvl!==undefined?i.lvl:lvl(i.v,w,c)}" style="width:${Math.min(100,i.p!==undefined?i.p*100:i.v*100)}%"></div></div><div class="v">${i.txt||pct(i.v)}</div></div>`).join("")}</div>`;
+}
+
+// ---------- charts ----------
+const CHARTS=[];let cid=0;
+function series(base,amp,n=72,s=1){rs(s);let v=base;const out=[];for(let i=0;i<n;i++){v+= (rnd()-.5)*amp; v=Math.max(0,v*.9+base*.1); out.push(v)}return out}
+function chart(spec){const id="c"+(cid++);CHARTS.push([id,spec]);
+  return `<div class="chart" id="${id}"></div><div class="lg">${spec.series.length>1?spec.series.map((s,i)=>`<span style="--c:var(--s${i%5+1})">${esc(s.name)}</span>`).join(""):""}</div>`}
+function drawCharts(){
+  for(const [id,spec] of CHARTS){
+    const el=document.getElementById(id); if(!el) continue;
+    const W=el.clientWidth||400,H=el.clientHeight||180,pl=56,pr=8,pt=8,pb=20;
+    const n=spec.series[0].data.length;
+    let ys=spec.series.map(s=>s.data);
+    if(spec.stack){const acc=new Array(n).fill(0);ys=spec.series.map(s=>s.data.map((v,i)=>acc[i]+=v));}
+    let max=spec.max||Math.max(...ys.flat().filter(Number.isFinite),spec.ref||0)*1.15||1;
+    const X=i=>pl+(W-pl-pr)*i/(n-1),Y=v=>pt+(H-pt-pb)*(1-v/max);
+    const fmt=spec.fmt||(v=>v.toFixed(1));
+    let g="";
+    for(let k=0;k<=4;k++){const v=max*k/4,y=Y(v);g+=`<line x1="${pl}" x2="${W-pr}" y1="${y}" y2="${y}" stroke="var(--grid)"/><text x="${pl-6}" y="${y+4}" text-anchor="end" font-size="10.5" fill="var(--muted)">${fmt(v)}</text>`}
+    const stepMin=(spec.hours||24)*60/(n-1),now=Date.now();
+    for(let k=0;k<=6;k++){const i=Math.round((n-1)*k/6);const t=new Date(now-(n-1-i)*stepMin*60000);g+=`<text x="${X(i)}" y="${H-5}" text-anchor="${k===0?"start":k===6?"end":"middle"}" font-size="10.5" fill="var(--muted)">${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}</text>`}
+    let lines="";
+    ys.forEach((d,si)=>{
+      const path=d.map((v,i)=>Number.isFinite(v)?`${i&&Number.isFinite(d[i-1])?"L":"M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`:"").join("");
+      if(spec.stack){const prev=si?ys[si-1]:null;const last=d.reduce((a,v,i)=>Number.isFinite(v)?i:a,0);
+        const top=d.slice(0,last+1).map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`);
+        const bot=prev?prev.slice(0,last+1).map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).reverse():[`${X(last)},${Y(0)}`,`${X(0)},${Y(0)}`];
+        lines+=`<polygon points="${top.concat(bot).join(" ")}" fill="var(--s${si%5+1})" opacity=".35"/>`}
+      lines+=`<path d="${path}" fill="none" stroke="var(--s${si%5+1})" stroke-width="2" stroke-linejoin="round"/>`});
+    if(spec.ref) lines+=`<line x1="${pl}" x2="${W-pr}" y1="${Y(spec.ref)}" y2="${Y(spec.ref)}" stroke="var(--muted)" stroke-dasharray="4 4"/><text x="${W-pr-4}" y="${Y(spec.ref)-4}" text-anchor="end" font-size="10.5" fill="var(--muted)">${esc(spec.refName)}</text>`;
+    el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}${lines}<line class="xh" y1="${pt}" y2="${H-pb}" stroke="var(--muted)" visibility="hidden"/><g class="dots"></g></svg><div class="tip"></div>`;
+    const svg=el.querySelector("svg"),tip=el.querySelector(".tip"),xh=el.querySelector(".xh"),dots=el.querySelector(".dots");
+    el.onmousemove=e=>{const r=svg.getBoundingClientRect();const x=(e.clientX-r.left)*W/r.width;let i=Math.round((x-pl)/(W-pl-pr)*(n-1));if(i<0||i>=n){el.onmouseleave();return}
+      xh.setAttribute("x1",X(i));xh.setAttribute("x2",X(i));xh.setAttribute("visibility","visible");
+      dots.innerHTML=ys.map((d,si)=>!Number.isFinite(d[i])?"":`<circle cx="${X(i)}" cy="${Y(d[i])}" r="4" fill="var(--s${si%5+1})" stroke="var(--panel)" stroke-width="2"/>`).join("");
+      const mins=(n-1-i)*stepMin;const t=new Date(Date.now()-mins*60000);
+      tip.innerHTML=`<b>${t.getHours().toString().padStart(2,"0")}:${t.getMinutes().toString().padStart(2,"0")}</b>`+spec.series.map((s,si)=>`<div><span class="k" style="background:var(--s${si%5+1})"></span>${esc(s.name)}：${Number.isFinite(s.data[i])?fmt(s.data[i]):"无数据"}</div>`).join("");
+      tip.style.display="block";const tx=(e.clientX-r.left)+14;tip.style.left=Math.min(tx,r.width-tip.offsetWidth-4)+"px";tip.style.top="8px"};
+    el.onmouseleave=()=>{tip.style.display="none";xh.setAttribute("visibility","hidden");dots.innerHTML=""};
+  }
+}
+window.addEventListener("resize",()=>drawCharts());
+
+// ---------- routing ----------
+const STATE={node:"All",group:"All",dhost:"All"};
+function go(h){location.hash=h}
+function route(){
+  const h=location.hash.slice(1)||"home";const [p,a,b]=h.split("/");
+  CHARTS.length=0;
+  document.querySelectorAll("#nav a").forEach(x=>x.classList.toggle("on",x.dataset.r===p||(p==="vm"&&x.dataset.r==="vms")||(p==="ct"&&x.dataset.r==="docker")));
+  const pages={home:pHome,pve:pPve,vms:pVms,docker:pDocker,vm:()=>pVm(+a||114),ct:()=>pCt(+a||101,b?decodeURIComponent(b):null)};
+  (pages[p]||pHome)();
+  drawCharts();window.scrollTo(0,0);
+}
+function setHead(title,sub,vars,range){
+  $("#crumb").innerHTML=`${esc(title)}<small>${esc(sub)}</small>`;
+  $("#vars").innerHTML=vars||`<span class="note">本页无筛选变量</span>`;
+  $("#trange").textContent=range||"最近 6 小时 · 刷新 1m";
+}
+function sel(name,label,opts,cur){return `<div class="var"><label>${esc(label)}</label><select data-var="${name}">${opts.map(o=>`<option value="${esc(o[0])}" ${String(o[0])===String(cur)?"selected":""}>${esc(o[1])}</option>`).join("")}</select></div>`}
+
+document.addEventListener("click",e=>{
+  const n=e.target.closest("[data-r]");if(n){go(n.dataset.r);return}
+  const t=e.target.closest("[data-go]");if(t&&t.dataset.go){e.stopPropagation();go(t.dataset.go)}
+});
+document.addEventListener("change",e=>{const s=e.target.closest("[data-var]");if(!s)return;const k=s.dataset.var,v=s.value;
+  if(k==="vmid") go("vm/"+v); else if(k==="cthost"){const c=CTS.find(c=>c.host==v);go("ct/"+v+(c?"/"+encodeURIComponent(c.name):""))}
+  else if(k==="ctname") go("ct/"+s.dataset.host+"/"+encodeURIComponent(v)); else {STATE[k]=v;route()}});
+$("#demo").onclick=()=>{DEMO=!DEMO;$("#demo").classList.toggle("on",DEMO);$("#demo").textContent=DEMO?"演示异常：开":"注入演示异常";route()};
+$("#theme").onclick=()=>{const cur=document.documentElement.dataset.theme||(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");document.documentElement.dataset.theme=cur==="dark"?"light":"dark";drawCharts()};
+window.addEventListener("hashchange",route);
+
+// ---------- derived ----------
+function ctState(c){ if(dockerState(c.host)===30) return 30; if(dockerState(c.host)===50) return 50; return c.running?10:20 }
+function ctSev(c){const s=ctState(c);return s+(c.health==="unhealthy"?45:0)+(c.restartsWin?25:0)+(c.oom?1:0)}
+function hostCts(h){return CTS.filter(c=>c.host==h)}
+function legend(){
+  const items=[[10,"正常：只显示绿色小字，不铺底"],[40,"警告"],[60,"故障/严重"],[20,"已停止（对象自身停止）"],[30,"数据陈旧（监控链路）"],[50,"采集失败（监控链路）"],[13,"未接入（不是离线）"],[11,"未配置（health=none，不是健康）"],[12,"不支持（不是 0）"],[0,"无数据"]];
+  return `<div class="legend">${items.map(([c,t])=>`<div>${st(c)}<span>${esc(t.split("：")[1]||t.replace(/^[^（]*/,""))}</span></div>`).join("")}<div><span class="oom">曾OOM</span><span>历史标记，不是正在 OOM</span></div></div>`;
+}
+
+// ================= ① 总览 =================
+function pHome(){
+  setHead("总览","哪里有问题");
+  const al=alerts(),crit=al.filter(a=>a.sev==="critical").length,warn=al.length-crit;
+  const running=VMS.filter(pveUp).length, deep=VMS.filter(v=>v.deep),deepUp=deep.filter(v=>upOf(v)===1).length;
+  const dh=Object.keys(DOCKER_HOSTS),dhOk=dh.filter(h=>dockerState(h)===10).length;
+  const ctRun=CTS.filter(c=>c.running).length;
+  let html=`<div class="grid">`;
+  html+=stat(0,4,"活跃告警",al.length?`<span style="color:${crit?"var(--crit)":"var(--warn)"}">${al.length}</span>`:NA("无"),`${crit} 严重 · ${warn} 警告`,crit?"bg-crit":"","home");
+  html+=stat(4,4,"PVE 节点在线",NA("待核实"),"节点级指标上线前需核实","","pve");
+  html+=stat(8,4,"虚拟机运行（PVE）",`${running}<span class="na">/21</span>`,running<21?`<span style="color:var(--stop)">${21-running} 已停止</span>`:"按 VMID 去重","","vms");
+  html+=stat(12,4,"深度采集在线",`${deepUp}<span class="na">/17</span>`,`${deepUp<17?`<span style="color:var(--stale)">${17-deepUp} 采集失败</span> · `:""}4 台未接入`,deepUp<17?"bg-fail":"","vms");
+  html+=stat(16,4,"Docker 采集正常",`${dhOk}<span class="na">/10</span>`,dhOk<10?`<span style="color:var(--stale)">${10-dhOk} 台陈旧/失败</span>`:"含 1 台无容器主机","", "docker");
+  html+=stat(20,4,"容器运行",`${ctRun}<span class="na">/50</span>`,`<span style="color:var(--stop)">${50-ctRun} 已停止</span>`,"","docker");
+  html+=P(0,14,6,"当前告警",table([{t:"级别"},{t:"对象"},{t:"告警"},{t:"持续"},{t:"摘要"}],
+    al.map(a=>({go:a.ct?`ct/${a.vmid}/${a.ct}`:`vm/${a.vmid}`,c:[st(a.sev==="critical"?60:40,a.sev==="critical"?"严重":"警告"),esc(a.obj),esc(a.name),a.since,esc(a.summary)]})),{empty:"当前没有告警"}),{tag:"点行进入对象详情"});
+  const mon=[];
+  VMS.filter(v=>upOf(v)===0).forEach(v=>mon.push({go:"vm/"+v.id,c:["虚拟机",vmLabel(v),st(50,"node_exporter 采集失败"),"6 分钟"]}));
+  dh.filter(h=>dockerState(h)!==10).forEach(h=>mon.push({go:"docker",c:["Docker",vmLabel(VM[h]),st(dockerState(h),dockerState(h)===30?`数据陈旧 ${Math.round(dockerAge(h)/60)} 分钟`:"Docker 采集失败"),"—"]}));
+  html+=P(14,10,6,"监控链路异常",table([{t:"层级"},{t:"对象"},{t:"问题"},{t:"持续"}],mon,{empty:`<span style="color:var(--ok)">● 监控链路正常</span><br><span class="na">只列异常行</span>`}),{tag:"监控本身是否可信"});
+  html+=Row("节点落点（PVE 节点 → 虚拟机）");
+  NODES.forEach((n,i)=>{const vs=VMS.filter(v=>v.node===n);
+    html+=`<section class="p" style="grid-column:${i*4+1}/span 4"><div class="b" style="padding:8px"><div class="node" data-go="pve"><h4><span>${n}</span><span class="na">${vs.length} VM</span></h4><div class="chips">${
+      vs.map(v=>{const s=vmState(v);const c=!v.deep&&s===10?13:s;return `<div class="vchip c${c}" data-go="vm/${v.id}" title="${esc(vmLabel(v))}"><span>${v.id} ${esc(v.name)}</span><em>${c===13?"未接入":c===10?"":ST_TXT[s]}</em></div>`}).join("")}</div></div></div></section>`});
+  html+=Row("资源最紧张（当前值，即时查询）");
+  const deepVms=VMS.filter(v=>v.deep);
+  html+=P(0,8,7,"CPU Top 8",bars(deepVms.slice().sort((a,b)=>b.cpu-a.cpu).slice(0,8).map(v=>({n:vmLabel(v),v:v.cpu,go:"vm/"+v.id}))));
+  html+=P(8,8,7,"内存 Top 8",bars(deepVms.slice().sort((a,b)=>b.mem-a.mem).slice(0,8).map(v=>({n:vmLabel(v),v:v.mem,go:"vm/"+v.id})),.85,.95));
+  const fsAll=deepVms.flatMap(v=>v.fs.filter(f=>f.m!=="/boot").map(f=>({n:`${v.id} ${v.name} ${f.m}`,v:f.u,go:"vm/"+v.id})));
+  html+=P(16,8,7,"文件系统 Top 8",bars(fsAll.sort((a,b)=>b.v-a.v).slice(0,8)));
+  html+=P(0,24,3,"状态图例（所有页面共用）",legend());
+  $("#main").innerHTML=html+`</div>`;
+}
+
+// ================= ② PVE =================
+function pPve(){
+  setHead("PVE 集群","宿主机健康、容量、虚拟机落点",sel("node","节点",[["All","All"],...NODES.map(n=>[n,n])],STATE.node));
+  const nodes=STATE.node==="All"?NODES:[STATE.node];
+  let html=`<div class="grid"><div class="banner">节点级 CPU / 内存 / 存储指标还没核实（需确认 <code>pve_*{id=~"node/.*"}</code> 是否存在）。核实前这一排显示“待核实”，不画假数据。</div>`;
+  NODES.forEach((n,i)=>{const vs=VMS.filter(v=>v.node===n);
+    html+=`<section class="p stat" style="grid-column:${i*4+1}/span 4;${STATE.node!=="All"&&STATE.node!==n?"opacity:.45":""}" data-go=""><h3>${n}</h3><div class="b"><div class="kv"><span>在线</span><span class="na">待核实</span><span>CPU</span><span class="na">待核实</span><span>内存</span><span class="na">待核实</span><span>VM</span><span>${vs.length} 台（${vs.filter(pveUp).length} 运行）</span></div></div></section>`});
+  const rows=VMS.filter(v=>nodes.includes(v.node)).sort((a,b)=>a.node.localeCompare(b.node)||a.id-b.id).map(v=>{const ct=DOCKER_HOSTS[v.id];
+    return {go:"vm/"+v.id,c:[v.node,`<b>${v.id}</b> ${esc(v.name)}`,pveUp(v)?st(10,"运行中"):st(20),`${v.cores}`,iec(v.memG*2**30),pveUp(v)?gauge(v.pveCpu):NA("—"),pveUp(v)?gauge(v.pveMem,.85,.95):NA("—"),st(deepState(v),deepState(v)===10?"在线":undefined),ct===undefined?NA("未采集"):ct===0?NA("0/0"):`${hostCts(v.id).filter(c=>c.running).length}/${ct}`]}});
+  html+=P(0,16,13,`虚拟机落点（${rows.length} 台）`,table([{t:"节点"},{t:"VM"},{t:"PVE 状态"},{t:"vCPU",num:1},{t:"内存分配",num:1},{t:"CPU(PVE)"},{t:"内存(PVE)"},{t:"深度采集"},{t:"容器"}],rows),{tag:"点行进入虚拟机详情"});
+  const alloc=NODES.map(n=>({n,g:VMS.filter(v=>v.node===n).reduce((s,v)=>s+v.memG,0)}));const mx=Math.max(...alloc.map(a=>a.g));
+  html+=P(16,8,13,"各节点已分配给 VM 的内存",bars(alloc.map(a=>({n:a.n,p:a.g/mx,v:0,lvl:"",txt:a.g+" GiB",go:""})))+`<p class="note" style="margin-top:12px">分子（VM 内存分配之和）已验证可用；分母（节点物理内存）待核实，核实后改成“分配率”并加阈值色。</p>`);
+  html+=Row("▾ 数据口径与去重校验");
+  html+=stat(0,8,"原始 VM 序列数","126","6 个抓取目标 × 21（重复返回）","","");
+  html+=stat(8,8,"按 id 去重后","21","应等于 21；不等说明迁移中或去重失败","","");
+  html+=stat(16,8,"PVE 抓取目标","6","每个目标都返回整个集群","","");
+  $("#main").innerHTML=html+`</div>`;
+}
+
+// ================= ③ 虚拟机清单 =================
+function pVms(){
+  setHead("虚拟机","21 台，一台一行",sel("group","分组",[["All","All"],["legacy","legacy（老网管）"],["platform","platform"]],STATE.group)+`<span class="note">表格本身就是选择器：点行进入详情</span>`);
+  const list=VMS.filter(v=>STATE.group==="All"||v.group===STATE.group);
+  const deep=VMS.filter(v=>v.deep),up=deep.filter(v=>upOf(v)===1).length,fail=deep.length-up;
+  const withAl=new Set(alerts().map(a=>a.vmid)).size;
+  let html=`<div class="grid">`;
+  html+=stat(0,5,"PVE 运行",`${VMS.filter(pveUp).length}<span class="na">/21</span>`,"","","");
+  html+=stat(5,5,"深度采集在线",`${up}<span class="na">/17</span>`,"","","");
+  html+=stat(10,5,"采集失败",fail?`<span style="color:var(--stale)">${fail}</span>`:NA("0"),"已接入但抓不到",fail?"bg-fail":"","");
+  html+=stat(15,4,"未接入",NA("4"),"102 · 109 · 110 · 112","","");
+  html+=stat(19,5,"有告警的 VM",withAl?`<span style="color:var(--warn)">${withAl}</span>`:NA("0"),"","","");
+  const rows=list.map(v=>{const s=vmState(v),ds=deepState(v),ok=ds===10,ct=DOCKER_HOSTS[v.id];
+    const worst=v.fs.reduce((a,f)=>f.u>a.u?f:a);const ino=Math.max(...v.fs.map(f=>f.ino));
+    const nd=ds===13?NA("未接入"):ds===50?NA("—"):null;
+    return {sev:s,id:v.id,go:"vm/"+v.id,c:[st(s,s===10?"正常":undefined),`<b>${v.id}</b> ${esc(v.name)}`,v.ip,`<a data-go="pve">${v.node}</a>`,st(ds,ok?"在线":undefined),
+      pveUp(v)?gauge(v.pveCpu):NA("—"),pveUp(v)?gauge(v.pveMem,.85,.95):NA("—"),nd||`<div style="display:flex;gap:6px;align-items:center"><span style="min-width:40px">${worst.m}</span>${gauge(worst.u)}</div>`,nd||`<span style="color:${ino>=.8?"var(--warn)":"inherit"}">${pct(ino)}</span>`,
+      nd||`${bits(v.rx)} / ${bits(v.tx)}`,nd||bytesps(v.dw),ct===undefined?NA("未采集"):ct===0?NA("无容器"):`${hostCts(v.id).filter(c=>c.running).length}/${ct}`]}}).sort((a,b)=>b.sev-a.sev||a.id-b.id);
+  html+=P(0,24,16,"虚拟机清单",table([{t:"状态"},{t:"VM"},{t:"IP"},{t:"节点"},{t:"深度采集"},{t:"CPU(PVE)"},{t:"内存(PVE)"},{t:"最满分区"},{t:"inode 最高",num:1},{t:"网络 入/出"},{t:"磁盘写"},{t:"容器 运行/总"}],rows),{tag:"默认按状态严重度排序 · CPU/内存统一用 PVE 口径，21 台都有值"});
+  const dv=list.filter(v=>v.deep&&upOf(v)===1);
+  html+=P(0,8,8,"文件系统使用率 Top 10",bars(dv.flatMap(v=>v.fs.filter(f=>f.m!=="/boot").map(f=>({n:`${v.id} ${v.name} ${f.m}`,v:f.u,go:"vm/"+v.id}))).sort((a,b)=>b.v-a.v).slice(0,10)),{tag:"系统口径"});
+  html+=P(8,8,8,"内存 Top 10",bars(dv.slice().sort((a,b)=>b.mem-a.mem).slice(0,10).map(v=>({n:vmLabel(v),v:v.mem,go:"vm/"+v.id})),.85,.95),{tag:"系统口径"});
+  html+=P(16,8,8,"CPU Top 10",bars(dv.slice().sort((a,b)=>b.cpu-a.cpu).slice(0,10).map(v=>({n:vmLabel(v),v:v.cpu,go:"vm/"+v.id}))),{tag:"系统口径"});
+  const lanes=list.filter(v=>v.deep).map(v=>{const segs=[];for(let i=0;i<36;i++){let c="var(--norm-tl)";if(DEMO&&v.id===121&&i>=34)c="var(--fail-bg)";if(v.id===107&&(i===12))c="var(--fail-bg)";segs.push(`<div style="flex:1;background:${c}" title="${c.includes("fail")?"采集失败":"正常"}"></div>`)}return `<span>${vmLabel(v)}</span><div class="lane">${segs.join("")}</div>`});
+  html+=P(0,24,9,"采集在线历史（node_exporter up）",`<div class="tl">${lanes.join("")}</div>`,{tag:"一格 = 10 分钟；用来发现抖动"});
+  $("#main").innerHTML=html+`</div>`;
+}
+
+// ================= ④ 容器 =================
+function pDocker(){
+  const hosts=Object.keys(DOCKER_HOSTS).map(Number);
+  setHead("容器","10 台 Docker 主机 / 50 个容器",sel("dhost","Docker 主机",[["All","All"],...hosts.map(h=>[h,vmLabel(VM[h])])],STATE.dhost)+`<span class="note">选项只来自 Docker 采集指标，不含非 Docker 主机</span>`);
+  let html=`<div class="grid">`;
+  const hrows=hosts.map(h=>{const cs=hostCts(h),ds=dockerState(h),run=cs.filter(c=>c.running).length;
+    return {go:"",h,c:[`<a data-go="vm/${h}">${h} ${esc(VM[h].name)}</a>`,st(ds),`${dockerAge(h)} 秒前`,cs.length?`${run}/${cs.length}`:NA("无容器"),cs.length-run?`<span style="color:var(--stop)">${cs.length-run}</span>`:NA("0"),
+      NA("0"),cs.some(c=>c.oom)?`<span class="oom">${cs.filter(c=>c.oom).length}</span>`:NA("0"),NET_UNSUPPORTED.has(h)?NAi("不支持"):"支持",cs.length?iec(cs.reduce((s,c)=>s+(c.running?c.memB:0),0)):NA("—")]}});
+  html+=P(0,24,10,"Docker 主机汇总",table([{t:"主机"},{t:"采集"},{t:"最近采集",num:1},{t:"容器 运行/总"},{t:"非运行",num:1},{t:"unhealthy",num:1},{t:"曾OOM",num:1},{t:"逐容器网络"},{t:"内存合计",num:1}],hrows.map(r=>({...r,go:"",c:r.c}))),{tag:"空主机（119）采集正常 ≠ 故障"});
+  const list=CTS.filter(c=>STATE.dhost==="All"||c.host==STATE.dhost).sort((a,b)=>ctSev(b)-ctSev(a)||a.host-b.host||a.name.localeCompare(b.name));
+  const crow=c=>{const s=ctState(c),stale=s===30||s===50,run=c.running;
+    const health=c.health==="none"?st(11):c.health==="healthy"?st(10,"healthy"):st(60,c.health);
+    const v=(x)=>stale||!run?NA("—"):x;
+    return {go:`ct/${c.host}/${encodeURIComponent(c.name)}`,c:[`${c.host} ${esc(VM[c.host].name)}`,`<b>${esc(c.name)}</b>`,st(s,s===10?"运行中":undefined),health,
+      `${c.restartsWin?`<span style="color:var(--warn)">+${c.restartsWin}</span>`:NA("0")} / ${c.restarts}`,v(pct(c.cpu)),v(iec(c.memB)+(c.limitB?` <span class="na">/ ${iec(c.limitB)}</span>`:"")),v(c.pids),
+      NET_UNSUPPORTED.has(c.host)?NAi("不支持"):v(`${bits(c.rx)} / ${bits(c.tx)}`),v(bytesps(c.bio)),c.oom?`<span class="oom">曾OOM</span>`:"",`${dockerAge(c.host)}s`]}};
+  html+=P(0,24,18,`容器清单（${list.length}）`,table([{t:"主机"},{t:"容器"},{t:"状态"},{t:"健康检查"},{t:"重启 窗口内/累计"},{t:"CPU",num:1},{t:"内存 / 限制"},{t:"PIDs",num:1},{t:"网络 入/出"},{t:"块 IO"},{t:"OOM"},{t:"新鲜度",num:1}],list.map(crow)),{tag:"异常置顶 · 点行进入容器详情"});
+  const run=list.filter(c=>c.running&&ctState(c)===10);const mm=Math.max(...run.map(c=>c.memB));
+  html+=P(0,12,8,"内存 Top 10",bars(run.slice().sort((a,b)=>b.memB-a.memB).slice(0,10).map(c=>({n:`${c.name} @ ${c.host}`,p:c.memB/mm,v:0,lvl:"",txt:iec(c.memB),go:`ct/${c.host}/${encodeURIComponent(c.name)}`}))));
+  html+=P(12,12,8,"CPU Top 10",bars(run.slice().sort((a,b)=>b.cpu-a.cpu).slice(0,10).map(c=>({n:`${c.name} @ ${c.host}`,v:c.cpu,go:`ct/${c.host}/${encodeURIComponent(c.name)}`}))));
+  $("#main").innerHTML=html+`</div>`;
+  // host summary row click filters
+  document.querySelectorAll("#main table")[0].querySelectorAll("tbody tr").forEach((tr,i)=>{tr.classList.add("click");tr.onclick=e=>{if(e.target.closest("a"))return;STATE.dhost=String(hosts[i]);route()}});
+}
+
+// ================= ⑤ 虚拟机详情 =================
+function pVm(id){
+  const v=VM[id]||VM[114];
+  setHead("虚拟机详情",`${v.id} ${v.name}`,sel("vmid","虚拟机",VMS.map(x=>[x.id,`${x.id} · ${x.name}`]),v.id)+`<span class="note">单选，无 All</span>`,"最近 24 小时 · 刷新 30s");
+  const ds=deepState(v),ok=ds===10,s=v.id*13;const al=alerts().filter(a=>a.vmid===v.id);
+  let html=`<div class="grid">`;
+  html+=stat(0,3,"PVE 状态",pveUp(v)?st(10,"运行中"):st(20),"","","");
+  html+=stat(3,3,"所在节点",`<a data-go="pve">${v.node}</a>`,"点击查看节点","","pve");
+  html+=stat(6,4,"深度采集",st(ds,ok?"在线":undefined),ds===13?"本机只有 PVE 基础指标":ds===50?"已接入但抓取失败":"node_exporter",ds===50?"bg-fail":"","");
+  html+=stat(10,3,"运行时长",ok?v.uptimeD+" 天":NA("—"),"","","");
+  html+=stat(13,3,"CPU / 内存",`${v.cores}C / ${v.memG}G`,"PVE 分配","","");
+  html+=stat(16,2,"告警",al.length?`<span style="color:var(--warn)">${al.length}</span>`:NA("0"),"","","");
+  html+=P(18,6,3.2,"",`<div class="kv"><span>用途</span><span>${esc(v.name)}</span><span>IP</span><span>${v.ip}</span><span>分组</span><span>${v.group}</span></div>`);
+  if(ds===13) html+=`<div class="banner">这台 VM <b>未接入</b>系统深度采集（不是离线）。下面的资源、存储、网络、服务面板没有数据属于正常，请看最下方的“PVE 视角”。</div>`;
+  if(ds===50) html+=`<div class="banner" style="border-color:var(--stale)">深度采集<b>采集失败</b>：曲线停在最后一次成功采集的位置，右端空白是因为采集中断，不代表资源为 0。</div>`;
+  const E=t=>`<div class="empty">${t}</div>`;const noD=ds===13?"无数据（本机未接入，见上方）":null;
+  const cut=a=>ds===50?a.map((x,i)=>i>66?NaN:x):a;
+  html+=Row("▾ 资源");
+  html+=P(0,8,8,"CPU（按 mode 堆叠）",noD?E(noD):chart({stack:1,max:1,fmt:pct,series:[{name:"user",data:cut(series(v.cpu*.6,.08,72,s))},{name:"system",data:cut(series(v.cpu*.25,.04,72,s+1))},{name:"iowait",data:cut(series(v.cpu*.1,.03,72,s+2))}]}));
+  html+=P(8,8,8,"内存",noD?E(noD):chart({stack:1,fmt:x=>x.toFixed(1)+" GiB",max:v.memG,series:[{name:"已用",data:cut(series(v.memG*v.mem*.8,.6,72,s+3))},{name:"缓存",data:cut(series(v.memG*.15,.3,72,s+4))}],ref:v.memG,refName:"总量"}));
+  html+=P(16,8,8,"负载 vs 核数",noD?E(noD):chart({fmt:x=>x.toFixed(1),series:[{name:"load5",data:cut(series(v.cores*v.cpu,.6,72,s+5))}],ref:v.cores,refName:`${v.cores} 核`}));
+  html+=Row("▾ 存储");
+  html+=P(0,12,8,"文件系统",noD?E(noD):table([{t:"挂载点"},{t:"大小",num:1},{t:"使用率"},{t:"inode"},{t:"预计写满",num:1}],v.fs.map(f=>({c:[f.m,f.size+" GiB",gauge(f.u),gauge(f.ino),f.u>.8?"约 19 天":NA("—")]}))));
+  html+=P(12,12,8,"磁盘 IO",noD?E(noD):chart({fmt:x=>bytesps(x),series:[{name:"sda 读",data:cut(series(v.dw*.4,4e6,72,s+6))},{name:"sda 写",data:cut(series(v.dw,6e6,72,s+7))}]}));
+  html+=Row("▾ 网络");
+  html+=P(0,12,7,"收 / 发（排除 lo、veth、docker、br-）",noD?E(noD):chart({fmt:bits,series:[{name:"ens18 收",data:cut(series(v.rx,1e7,72,s+8))},{name:"ens18 发",data:cut(series(v.tx,5e6,72,s+9))}]}));
+  html+=P(12,12,7,"错误 / 丢包",noD?E(noD):chart({fmt:x=>x.toFixed(1)+"/s",series:[{name:"rx drop",data:cut(series(.2,.3,72,s+10))},{name:"tx err",data:cut(series(.05,.1,72,s+11))}]}));
+  html+=Row("▾ 服务（只覆盖已配置的 systemd 单元）");
+  const units=v.id===114?[["prometheus.service",10],["grafana-server.service",10],["alertmanager.service",10],["node_exporter.service",10]]:v.id===117?[["named.service",10],["node_exporter.service",10]]:ok?[["node_exporter.service",10]]:[];
+  html+=P(0,24,4,"",noD?E(noD):table([{t:"单元"},{t:"状态"}],units.map(u=>({c:[u[0],st(u[1],"active")]})),{empty:"本机未配置服务监控（不代表服务正常或异常）"}));
+  html+=Row("▾ 本机容器");
+  const isD=DOCKER_HOSTS[v.id]!==undefined;const cs=hostCts(v.id);const dsx=isD?dockerState(v.id):null;
+  html+=stat(0,6,"Docker 采集",isD?st(dsx):NA("非 Docker 主机"),isD?(cs.length?`${cs.filter(c=>c.running).length}/${cs.length} 运行`:"采集正常，当前无容器"):"本机未部署 Docker 采集",dsx===30?"bg-stale":dsx===50?"bg-fail":"","");
+  html+=P(6,18,8,"容器",!isD?E("本机未部署 Docker 采集"):table([{t:"容器"},{t:"状态"},{t:"健康"},{t:"CPU",num:1},{t:"内存",num:1},{t:"重启",num:1},{t:"OOM"}],cs.map(c=>({go:`ct/${c.host}/${encodeURIComponent(c.name)}`,c:[`<b>${esc(c.name)}</b>`,st(ctState(c),ctState(c)===10?"运行中":undefined),c.health==="none"?st(11):st(10,"healthy"),c.running?pct(c.cpu):NA("—"),c.running?iec(c.memB):NA("—"),c.restarts,c.oom?`<span class="oom">曾OOM</span>`:""]})),{empty:"采集正常，当前没有容器"}),{tag:"点行进入容器详情"});
+  html+=Row("▾ PVE 视角（未接入的 VM 只有这部分数据）");
+  html+=P(0,12,7,"CPU（PVE）",chart({max:1,fmt:pct,series:[{name:"CPU",data:series(v.pveCpu,.06,72,s+12)}]}));
+  html+=P(12,12,7,"内存（PVE）",chart({fmt:x=>x.toFixed(1)+" GiB",series:[{name:"已用",data:series(v.memG*v.pveMem,.5,72,s+13)}],ref:v.memG,refName:"分配"}));
+  $("#main").innerHTML=html+`</div>`;
+}
+
+// ================= ⑥ 容器详情 =================
+function pCt(h,name){
+  const hosts=Object.keys(DOCKER_HOSTS).filter(x=>DOCKER_HOSTS[x]>0).map(Number);
+  if(!DOCKER_HOSTS[h]) h=101;
+  const cs=hostCts(h);const c=cs.find(x=>x.name===name)||cs[0];
+  setHead("容器详情",`${c.name} @ ${h} ${VM[h].name}`,sel("cthost","Docker 主机",hosts.map(x=>[x,vmLabel(VM[x])]),h)+`<div class="var"><label>容器</label><select data-var="ctname" data-host="${h}">${cs.map(x=>`<option ${x===c?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>`,"最近 24 小时 · 刷新 30s");
+  const s=ctState(c),seedv=h*97+c.name.length*13;
+  let html=`<div class="grid">`;
+  html+=stat(0,4,"状态",st(s,s===10?"运行中":undefined),"","","");
+  html+=stat(4,4,"健康检查",c.health==="none"?st(11):st(10,"healthy"),c.health==="none"?"没有配置 HEALTHCHECK，不代表健康":"","","");
+  html+=stat(8,4,"重启",`${c.restarts}`,c.restartsWin?`<span style="color:var(--warn)">窗口内 +${c.restartsWin}</span>`:"窗口内 0","","");
+  html+=stat(12,4,"OOM",c.oom?`<span class="oom" style="font-size:20px">曾OOM</span>`:NA("无记录"),c.oom?"历史标记，不是正在发生":"","","");
+  html+=stat(16,4,"数据新鲜度",`${dockerAge(h)}s`,dockerState(h)===30?"超过阈值：数据陈旧":"textfile 年龄",dockerState(h)===30?"bg-stale":"","");
+  html+=stat(20,4,"所在 VM",`<a data-go="vm/${h}" style="font-size:18px">${h} ${esc(VM[h].name)}</a>`,"点击进入虚拟机详情","",`vm/${h}`);
+  const segs=[];for(let i=0;i<48;i++){const on=c.running||i<20;segs.push(`<div style="flex:1;background:${on?"var(--norm-tl)":"var(--stop-bg)"}" title="${on?"运行中":"已停止"}"></div>`)}
+  html+=P(0,24,3,"运行状态时间线",`<div class="tl"><span>${esc(c.name)}</span><div class="lane">${segs.join("")}</div></div>`);
+  if(!c.running){html+=`<div class="banner">容器当前<b>已停止</b>（exited）。下方曲线只有停止前的数据。是否属于异常需要人工判断：当前没有“应运行清单”。</div>`}
+  const cut=a=>c.running?a:a.map((x,i)=>i>28?NaN:x);
+  html+=P(0,12,8,"CPU",chart({fmt:pct,series:[{name:"CPU",data:cut(series(c.cpu,.05,72,seedv))}]}));
+  html+=P(12,12,8,"内存",chart({fmt:x=>iec(x),series:[{name:"使用",data:cut(series(c.memB,c.memB*.08,72,seedv+1))}],...(c.limitB?{ref:c.limitB,refName:"限制 "+iec(c.limitB)}:{})})+(c.limitB?"":`<div class="note">未采集到内存限制，只显示绝对值</div>`));
+  html+=P(0,12,8,"网络 收 / 发",NET_UNSUPPORTED.has(h)?`<div class="empty i">该主机（老网管）不支持逐容器网络采集<br>显示“不支持”，不是 0 流量</div>`:chart({fmt:bits,series:[{name:"收",data:cut(series(c.rx,1e6,72,seedv+2))},{name:"发",data:cut(series(c.tx,6e5,72,seedv+3))}]}));
+  html+=P(12,12,8,"块 IO 读 / 写",chart({fmt:bytesps,series:[{name:"读",data:cut(series(c.bio*.3,4e5,72,seedv+4))},{name:"写",data:cut(series(c.bio,8e5,72,seedv+5))}]}));
+  html+=P(0,12,6,"PIDs",chart({fmt:x=>Math.round(x),series:[{name:"PIDs",data:cut(series(c.pids,2,72,seedv+6))}]}));
+  html+=P(12,12,6,"累计重启次数",chart({fmt:x=>Math.round(x),max:Math.max(3,c.restarts+1),series:[{name:"重启",data:Array.from({length:72},(_,i)=>i<60||!c.restartsWin?c.restarts-c.restartsWin:c.restarts)}]}));
+  $("#main").innerHTML=html+`</div>`;
+}
+
+route();
+</script>
+</body>
+</html>
