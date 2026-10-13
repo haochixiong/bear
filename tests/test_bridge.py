@@ -263,3 +263,50 @@ def test_reference_plan_has_curve_and_acr_params():
     from colordoctor.core import acr_preset as ap
 
     assert "ToneCurvePV2012" in ap.build_xmp("t", res["acr_params"])
+
+
+def test_mask_bytes_full_document_placement():
+    img = dirty_sky()
+    rgba = np.dstack([img, np.full(img.shape[:2], 255, np.uint8)])
+    sessions = bs.Store()
+    res = bs.analyze_request(rgba, "dirty", {}, sessions, bs.Store(), doc_size=(300, 200))
+    sess = sessions.get(res["session"])
+    data, w, h = bs.mask_bytes(sess, "opposite", 300, 200, place=(50, 40, 500, 400))
+    m = np.frombuffer(data, np.uint8).reshape(400, 500)
+    assert (w, h) == (500, 400)
+    assert m[:40].max() == 0 and m[:, :50].max() == 0 and m[240:].max() == 0  # 图层范围外为 0
+    assert m[40:240, 50:350].max() == 255
+    with pytest.raises(ValueError):
+        bs.mask_bytes(sess, "opposite", -5, 10)
+    with pytest.raises(ValueError):
+        bs.mask_bytes(sess, "opposite", 60000, 60000)
+
+
+def test_http_rejects_bad_host_and_bad_sizes(bridge):
+    port = bridge.rsplit(":", 1)[1]
+    code, _, _ = _req(bridge + "/health", headers={"Host": f"evil.example:{port}"})
+    assert code == 403
+    hdr = {"X-Width": "-5", "X-Height": "10", "X-Components": "3"}
+    code, _, body = _req(bridge + "/analyze?mode=dirty", b"", hdr)
+    assert code == 400
+    code, _, body = _req(bridge + "/acr-preset", b"[]", {"Content-Type": "application/json"})
+    assert code == 400 and "JSON" in json.loads(body)["error"]
+    code, _, body = _req(bridge + "/calibration/fit", b"{}")
+    assert code == 400
+
+
+def test_http_internal_errors_return_500(bridge, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(bs, "analyze_request", boom)
+    img = dirty_sky(20, 20)
+    hdr = {"X-Width": "20", "X-Height": "20", "X-Components": "3"}
+    code, _, body = _req(bridge + "/analyze?mode=dirty", img.tobytes(), hdr)
+    assert code == 500 and "RuntimeError" in json.loads(body)["error"]
+
+
+def test_calibration_rejects_wrong_size_and_empty_fit(bridge):
+    hdr = {"X-Width": "10", "X-Height": "10", "X-Components": "3"}
+    code, _, body = _req(bridge + "/calibration/sample?slider=base", bytes(300), hdr)
+    assert code == 400 and "色卡尺寸" in json.loads(body)["error"]

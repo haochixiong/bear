@@ -64,9 +64,20 @@ async function uploadReference(px) {
   return (await res.json()).ref;
 }
 
-async function fetchMask(session, layerId, width, height) {
-  const res = await call(`/mask?session=${session}&layer=${encodeURIComponent(layerId)}&w=${width}&h=${height}`);
-  return new Uint8Array(await res.arrayBuffer());
+// 返回整幅文档大小的蒙版：分析范围（bounds）以外为 0，写到文档 (0, 0) 即可
+async function fetchMask(session, layerId, bounds, docWidth, docHeight) {
+  const w = bounds.right - bounds.left;
+  const h = bounds.bottom - bounds.top;
+  const qs = new URLSearchParams({
+    session, layer: layerId, w: String(w), h: String(h),
+    left: String(bounds.left), top: String(bounds.top), doc_w: String(docWidth), doc_h: String(docHeight),
+  }).toString();
+  const res = await call(`/mask?${qs}`);
+  return { data: new Uint8Array(await res.arrayBuffer()), width: Number(res.headers.get("X-Width")), height: Number(res.headers.get("X-Height")) };
+}
+
+async function options() {
+  return (await call("/options")).json();
 }
 
 async function acrPreset(name, params) {
@@ -108,6 +119,6 @@ async function calibrationFit(acrVersion) {
 }
 
 module.exports = {
-  BridgeError, health, analyze, uploadReference, fetchMask, acrPreset,
+  BridgeError, health, options, analyze, uploadReference, fetchMask, acrPreset,
   calibrationChart, calibrationPlan, calibrationSample, calibrationFit,
 };

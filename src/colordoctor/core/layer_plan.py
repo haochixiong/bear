@@ -94,22 +94,14 @@ def feather(mask: np.ndarray, radius: int) -> np.ndarray:
 
 
 def resize_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray:
-    """双线性缩放 uint8 蒙版到文档尺寸（插件按文档像素写入图层蒙版）。"""
+    """双线性缩放 uint8 蒙版到文档尺寸（插件按文档像素写入图层蒙版）。用 Pillow，几十 MP 也只需零点几秒。"""
+    from PIL import Image
+
     h0, w0 = mask.shape
     if (w0, h0) == (width, height):
         return mask
-    ys = (np.arange(height) + 0.5) * h0 / height - 0.5
-    xs = (np.arange(width) + 0.5) * w0 / width - 0.5
-    y0 = np.clip(np.floor(ys).astype(int), 0, h0 - 1)
-    x0 = np.clip(np.floor(xs).astype(int), 0, w0 - 1)
-    y1 = np.clip(y0 + 1, 0, h0 - 1)
-    x1 = np.clip(x0 + 1, 0, w0 - 1)
-    wy = np.clip(ys - y0, 0, 1)[:, None]
-    wx = np.clip(xs - x0, 0, 1)[None, :]
-    m = mask.astype(np.float32)
-    top = m[y0][:, x0] * (1 - wx) + m[y0][:, x1] * wx
-    bot = m[y1][:, x0] * (1 - wx) + m[y1][:, x1] * wx
-    return np.clip(np.rint(top * (1 - wy) + bot * wy), 0, 255).astype(np.uint8)
+    img = Image.fromarray(np.ascontiguousarray(mask, dtype=np.uint8), mode="L")
+    return np.asarray(img.resize((int(width), int(height)), Image.BILINEAR))
 
 
 def _feather_radius(shape) -> int:

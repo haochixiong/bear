@@ -78,3 +78,14 @@ def test_json_has_no_pixel_arrays():
     r = an.analyze_skin_region(face_scene()[0], synthetic_context())
     text = rj.report_to_json(r)
     assert "valid_mask" not in text and len(text) < 300_000
+
+
+def test_help_and_version_go_to_cli(capsys):
+    import pytest
+
+    from colordoctor import app
+
+    with pytest.raises(SystemExit) as e:
+        app.main(["colordoctor", "--version"])
+    assert e.value.code == 0
+    assert "ColorDoctor" in capsys.readouterr().out

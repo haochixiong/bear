@@ -303,3 +303,38 @@ def test_overlay_radius_keys(qtbot):
     qtbot.keyClick(v, Qt.Key.Key_BracketLeft)
     assert got == [5, 15, 5]
     s.close()
+
+
+def test_preset_change_in_other_mode_keeps_skin_result(win, qtbot):
+    win.set_mode("skin")
+    win._run_rect(skin_region(), (0, 0, 120, 120), CTX, "test", 0)
+    qtbot.waitUntil(lambda: len(win.session.history) == 1, timeout=10000)
+    win.set_mode("dirty")
+    win.preset_box.setCurrentIndex(win.preset_box.findData("japanese"))
+    qtbot.wait(1500)
+    modes = [h.result.mode for h in win.session.history if isinstance(h.result, AnalysisReport)]
+    assert modes == ["skin"], modes
+
+
+def test_reference_image_can_be_reset_and_is_cleared_with_history(win, qtbot):
+    win.set_mode("reference")
+    win._run_rect(noisy(flat(BLUE), 2), (0, 0, 160, 120), CTX, "t", 0)
+    qtbot.waitUntil(lambda: win.ref_image_item is not None, timeout=20000)
+    assert win.ref_row.isVisibleTo(win)
+    win.reset_reference_image()
+    assert win.ref_image_item is None
+    win._run_rect(noisy(flat(BLUE), 2), (0, 0, 160, 120), CTX, "t", 0)
+    qtbot.waitUntil(lambda: win.ref_image_item is not None, timeout=20000)
+    win._history_clear()
+    assert win.ref_image_item is None
+
+
+def test_overlay_closed_by_system_cancels_session(qapp, qtbot):
+    from colordoctor.ui.capture_overlay import CaptureSession
+
+    cap = ScreenCapture(ScreenInfo("s", 0, 0, 200, 100, 1.0), np.zeros((100, 200, 3), np.uint8), None)
+    sess = CaptureSession([cap], ["选区"])
+    got = []
+    sess.cancelled.connect(lambda: got.append(1))
+    sess.overlays[0].close()  # 模拟 Alt+F4
+    assert got == [1] and sess.overlays == []

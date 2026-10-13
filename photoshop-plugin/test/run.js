@@ -92,9 +92,9 @@ function dirtySky(w, h) {
     for (const spec of res.plan.layers) {
       const id = await ps.makeAdjustmentLayer(spec);
       if (spec.has_mask) {
-        const bytes = await bridge.fetchMask(res.session, spec.id, 300, 200);
-        assert.strictEqual(bytes.length, 300 * 200);
-        await ps.putMask(d.id, id, bytes, 300, 200, { left: 0, top: 0 });
+        const m = await bridge.fetchMask(res.session, spec.id, { left: 0, top: 0, right: 300, bottom: 200 }, 300, 200);
+        assert.strictEqual(m.data.length, 300 * 200);
+        await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 });
       }
       made.push(id);
     }
@@ -122,6 +122,14 @@ function dirtySky(w, h) {
   assert.ok(Math.abs(patch.values.lab[0] - 68.3) < 1.5, JSON.stringify(patch.values.lab));
   const xmp = await bridge.acrPreset("测试", { hsl: { 绿色: { hue: 60 } } });
   assert.ok(xmp.includes('crs:HueAdjustmentGreen="+60"'));
+  // 5b. batchPlay 返回 error 时不能把原图层改名
+  const realBp = fakePs.action.batchPlay;
+  fakePs.action.batchPlay = async () => [{ _obj: "error", message: "not available" }];
+  doc.activeLayers = [{ id: 7, name: "背景", kind: "pixel" }];
+  await assert.rejects(ps.makeAdjustmentLayer(res.plan.layers[0]), /失败/);
+  assert.strictEqual(doc.activeLayers[0].name, "背景");
+  fakePs.action.batchPlay = realBp;
+
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
   fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };

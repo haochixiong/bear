@@ -12,7 +12,8 @@
        头：X-Width X-Height X-Components(3|4) [X-Doc-Width X-Doc-Height X-Layer-Kind X-Layer-Name]
        体：width*height*components 字节（行优先、交错 RGB(A)）
   POST /reference   同上的像素格式，存为参考图，返回 {"ref": id}
-  GET  /mask?session=&layer=[&w=&h=]  ->  w*h 字节灰度（255 = 作用）
+  GET  /mask?session=&layer=[&w=&h=][&left=&top=&doc_w=&doc_h=]  ->  灰度字节（255 = 作用）；
+       给出 doc_w/doc_h 时返回整幅文档大小，图层范围以外为 0
   POST /acr-preset  体：{"name":..., "params": {...}} -> .xmp 文本
   GET  /calibration/chart  色卡像素（RGB）；GET /calibration/plan 要测的 (通道, 滑块, 数值) 列表
   POST /calibration/sample?slider=base | ?channel=&slider=&value=  上传色卡像素（未调整 / 调整后）
@@ -168,7 +169,26 @@ def patch_values(pixels: np.ndarray) -> dict:
             "acr_channels": channels, "purity": purity}
 
 
-def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: int | None = None) -> tuple[bytes, int, int]:
+MAX_SIDE = 30_000  # 单边像素上限（PS 文档最大 300000，但这里只接受常见尺寸，防止内存耗尽）
+MAX_MASK_PIXELS = 300_000_000
+MAX_CAL_SAMPLES = 200
+
+
+def _check_size(w: int, h: int, what: str) -> None:
+    if w <= 0 or h <= 0:
+        raise ValueError(f"{what}尺寸无效：{w}×{h}")
+    if w > MAX_SIDE or h > MAX_SIDE or w * h > MAX_MASK_PIXELS:
+        raise ValueError(f"{what}尺寸太大：{w}×{h}")
+
+
+def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: int | None = None,
+               place: tuple[int, int, int, int] | None = None) -> tuple[bytes, int, int]:
+    """返回 (灰度字节, 宽, 高)。
+
+    width/height：蒙版对应区域（分析时的图层范围）缩放到的尺寸，默认是分析时报告的文档尺寸。
+    place：(left, top, 文档宽, 文档高)。给出时返回整幅文档大小的蒙版，图层范围以外为 0（不作用），
+    插件就能把它写到文档 (0, 0)，不用担心范围外保持白色。
+    """
     ly = sess.plan.get(layer_id)
     h, w = sess.shape
     full = np.full((h, w), 255, np.uint8) if ly.mask is None else np.zeros((h, w), np.uint8)
@@ -176,27 +196,42 @@ def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: i
         ox, oy = sess.offset
         mh, mw = ly.mask.shape
         full[oy:oy + mh, ox:ox + mw] = ly.mask
-    tw, th = width or sess.doc_size[0], height or sess.doc_size[1]
-    out = layer_plan.resize_mask(full, int(tw), int(th))
-    return out.tobytes(), int(tw), int(th)
+    tw = sess.doc_size[0] if width is None else int(width)
+    th = sess.doc_size[1] if height is None else int(height)
+    _check_size(tw, th, "蒙版")
+    out = layer_plan.resize_mask(full, tw, th)
+    if place is None:
+        return out.tobytes(), tw, th
+    left, top, dw, dh = (int(v) for v in place)
+    _check_size(dw, dh, "文档")
+    canvas = np.zeros((dh, dw), np.uint8)
+    x0, y0 = max(0, left), max(0, top)
+    x1, y1 = min(dw, left + tw), min(dh, top + th)
+    if x1 > x0 and y1 > y0:
+        canvas[y0:y1, x0:x1] = out[y0 - top:y1 - top, x0 - left:x1 - left]
+    return canvas.tobytes(), dw, dh
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "ColorDoctorBridge/" + __version__
+    timeout = 60  # 客户端发得太慢 / Content-Length 不实时，不让线程永远卡住
     sessions: Store
     refs: Store
     calibration: dict
+    cal_lock: threading.Lock
 
     def log_message(self, fmt, *args):  # 不在控制台刷屏
         pass
 
     # ---------------------------------------------------------------- 工具
-    def _send(self, code: int, payload, ctype="application/json; charset=utf-8"):
+    def _send(self, code: int, payload, ctype="application/json; charset=utf-8", headers: dict | None = None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in (headers or {}).items():
+            self.send_header(k, str(v))
         self.end_headers()
         self.wfile.write(body)
 
@@ -204,20 +239,55 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin", "")
         if origin.startswith(("http://", "https://")):
             return False
+        # 防 DNS 重绑定：只接受以回环地址访问
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            return False
         return bool(self.headers.get(CLIENT_HEADER))
 
     def _body(self) -> bytes:
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
-            raise ValueError("图像太大")
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError as e:
+            raise ValueError("Content-Length 无效") from e
+        if n < 0 or n > MAX_BODY:
+            raise ValueError("请求体大小无效或图像太大")
         return self.rfile.read(n)
+
+    def _json(self) -> dict:
+        try:
+            req = json.loads(self._body() or b"{}")
+        except json.JSONDecodeError as e:
+            raise ValueError("请求不是有效的 JSON") from e
+        if not isinstance(req, dict):
+            raise ValueError("请求体应为 JSON 对象")
+        return req
 
     def _int(self, name: str, default=None):
         v = self.headers.get(name)
-        return int(v) if v not in (None, "") else default
+        if v in (None, ""):
+            return default
+        try:
+            return int(v)
+        except ValueError as e:
+            raise ValueError(f"{name} 不是整数") from e
 
     def _pixels(self) -> np.ndarray:
-        return decode_pixels(self._body(), self._int("X-Width", 0), self._int("X-Height", 0), self._int("X-Components", 4))
+        w, h = self._int("X-Width", 0), self._int("X-Height", 0)
+        _check_size(w, h, "图像")
+        return decode_pixels(self._body(), w, h, self._int("X-Components", 4))
+
+    def _guarded(self, fn):
+        try:
+            fn()
+        except pixel_guard.BlockedError as e:
+            self._send(422, {"blocked": str(e)})
+        except KeyError as e:
+            self._send(404, {"error": f"找不到：{e.args[0] if e.args else ''}"})
+        except ValueError as e:
+            self._send(400, {"error": str(e)})
+        except Exception as e:  # 分析出错也要回一个响应，插件才能显示真实原因
+            self._send(500, {"error": f"分析服务内部错误：{type(e).__name__}: {e}"})
 
     # ---------------------------------------------------------------- 路由
     def do_OPTIONS(self):  # 浏览器预检：一律拒绝
@@ -226,101 +296,116 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._authorized():
             return self._send(403, {"error": "forbidden"})
-        url = urlparse(self.path)
-        q = {k: v[0] for k, v in parse_qs(url.query).items()}
-        try:
-            if url.path == "/health":
-                return self._send(200, {"ok": True, "version": __version__, "modes": list(MODES)})
-            if url.path == "/options":
-                from colordoctor.core import palette as pl
-                from colordoctor.core import skin_presets as sp
-                from colordoctor.core.color_spaces import HUE_SECTORS
-
-                return self._send(200, {
-                    "styles": [{"key": st["key"], "name": st["name"], "category": st.get("category", "")} for st in pl.load_styles()],
-                    "presets": [{"key": pr.key, "name": pr.name} for pr in sp.load_presets()],
-                    "families": [name for name, _, _ in HUE_SECTORS],
-                })
-            if url.path == "/mask":
-                sess = self.sessions.get(q.get("session", ""))
-                if sess is None:
-                    return self._send(404, {"error": "分析结果已过期，请重新分析"})
-                data, w, h = mask_bytes(sess, q.get("layer", ""), int(q["w"]) if "w" in q else None, int(q["h"]) if "h" in q else None)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("X-Width", str(w))
-                self.send_header("X-Height", str(h))
-                self.end_headers()
-                self.wfile.write(data)
-                return None
-            if url.path == "/calibration/chart":
-                from colordoctor.core import acr_calibration as cal
-
-                img, patches = cal.chart()
-                data = img.tobytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("X-Width", str(img.shape[1]))
-                self.send_header("X-Height", str(img.shape[0]))
-                self.send_header("X-Components", "3")
-                self.end_headers()
-                self.wfile.write(data)
-                return None
-            if url.path == "/calibration/plan":
-                from colordoctor.core import acr_calibration as cal
-
-                steps = [{"channel": n, "slider": s_, "value": v} for n, _ in cal.ac.CHANNELS for s_ in cal.SLIDERS for v in cal.DEFAULT_VALUES]
-                return self._send(200, {"steps": steps})
-            return self._send(404, {"error": "not found"})
-        except KeyError:
-            return self._send(404, {"error": "没有这个图层"})
-        except ValueError as e:
-            return self._send(400, {"error": str(e)})
+        self._guarded(self._get)
+        return None
 
     def do_POST(self):
         if not self._authorized():
             return self._send(403, {"error": "forbidden"})
+        self._guarded(self._post)
+        return None
+
+    def _get(self):
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
-        try:
-            if url.path == "/analyze":
-                mode = q.get("mode", "dirty")
-                dw, dh = self._int("X-Doc-Width"), self._int("X-Doc-Height")
-                res = analyze_request(self._pixels(), mode, q, self.sessions, self.refs,
-                                      (dw, dh) if dw and dh else None,
-                                      self.headers.get("X-Layer-Kind", ""), _header_text(self.headers.get("X-Layer-Name", "")))
-                return self._send(200, res)
-            if url.path == "/reference":
-                prep = pixel_guard.prepare(self._pixels())
-                return self._send(200, {"ref": self.refs.put(prep.rgb), "notes": list(prep.notes)})
-            if url.path == "/calibration/sample":
-                img = self._pixels()[..., :3].copy()
+        if url.path == "/health":
+            return self._send(200, {"ok": True, "version": __version__, "modes": list(MODES)})
+        if url.path == "/options":
+            from colordoctor.core import palette as pl
+            from colordoctor.core import skin_presets as sp
+            from colordoctor.core.color_spaces import HUE_SECTORS
+
+            return self._send(200, {
+                "styles": [{"key": st["key"], "name": st["name"], "category": st.get("category", "")} for st in pl.load_styles()],
+                "presets": [{"key": pr.key, "name": pr.name} for pr in sp.load_presets()],
+                "families": [name for name, _, _ in HUE_SECTORS],
+            })
+        if url.path == "/mask":
+            sess = self.sessions.get(q.get("session", ""))
+            if sess is None:
+                return self._send(404, {"error": "分析结果已过期，请重新分析"})
+
+            def num(k):
+                try:
+                    return int(q[k]) if k in q else None
+                except ValueError as e:
+                    raise ValueError(f"参数 {k} 不是整数") from e
+
+            place = None
+            if "doc_w" in q:
+                place = (num("left") or 0, num("top") or 0, num("doc_w"), num("doc_h"))
+            data, w, h = mask_bytes(sess, q.get("layer", ""), num("w"), num("h"), place)
+            return self._send(200, data, "application/octet-stream", {"X-Width": w, "X-Height": h})
+        if url.path == "/calibration/chart":
+            from colordoctor.core import acr_calibration as cal
+
+            img, _ = cal.chart()
+            return self._send(200, img.tobytes(), "application/octet-stream",
+                              {"X-Width": img.shape[1], "X-Height": img.shape[0], "X-Components": 3})
+        if url.path == "/calibration/plan":
+            from colordoctor.core import acr_calibration as cal
+
+            steps = [{"channel": n, "slider": s_, "value": v} for n, _ in cal.ac.CHANNELS for s_ in cal.SLIDERS for v in cal.DEFAULT_VALUES]
+            return self._send(200, {"steps": steps})
+        return self._send(404, {"error": "not found"})
+
+    def _post(self):
+        url = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if url.path == "/analyze":
+            mode = q.get("mode", "dirty")
+            dw, dh = self._int("X-Doc-Width"), self._int("X-Doc-Height")
+            if dw is not None or dh is not None:
+                _check_size(dw or 0, dh or 0, "文档")
+            res = analyze_request(self._pixels(), mode, q, self.sessions, self.refs,
+                                  (dw, dh) if dw and dh else None,
+                                  self.headers.get("X-Layer-Kind", ""), _header_text(self.headers.get("X-Layer-Name", "")))
+            return self._send(200, res)
+        if url.path == "/reference":
+            prep = pixel_guard.prepare(self._pixels())
+            return self._send(200, {"ref": self.refs.put(prep.rgb), "notes": list(prep.notes)})
+        if url.path == "/calibration/sample":
+            from colordoctor.core import acr_calibration as cal
+
+            img = self._pixels()[..., :3].copy()
+            chart_shape = cal.chart()[0].shape
+            if img.shape != chart_shape:
+                raise ValueError(f"色卡尺寸不对：{img.shape[1]}×{img.shape[0]}，应为 {chart_shape[1]}×{chart_shape[0]}")
+            with self.cal_lock:
                 if q.get("slider") == "base":
                     self.calibration.clear()
                     self.calibration["base"] = img
                 else:
-                    self.calibration.setdefault("samples", []).append((q["channel"], q["slider"], int(q["value"]), img))
-                return self._send(200, {"ok": True, "count": len(self.calibration.get("samples", []))})
-            if url.path == "/calibration/fit":
-                from colordoctor.core import acr_calibration as cal
+                    if q.get("slider") not in cal.SLIDERS:
+                        raise ValueError("slider 应为 hue / sat / lum / base")
+                    samples = self.calibration.setdefault("samples", [])
+                    if len(samples) >= MAX_CAL_SAMPLES:
+                        raise ValueError("校准样本太多")
+                    samples.append((q["channel"], q["slider"], int(q["value"]), img))
+                count = len(self.calibration.get("samples", []))
+            return self._send(200, {"ok": True, "count": count})
+        if url.path == "/calibration/fit":
+            from colordoctor.core import acr_calibration as cal
 
+            req = self._json()
+            with self.cal_lock:
                 if "base" not in self.calibration:
                     raise ValueError("还没有上传未调整的色卡")
-                channels = cal.fit(self.calibration["base"], self.calibration.get("samples", []))
-                req = json.loads(self._body() or b"{}")
-                path = cal.store(channels, req.get("acr_version", ""))
-                return self._send(200, {"channels": channels, "saved": path})
-            if url.path == "/acr-preset":
-                req = json.loads(self._body() or b"{}")
-                xmp = acr_preset.build_xmp(req.get("name") or "ColorDoctor", req.get("params") or {})
-                return self._send(200, xmp.encode("utf-8"), "application/rdf+xml; charset=utf-8")
-            return self._send(404, {"error": "not found"})
-        except pixel_guard.BlockedError as e:
-            return self._send(422, {"blocked": str(e)})
-        except (ValueError, KeyError) as e:
-            return self._send(400, {"error": str(e)})
+                if not self.calibration.get("samples"):
+                    raise ValueError("还没有任何调整后的色卡，不会覆盖已有的校准")
+                channels = cal.fit(self.calibration["base"], self.calibration["samples"])
+            if not channels:
+                raise ValueError("没有得到有效的校准结果，未保存")
+            path = cal.store(channels, str(req.get("acr_version", "")))
+            return self._send(200, {"channels": channels, "saved": path})
+        if url.path == "/acr-preset":
+            req = self._json()
+            params = req.get("params") or {}
+            if not isinstance(params, dict):
+                raise ValueError("params 应为对象")
+            xmp = acr_preset.build_xmp(str(req.get("name") or "ColorDoctor"), params)
+            return self._send(200, xmp.encode("utf-8"), "application/rdf+xml; charset=utf-8")
+        return self._send(404, {"error": "not found"})
 
 
 def _header_text(v: str) -> str:
@@ -331,7 +416,8 @@ def _header_text(v: str) -> str:
 
 
 def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4), "calibration": {}})
+    handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4), "calibration": {},
+                                                "cal_lock": threading.Lock()})
     srv = ThreadingHTTPServer((HOST, port), handler)
     srv.daemon_threads = True
     return srv

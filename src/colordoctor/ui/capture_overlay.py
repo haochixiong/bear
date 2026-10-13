@@ -21,6 +21,13 @@ class _ScreenOverlay(QWidget):
         lay.addWidget(self.view)
         info = capture.info
         self.setGeometry(info.x, info.y, info.width, info.height)
+        self.on_close = None  # 由 CaptureSession 设置：被系统 / Alt+F4 关掉时取消整个会话
+
+    def closeEvent(self, ev):
+        cb, self.on_close = self.on_close, None
+        super().closeEvent(ev)
+        if cb is not None:
+            cb()
 
 
 class CaptureSession(QObject):
@@ -55,6 +62,7 @@ class CaptureSession(QObject):
             ov.view.point_selected.connect(lambda x, y, i=i: self._on_point(i, x, y))
             ov.view.rect_selected.connect(lambda x, y, w, h, i=i: self._on_rect(i, x, y, w, h))
             ov.view.cancelled.connect(self.cancel)
+            ov.on_close = self._overlay_closed
             self.overlays.append(ov)
         self._update_text()
 
@@ -107,8 +115,14 @@ class CaptureSession(QObject):
         self.close()
         self.cancelled.emit()
 
+    def _overlay_closed(self):
+        if self.overlays:  # 不是由 close() 主动关闭的
+            self.cancel()
+
     def close(self):
-        for ov in self.overlays:
+        overlays, self.overlays = self.overlays, []
+        for ov in overlays:
+            ov.on_close = None
             ov.close()
             ov.deleteLater()
         self.overlays = []

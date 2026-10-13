@@ -55,7 +55,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt "pyinstaller>=6.10"
-          pip install -e .
+          pip install -e ".[ai,raw,seg]"
+      - name: Download AI skin model (verified)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force packaging/models | Out-Null
+          $m = "packaging/models/selfie_multiclass_256x256.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/FreeHugsForRobots/ps-skin-seg/resolve/main/selfie_multiclass_256x256.onnx" -OutFile $m
+          if ((Get-FileHash -Algorithm SHA256 $m).Hash.ToLower() -ne "13961350bb2099688eb96182ffe26f24eb12c77b1df278a2ec95bbdc923136e1") { Remove-Item $m; throw "model hash mismatch" }
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/colordoctor.spec
       - name: Self test of packaged app

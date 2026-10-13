@@ -17,10 +17,15 @@ def _install_excepthook(app):
         try:
             d = user_config_dir()
             d.mkdir(parents=True, exist_ok=True)
-            (d / "error.log").open("a", encoding="utf-8").write(text + "\n")
+            with (d / "error.log").open("a", encoding="utf-8") as f:
+                f.write(text + "\n")
         except OSError:
             pass
-        sys.__stderr__.write(text)
+        try:
+            if sys.__stderr__ is not None:  # 打包后的窗口程序没有控制台
+                sys.__stderr__.write(text)
+        except Exception:
+            pass
         try:
             QMessageBox.critical(None, "出现错误", f"{exc}\n\n详细信息已写入 error.log")
         except Exception:
@@ -113,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     if "--selftest" in argv:
         return selftest()
-    if len(argv) > 1 and argv[1] in ("analyze", "presets", "styles", "serve"):
+    if len(argv) > 1 and (argv[1] in ("analyze", "presets", "styles", "serve") or argv[1].startswith("-")):
         from colordoctor.cli import run
 
         return run(argv[1:])

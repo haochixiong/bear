@@ -81,6 +81,8 @@ def build_command(cfg: AIConfig, image_path: str | None) -> list[str]:
 
     template = cfg.command.strip() or DEFAULT_COMMANDS[cfg.provider]
     args = shlex.split(template, posix=not sys.platform.startswith("win"))
+    # Windows 下 posix=False 会保留引号："C:\Program Files\...\claude.cmd" -> 去掉两端引号
+    args = [a[1:-1] if len(a) >= 2 and a[0] == a[-1] and a[0] in "\"'" else a for a in args]
     if image_path:
         if "{image}" in template:
             args = [a.replace("{image}", image_path) for a in args]
@@ -99,25 +101,42 @@ def _run_cli(prompt: str, cfg: AIConfig, image_path: str | None) -> str:
     full = SYSTEM + "\n\n" + prompt
     if image_path and cfg.provider == "claude_code":
         full += f"\n\n（图片缩略图在：{image_path}，请先查看它再回答）"
-    flags = 0x08000000 if sys.platform.startswith("win") else 0  # CREATE_NO_WINDOW
+    win = sys.platform.startswith("win")
+    flags = (0x08000000 | 0x00000200) if win else 0  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     try:
-        proc = subprocess.run(
-            cmd,
-            input=full,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=cfg.timeout,
-            creationflags=flags,
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", creationflags=flags, start_new_session=not win,
         )
-    except subprocess.TimeoutExpired as e:
-        raise AIError(f"等待 {cfg.timeout:.0f} 秒仍未返回，已停止") from e
     except OSError as e:
         raise AIError(f"无法启动命令：{e}") from e
+    try:
+        out, err = proc.communicate(full, timeout=cfg.timeout)
+    except subprocess.TimeoutExpired as e:
+        _kill_tree(proc)
+        raise AIError(f"等待 {cfg.timeout:.0f} 秒仍未返回，已停止") from e
     if proc.returncode != 0:
-        raise AIError(f"命令返回错误（{proc.returncode}）：{(proc.stderr or proc.stdout).strip()[:800]}")
-    return proc.stdout
+        raise AIError(f"命令返回错误（{proc.returncode}）：{(err or out).strip()[:800]}")
+    return out
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """超时后连同子进程一起结束（npm 的 .cmd 包装会再启动 node.exe，只杀 cmd.exe 会让管道一直不关）。"""
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15,
+                           creationflags=0x08000000)
+        else:
+            import os
+            import signal
+
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        proc.kill()
+    try:
+        proc.communicate(timeout=5)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ DeepSeek（OpenAI 兼容接口，仅文字）

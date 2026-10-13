@@ -348,6 +348,17 @@ class MainWindow(QMainWindow):
         for wdg in (QLabel("风格"), self.style_box, self.family_box):
             r.addWidget(wdg)
         lay.addWidget(self.palette_row)
+        # 仿色：更换参考作品
+        self.ref_row = QWidget()
+        rr = QHBoxLayout(self.ref_row)
+        rr.setContentsMargins(0, 0, 0, 0)
+        self.ref_reset_btn = QPushButton("更换参考作品")
+        self.ref_reset_btn.setToolTip("下一次框选 / 打开 JPG 时重新选择参考作品")
+        self.ref_reset_btn.clicked.connect(self.reset_reference_image)
+        rr.addWidget(QLabel("仿色：先选参考作品，再选你的照片；参考作品会一直沿用"))
+        rr.addStretch(1)
+        rr.addWidget(self.ref_reset_btn)
+        lay.addWidget(self.ref_row)
 
         # 实时读数
         self.live_label = QLabel("实时取色：关闭")
@@ -462,6 +473,10 @@ class MainWindow(QMainWindow):
             "model": str(g("ai/model", "")),
         }
 
+    def reset_reference_image(self):
+        self.ref_image_item = None
+        self.statusBar().showMessage("下一次框选或打开 JPG 时请先选参考作品", 6000)
+
     def _toggle_ai_seg(self, v: bool):
         self.session.ai_seg = v
         self.settings.setValue("seg/ai", "true" if v else "false")
@@ -488,15 +503,20 @@ class MainWindow(QMainWindow):
                     ai["enabled"] = False
             for k, v in ai.items():
                 self.settings.setValue(f"ai/{k}", "true" if v is True else ("false" if v is False else v))
-            for k, v in dlg.values().items():
+            new_keys = dlg.values()
+            bad = []
+            for v in new_keys.values():
                 try:
                     hk.parse_hotkey(v)
                 except hk.HotkeyParseError as e:
-                    QMessageBox.warning(self, "快捷键无效", f"{v}：{e}")
-                    return
-                self.settings.setValue(f"hotkeys/{k}", v)
-            self.hotkeys.unregister_all()
-            self._register_hotkeys()
+                    bad.append(f"{v}：{e}")
+            if bad:
+                QMessageBox.warning(self, "快捷键无效", "快捷键没有保存：\n" + "\n".join(bad))
+            else:
+                for k, v in new_keys.items():
+                    self.settings.setValue(f"hotkeys/{k}", v)
+                self.hotkeys.unregister_all()
+                self._register_hotkeys()
         self.session.presets = sp.load_presets()
         self._fill_presets()
 
@@ -511,6 +531,7 @@ class MainWindow(QMainWindow):
         self.skin_compare_check.setVisible(key == "compare")
         self.skin_row.setVisible(key == "skin")
         self.palette_row.setVisible(key == "palette")
+        self.ref_row.setVisible(key == "reference")
         self.wheel.set_preset(self.session.preset if key in ("skin", "point") else None)
         hints = {
             "palette": "整图色彩：框选整张照片，看缺色、6:3:1 比例、某种颜色是否统一、与风格模板的差距",
@@ -531,7 +552,8 @@ class MainWindow(QMainWindow):
         cur = self._current
         if cur is not None and isinstance(cur.result, AnalysisReport) and cur.result.mode == "skin":
             mm = cur.result.valid_mask if cur.result.mask_info.get("manual") else None
-            self._run_rect(cur.region, cur.rect, cur.context, cur.source_label, step=0, replace=cur, manual_mask=mm)
+            self._run_rect(cur.region, cur.rect, cur.context, cur.source_label, step=0, replace=cur, manual_mask=mm,
+                           mode="skin")
         elif cur is not None and isinstance(cur.result, PointSample):
             self._show_item(cur)
 
@@ -733,8 +755,9 @@ class MainWindow(QMainWindow):
         item = self.session.add_point(patch, s, label)
         self._after_add(item)
 
-    def _run_rect(self, region, rect, ctx, label, step, replace: HistoryItem | None = None, lasso=None, manual_mask=None):
-        mode = self.session.mode
+    def _run_rect(self, region, rect, ctx, label, step, replace: HistoryItem | None = None, lasso=None, manual_mask=None,
+                  mode: str | None = None):
+        mode = mode or self.session.mode
         if region.size == 0:
             return
         if mode == "reference":
@@ -778,11 +801,25 @@ class MainWindow(QMainWindow):
                             on_done=lambda rep: self._rect_done(region, rect, rep, label, "对比"))
             return
         self.statusBar().showMessage("正在分析……")
-        self._start(self.session.compute_rect, region, ctx, rect, None, lasso, manual_mask,
+        self._start(self.session.compute_rect, region, ctx, rect, mode, lasso, manual_mask,
                     on_done=lambda rep: self._rect_done(region, rect, rep, label, None, replace))
 
     def _start(self, fn, *args, on_done):
-        task = run_in_background(fn, *args, on_done=on_done, on_failed=self._failed)
+        def done(rep):
+            # 窗口已关闭（例如分析还没结束就退出）时丢弃结果
+            from PyQt6 import sip
+
+            if sip.isdeleted(self) or sip.isdeleted(self.history_panel):
+                return
+            on_done(rep)
+
+        def failed(msg):
+            from PyQt6 import sip
+
+            if not sip.isdeleted(self):
+                self._failed(msg)
+
+        task = run_in_background(fn, *args, on_done=done, on_failed=failed)
         self._tasks.append(task)
         self._tasks = self._tasks[-20:]
 
@@ -818,6 +855,7 @@ class MainWindow(QMainWindow):
 
     def _failed(self, msg: str):
         self._ref_busy = False
+        self._pending_problem = None
         self.ai_btn.setEnabled(True)
         self.statusBar().showMessage("分析失败", 5000)
         QMessageBox.warning(self, "分析失败", msg)
@@ -899,11 +937,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已用该取样生成目标风格：Lab {p.target_lab[0]:.0f}, {p.target_lab[1]:.0f}, {p.target_lab[2]:.0f}", 6000)
 
     def _history_remove(self, hid: int):
+        if self.ref_image_item is not None and self.ref_image_item.id == hid:
+            self.ref_image_item = None
         self.session.remove(hid)
         ref = self.session.reference.id if self.session.reference else None
         self.history_panel.set_items(self.session.history, ref)
 
     def _history_clear(self):
+        self.ref_image_item = None
         self.session.clear()
         self.history_panel.set_items([])
         self.wheel.clear()
@@ -988,7 +1029,19 @@ class MainWindow(QMainWindow):
             image_path = make_thumbnail(self._current.region)
         self.ai_btn.setEnabled(False)
         self.statusBar().showMessage(f"正在请求 {pv.PROVIDERS[cfg.provider]}……（可能需要一两分钟）")
-        self._start(pv.ask, prompt, cfg, image_path, on_done=self._ai_done)
+        def ask_and_cleanup(prompt, cfg, image_path):
+            try:
+                return pv.ask(prompt, cfg, image_path)
+            finally:
+                if image_path:
+                    import os
+
+                    try:
+                        os.remove(image_path)
+                    except OSError:
+                        pass
+
+        self._start(ask_and_cleanup, prompt, cfg, image_path, on_done=self._ai_done)
 
     def _ai_done(self, result):
         self.ai_btn.setEnabled(True)
@@ -997,7 +1050,9 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("AI 点评" if result.ok else "AI 点评失败")
         dlg.resize(640, 720)
         view = QTextBrowser(dlg)
-        view.setMarkdown(result.text)
+        from PyQt6.QtGui import QTextDocument
+
+        view.document().setMarkdown(result.text, QTextDocument.MarkdownFeature.MarkdownNoHTML)
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel("以下内容由 AI 生成，仅供参考；数值以本工具的测量为准。"))
         lay.addWidget(view)

@@ -34,7 +34,7 @@ class HistoryPanel(QListWidget):
                 text += "  [参考区]"
             it = QListWidgetItem(QIcon(pm), text)
             it.setData(Qt.ItemDataRole.UserRole, h.id)
-            it.setToolTip(h.source_label)
+            it.setToolTip(Qt.convertFromPlainText(h.source_label) if hasattr(Qt, "convertFromPlainText") else h.source_label)
             self.addItem(it)
         self.blockSignals(False)
 

@@ -12,12 +12,16 @@ call .venv\Scripts\activate.bat || exit /b 1
 python -m pip install --upgrade pip || exit /b 1
 pip install -r requirements-dev.txt "pyinstaller>=6.10" || exit /b 1
 pip install -e . || exit /b 1
-rem 可选：RAW 读取与 AI 抠皮肤（显卡加速用 DirectML 版 onnxruntime）
-pip install "rawpy>=0.19" "onnxruntime-directml>=1.17"
+rem 可选功能：Claude API、RAW 读取、AI 抠皮肤（显卡加速用 DirectML 版 onnxruntime）
+pip install "anthropic>=1.0" "rawpy>=0.19" "onnxruntime-directml>=1.17" || exit /b 1
+rem AI 抠皮肤模型：下载后校验 SHA-256，不一致就删除并停止（不会把错误页面打包进去）
+set MODEL=packaging\models\selfie_multiclass_256x256.onnx
+set MODEL_SHA=13961350bb2099688eb96182ffe26f24eb12c77b1df278a2ec95bbdc923136e1
 if not exist packaging\models mkdir packaging\models
-if not exist packaging\models\selfie_multiclass_256x256.onnx (
-  curl -L -o packaging\models\selfie_multiclass_256x256.onnx https://huggingface.co/FreeHugsForRobots/ps-skin-seg/resolve/main/selfie_multiclass_256x256.onnx
+if not exist %MODEL% (
+  curl -fL -o %MODEL% https://huggingface.co/FreeHugsForRobots/ps-skin-seg/resolve/main/selfie_multiclass_256x256.onnx || (del /q %MODEL% 2>nul & echo 模型下载失败 & exit /b 1)
 )
+powershell -NoProfile -Command "if ((Get-FileHash -Algorithm SHA256 '%MODEL%').Hash.ToLower() -ne '%MODEL_SHA%') { Remove-Item '%MODEL%'; exit 1 }" || (echo 模型文件校验失败，已删除 & exit /b 1)
 
 echo [1/3] Running tests...
 python -m pytest -q || exit /b 1

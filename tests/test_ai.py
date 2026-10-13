@@ -156,3 +156,28 @@ def test_claude_api_refusal():
         assert not r.ok and "拒绝" in r.text
     finally:
         srv.close()
+
+
+def test_windows_quoted_command_path_is_unquoted(monkeypatch):
+    import shutil
+
+    from colordoctor.ai import providers as pv
+
+    monkeypatch.setattr(pv.sys, "platform", "win32")
+    seen = []
+    monkeypatch.setattr(shutil, "which", lambda a: seen.append(a) or a)
+    cfg = pv.AIConfig(provider="claude_code", command='"C:\\Program Files\\nodejs\\claude.cmd" -p')
+    cmd = pv.build_command(cfg, None)
+    assert seen[0] == "C:\\Program Files\\nodejs\\claude.cmd" and cmd[1] == "-p"
+
+
+def test_cli_timeout_kills_process(tmp_path):
+    import sys
+
+    from colordoctor.ai import providers as pv
+
+    script = tmp_path / "slow.py"
+    script.write_text("import time, sys\nsys.stdin.read()\ntime.sleep(30)\n")
+    cfg = pv.AIConfig(provider="codex", command=f'"{sys.executable}" "{script}"', timeout=1.0)
+    res = pv.ask("x", cfg)
+    assert not res.ok and "停止" in res.text

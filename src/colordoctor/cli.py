@@ -55,6 +55,9 @@ def _text(report) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="colordoctor", description="人像色彩诊断（离线，只读）")
+    from colordoctor import __version__
+
+    p.add_argument("--version", action="version", version=f"ColorDoctor {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("analyze", help="分析一张 JPG 或相机 RAW")
     a.add_argument("image")

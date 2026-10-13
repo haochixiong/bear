@@ -120,7 +120,8 @@ async function runAnalyze() {
       docWidth: sb.right - sb.left, docHeight: sb.bottom - sb.top, layerKind: info.kind, layerName: info.label,
     });
     state.result = res;
-    state.analyzed = { docId: info.doc.id, layerId: info.layer ? info.layer.id : null, history: ps.historyStateId(info.doc), bounds: sb };
+    state.analyzed = { docId: info.doc.id, layerId: info.layer ? info.layer.id : null, history: ps.historyStateId(info.doc), bounds: sb,
+      docWidth: info.doc.width, docHeight: info.doc.height };
     renderResult();
   } catch (e) {
     renderError(e);
@@ -212,10 +213,12 @@ async function generate(ids) {
   const doc = app.activeDocument;
   if (!doc || doc.id !== a.docId) { renderError(new Error("当前文档不是刚才分析的那一个，请重新分析。")); return; }
   const specs = r.plan.layers.filter((l) => ids.includes(l.id));
-  const b = a.bounds;
-  const w = b.right - b.left;
-  const h = b.bottom - b.top;
   try {
+    // 先把所有蒙版取回来（整幅文档大小，分析范围外为 0）；取不到就什么都不建
+    const masks = {};
+    for (const spec of specs) {
+      if (spec.has_mask) masks[spec.id] = await bridge.fetchMask(r.session, spec.id, a.bounds, a.docWidth, a.docHeight);
+    }
     await ps.modal(ids.length > 1 ? "ColorDoctor 一键校正" : "ColorDoctor 校正", async (ctx, d) => {
       if (a.layerId != null) {
         await action.batchPlay([{ _obj: "select", _target: [{ _ref: "layer", _id: a.layerId }], makeVisible: false }], {});
@@ -223,10 +226,8 @@ async function generate(ids) {
       const made = [];
       for (const spec of specs) {
         const id = await ps.makeAdjustmentLayer(spec);
-        if (spec.has_mask) {
-          const bytes = await bridge.fetchMask(r.session, spec.id, w, h);
-          await ps.putMask(d.id, id, bytes, w, h, b);
-        }
+        const m = masks[spec.id];
+        if (m) await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 });
         made.push(id);
       }
       if (made.length > 1) await ps.groupLayers(d, made, r.plan.group_name);
@@ -241,13 +242,11 @@ async function generate(ids) {
 async function makeSelection(id) {
   const r = state.result;
   const a = state.analyzed;
-  const b = a.bounds;
-  const w = b.right - b.left;
-  const h = b.bottom - b.top;
+  if (!r || !a) return;
   try {
+    const m = await bridge.fetchMask(r.session, id, a.bounds, a.docWidth, a.docHeight);
     await ps.modal("ColorDoctor 选区", async (ctx, d) => {
-      const bytes = await bridge.fetchMask(r.session, id, w, h);
-      await ps.putSelection(d.id, bytes, w, h, b);
+      await ps.putSelection(d.id, m.data, m.width, m.height, { left: 0, top: 0 });
     });
   } catch (e) { renderError(e); }
 }
@@ -300,7 +299,8 @@ async function acrLayer() {
   // 先导出预设，再复制图层 → 智能对象 → 打开 Camera Raw 对话框，由用户套用预设并确认。
   await exportXmp();
   try {
-    await ps.modal("ColorDoctor Camera Raw", async () => ps.cameraRawLayer("ColorDoctor · Camera Raw"));
+    const merged = $("target").value === "merged";
+    await ps.modal("ColorDoctor Camera Raw", async () => ps.cameraRawLayer("ColorDoctor · Camera Raw", merged), { interactive: true });
   } catch (e) { renderError(e); }
 }
 
@@ -314,7 +314,8 @@ async function calibrate() {
   try {
     const chart = await bridge.calibrationChart();
     const steps = await bridge.calibrationPlan();
-    await ps.modal("ColorDoctor 校准", async () => {
+    // 校准在新建的色卡文档里进行，不进当前文档的历史记录；完成后关闭色卡文档
+    await ps.readModal(async () => {
       const { doc, layer } = await ps.createChartDocument(chart);
       const info = { ok: true, doc, layer, bounds: { left: 0, top: 0, right: chart.width, bottom: chart.height } };
       await bridge.calibrationSample(await ps.readPixels(info), { slider: "base" });
@@ -326,6 +327,7 @@ async function calibrate() {
         await bridge.calibrationSample(await ps.readPixels({ ...info, layer: dup }), st);
         await ps.deleteLayer(dup);
       }
+      await ps.closeDocument(doc);
     });
     const res = await bridge.calibrationFit(app.version);
     progress(`校准完成：${Object.keys(res.channels).length} 个通道，已保存到 ${res.saved}`);
@@ -349,7 +351,7 @@ async function init() {
   $("calibrate").addEventListener("click", calibrate);
   try {
     await bridge.health();
-    state.options = await (await fetch("http://127.0.0.1:47321/options", { headers: { "X-ColorDoctor-Client": "uxp" } })).json();
+    state.options = await bridge.options();
   } catch (e) {
     $("svc").className = "chip bad";
     $("svc").textContent = "分析服务未启动";

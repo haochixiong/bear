@@ -15,7 +15,7 @@ NO_PIXEL_KINDS = {
     "brightnessContrast", "levels", "curves", "exposure", "vibrance", "hueSaturation", "colorBalance",
     "blackAndWhite", "photoFilter", "channelMixer", "colorLookup", "invert", "posterize", "threshold",
     "gradientMap", "selectiveColor", "solidColor", "gradientFill", "pattern", "light", "clarity",
-    "dehaze", "grain", "adjustment",
+    "dehaze", "grain", "adjustment", "inversion", "solidFill", "patternFill",
 }
 KIND_NAMES = {"group": "图层组", "text": "文字图层", "smartObject": "智能对象", "video": "视频图层", "threedimensional": "3D 图层"}
 

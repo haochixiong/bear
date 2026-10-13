@@ -5,12 +5,21 @@ const { app, action, core, imaging, constants } = require("photoshop");
 const MAX_SIDE = 2048; // 分析用的长边像素（蒙版会按文档尺寸放大回去）
 
 // 没有像素、不能直接分析的图层类型（与 Python 端 pixel_guard.NO_PIXEL_KINDS 对应）
+const NEED_MERGED_KINDS = { group: "图层组", text: "文字图层", smartObject: "智能对象", video: "视频图层", threeD: "3D 图层" };
+// 能直接读像素的只有像素图层（含背景）；其余已知类型中，NEED_MERGED_KINDS 之外的都是调整 / 填充图层。
+// 优先用 PS 自己的 constants.LayerKind 取值，避免名字写错（如 invert / inversion）。
 const NO_PIXEL_KINDS = new Set([
   "brightnessContrast", "levels", "curves", "exposure", "vibrance", "hueSaturation", "colorBalance",
-  "blackAndWhite", "photoFilter", "channelMixer", "colorLookup", "invert", "posterize", "threshold",
-  "gradientMap", "selectiveColor", "solidColor", "gradientFill", "pattern", "light", "clarity", "dehaze", "grain",
+  "blackAndWhite", "photoFilter", "channelMixer", "colorLookup", "invert", "inversion", "posterize", "threshold",
+  "gradientMap", "selectiveColor", "solidColor", "solidFill", "gradientFill", "pattern", "patternFill",
+  "light", "clarity", "dehaze", "grain", "adjustment",
 ]);
-const NEED_MERGED_KINDS = { group: "图层组", text: "文字图层", smartObject: "智能对象", video: "视频图层" };
+try {
+  for (const v of Object.values((constants && constants.LayerKind) || {})) {
+    const k = String(v);
+    if (k !== "pixel" && k !== "normal" && !NEED_MERGED_KINDS[k]) NO_PIXEL_KINDS.add(k);
+  }
+} catch (_) { /* 旧版本没有 LayerKind */ }
 
 function kindName(layer) {
   const k = layer.kind;
@@ -134,15 +143,32 @@ const DEFAULT_TYPES = {
 };
 
 // 在当前选中图层上方新建一个调整图层，返回其 layer id。必须在 executeAsModal 里调用。
+function checkResults(results, what) {
+  for (const r of results || []) {
+    if (r && r._obj === "error") throw new Error(`${what}失败：${r.message || r.result || "Photoshop 返回错误"}`);
+  }
+}
+
+function activeLayerId() {
+  const ls = app.activeDocument && app.activeDocument.activeLayers;
+  return ls && ls.length ? ls[0].id : null;
+}
+
 async function makeAdjustmentLayer(spec) {
   const build = DESCRIPTORS[spec.kind];
   if (!build) throw new Error(`不支持的图层类型：${spec.kind}`);
-  await action.batchPlay([
+  const before = activeLayerId();
+  // batchPlay 出错时不抛异常，而是返回 {_obj:"error"}；逐步检查，避免把原图层改名或写上蒙版
+  checkResults(await action.batchPlay([
     { _obj: "make", _target: [{ _ref: "adjustmentLayer" }], using: { _obj: "adjustmentLayer", type: DEFAULT_TYPES[spec.kind] } },
+  ], {}), `新建「${spec.name}」`);
+  const id = activeLayerId();
+  if (id == null || id === before) throw new Error(`新建「${spec.name}」失败：Photoshop 没有创建调整图层（文档模式或图层锁定？）`);
+  checkResults(await action.batchPlay([
     { _obj: "set", _target: ORDINAL, to: build(spec.params) },
-    { _obj: "set", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], to: { _obj: "layer", name: spec.name } },
-  ], {});
-  return app.activeDocument.activeLayers[0].id;
+    { _obj: "set", _target: [{ _ref: "layer", _id: id }], to: { _obj: "layer", name: spec.name } },
+  ], {}), `设置「${spec.name}」`);
+  return id;
 }
 
 // 把灰度蒙版（Uint8Array，w*h）写进图层的用户蒙版，放在文档的 bounds 位置。
@@ -190,16 +216,21 @@ function collect(layers, out = []) {
 }
 
 // 在一次历史记录里执行 fn(ctx)
-async function modal(name, fn) {
+async function modal(name, fn, { interactive = false } = {}) {
   return core.executeAsModal(async (ctx) => {
     const doc = app.activeDocument;
+    if (!doc) throw new Error("没有打开的文档。");
     const id = await ctx.hostControl.suspendHistory({ documentID: doc.id, name });
+    let ok = false;
     try {
-      return await fn(ctx, doc);
+      const r = await fn(ctx, doc);
+      ok = true;
+      return r;
     } finally {
-      await ctx.hostControl.resumeHistory(id);
+      // 出错时不提交：已经做了一半的修改整体撤回
+      await ctx.hostControl.resumeHistory(id, ok);
     }
-  }, { commandName: name });
+  }, { commandName: name, interactive });
 }
 
 // 只读操作（读像素）也需要 modal，但不进历史记录
@@ -211,12 +242,15 @@ async function readModal(fn) {
 // TODO(Windows)：录制“滤镜 → Camera Raw 滤镜”，改一个混色器滑块后确定，把描述符的键名替换到这里。
 // 目前没有可靠的公开文档，所以“生成 Camera Raw 图层”先只做：复制图层 → 转智能对象 → 打开 Camera Raw 对话框
 // （dialogOptions: "display"），并把 .xmp 预设导出给用户在对话框里一键套用。
-async function cameraRawLayer(name) {
-  await action.batchPlay([
-    { _obj: "copyToLayer" },
+async function cameraRawLayer(name, merged) {
+  // 合并可见图层：盖印可见图层（Ctrl+Alt+Shift+E）；否则复制当前图层（Ctrl+J）
+  const first = merged ? { _obj: "mergeVisible", duplicate: true } : { _obj: "copyToLayer" };
+  checkResults(await action.batchPlay([
+    first,
     { _obj: "newPlacedLayer" },
     { _obj: "set", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], to: { _obj: "layer", name } },
-  ], {});
+  ], {}), "准备 Camera Raw 图层");
+  // 打开 Camera Raw 对话框让用户确认（需要 executeAsModal 的 interactive 模式）
   await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {});
 }
 
@@ -263,8 +297,12 @@ async function deleteLayer(layer) {
   await layer.delete();
 }
 
+async function closeDocument(doc) {
+  try { await doc.closeWithoutSaving(); } catch (_) { /* 用户已手动关闭 */ }
+}
+
 module.exports = {
-  acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer,
+  acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
   constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor },
