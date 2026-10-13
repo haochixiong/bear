@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 packaging/models/
 ColorDoctor-*.zip
+ColorDoctor-model-*.zip
