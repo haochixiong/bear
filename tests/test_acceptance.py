@@ -15,9 +15,10 @@ FORBIDDEN = {"socket", "urllib", "http", "requests", "httpx", "aiohttp", "ftplib
 
 
 def test_no_network_modules_outside_optional_ai_package():
-    """联网代码只允许出现在可选的 colordoctor/ai 包里（默认关闭，用户点击“AI 点评”才会调用）。"""
+    """联网代码只允许出现在可选的 colordoctor/ai 包里（默认关闭，用户点击“AI 点评”才会调用），
+    以及 colordoctor/bridge（只监听 127.0.0.1 的本机服务，给 PS 插件用，见下一个测试）。"""
     for py in SRC.rglob("*.py"):
-        if "ai" in py.relative_to(SRC).parts[:1]:
+        if py.relative_to(SRC).parts[:1] in (("ai",), ("bridge",)):
             continue
         tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -29,6 +30,14 @@ def test_no_network_modules_outside_optional_ai_package():
             for n in names:
                 assert n.split(".")[0] not in FORBIDDEN, f"{py.name} imports {n}"
                 assert "QtNetwork" not in n and "QtWebEngine" not in n, f"{py.name} imports {n}"
+
+
+def test_bridge_only_listens_on_loopback():
+    from colordoctor.bridge import server
+
+    assert server.HOST == "127.0.0.1"
+    text = (SRC / "bridge" / "server.py").read_text(encoding="utf-8")
+    assert "0.0.0.0" not in text and "urlopen" not in text and "Access-Control-Allow-Origin" not in text
 
 
 def test_core_does_not_depend_on_qt():

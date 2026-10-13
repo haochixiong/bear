@@ -72,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--summary", action="store_true", help="输出精简 JSON 摘要（适合给 AI）")
     sub.add_parser("presets", help="列出肤色风格")
     sub.add_parser("styles", help="列出整图风格模板")
+    sv = sub.add_parser("serve", help="启动给 Photoshop 插件用的本机服务（只监听 127.0.0.1）")
+    sv.add_argument("--port", type=int, default=47321)
     return p
 
 
@@ -80,6 +82,11 @@ def run(argv: list[str]) -> int:
     if args.cmd == "presets":
         for pr in sp.load_presets():
             print(f"{pr.key:10s} {pr.name}  Lab {tuple(round(v, 1) for v in pr.target_lab)}  {pr.description}")
+        return 0
+    if args.cmd == "serve":
+        from colordoctor.bridge.server import serve
+
+        serve(args.port)
         return 0
     if args.cmd == "styles":
         for s in pl.load_styles():

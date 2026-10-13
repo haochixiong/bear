@@ -1,0 +1,43 @@
+# 第六阶段交接（PS 插件方向）— 给接手的本地 agent
+
+> 每完成一块就更新本文件并推送。最新状态以本文件和 `git log` 为准。
+> 设计依据：`docs/stage6_ps_plugin_design.md`（第 7 节是用户已确认的修改）；界面原型：https://claude.ai/artifact/V6wzgXjExY5kESVCaXkzM6
+
+## 进度
+
+| # | 模块 | 状态 | 位置 | 测试 |
+|---|---|---|---|---|
+| 1 | 本机桥接服务（127.0.0.1） | ✅ 完成 | `src/colordoctor/bridge/server.py`，命令 `colordoctor serve [--port 47321]` | `tests/test_bridge.py` |
+| 2 | 图层方案（问题 → 调整图层 + 羽化蒙版） | ✅ 完成（脏色、发灰、肤色不均、颜色统一） | `src/colordoctor/core/layer_plan.py` | 同上 |
+| 3 | 图层检查（调整图层 / 空白 / 纯色 / 半透明裁剪） | ✅ 完成（服务端兜底） | `src/colordoctor/core/pixel_guard.py` | 同上 |
+| 4 | ACR 预设 .xmp 导出 + 滑块校准色卡 | ⏳ 未开始 | 计划：`core/acr_preset.py`、`core/acr_calibration.py`；服务路由 `/acr-preset` 已预留 | |
+| 5 | UXP 插件 | ⏳ 未开始 | 计划：`photoshop-plugin/` | 只能在 Windows PS Beta 验证 |
+| 6 | RAW（rawpy） | ⏳ 未开始 | 计划：`core/color_management.py` 增加 `load_raw` | |
+| 7 | AI 抠皮肤（onnxruntime + MediaPipe 多类分割） | ⏳ 未开始 | 计划：`core/segmentation.py`（可选依赖） | |
+
+## 已定的接口约定（插件按这个写）
+
+- 服务：`http://127.0.0.1:47321`，每个请求必须带头 `X-ColorDoctor-Client: uxp`；带 `Origin: http(s)://…` 的请求一律 403（防网页调用）。
+- `POST /analyze?mode=dirty|skin|palette|reference&preset=&part=&style=&family=&ref=`
+  - 头：`X-Width` `X-Height` `X-Components`(3/4) `X-Doc-Width` `X-Doc-Height` `X-Layer-Kind`（UXP `layer.kind`）`X-Layer-Name`（encodeURIComponent）
+  - 体：交错 RGB(A) 8 位字节（`imaging.getPixels` 取 `colorSpace:"RGB"`、`colorProfile:"sRGB IEC61966-2.1"`、`componentSize:8`；建议 `targetSize` 长边 ≤ 2048）
+  - 200：`{session, summary, findings, adjustments, notes, plan:{group_name,width,height,layers:[{id,name,kind,params,reason,has_mask,mask_coverage,estimated}]}}`
+  - 422：`{blocked: "中文原因"}` → 面板显示原因、按钮变灰
+- `GET /mask?session=&layer=[&w=&h=]` → `w*h` 字节灰度，默认文档尺寸（`X-Doc-*`）；响应头 `X-Width/X-Height`
+- `POST /reference`（同像素格式）→ `{ref}`；之后 `/analyze?mode=reference&ref=…`
+- 图层 `kind` 与参数（PS 面板单位）：
+  - `hueSaturation`：`{master:{hue,saturation,lightness}, ranges:[{localRange(1 红…6 洋红), beginRamp, beginSustain, endSustain, endRamp, hue, saturation, lightness}]}`
+  - `colorBalance`：`{shadows:[青红,洋红绿,黄蓝], midtones:[…], highlights:[…], preserveLuminosity}`
+  - `vibrance`：`{vibrance, saturation}`
+  - `curves`：`{channels:{composite|red|green|blue: [[in,out],…]}}`
+
+## 接手时先做
+
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **346 passed**）。
+2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
+
+## 注意
+
+- 不要让 `bridge` 以外的包导入网络模块（`tests/test_acceptance.py` 会检查）；`bridge` 只能监听 127.0.0.1。
+- 插件只**新增**调整图层和蒙版，不改原图像素（用户已同意）。
+- 分析只在用户点“分析当前图层”时运行，不要自动分析。
