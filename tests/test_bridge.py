@@ -343,7 +343,6 @@ def test_transparent_pixels_do_not_count_as_grey():
 
 
 def test_http_error_codes_round2(bridge):
-    hdr = {"X-Width": "1", "X-Height": "1", "X-Components": "3"}
     code, _, _ = _req(bridge + "/mask?session=nope&layer=x")
     assert code == 404
     code, _, body = _req(bridge + "/acr-preset", json.dumps({"params": {"hsl": {"红色": 5}}}).encode())
