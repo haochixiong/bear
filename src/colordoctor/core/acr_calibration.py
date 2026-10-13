@@ -82,13 +82,15 @@ def _hsb_hue(lab: np.ndarray) -> float:
 def fit(base: np.ndarray, samples: list[tuple[str, str, int, np.ndarray]], patches: list[Patch] | None = None) -> dict:
     """base：未调整的色卡图；samples：[(通道名, 'hue'|'sat'|'lum', 滑块值, 调整后的色卡图)]。
 
-    返回 {通道: {"hue_per_unit": 度/格, "sat_per_unit": 色度倍率变化/格, "lum_per_unit": L*/格, "n": 样本数}}。
+    返回 {通道: {"hue_per_unit": 度/格, "sat_per_unit": 饱和度倍率变化/格, "lum_per_unit": L*/格, "n": 样本数}}。
+    ACR 的滑块往往正负不对称（+100 与 -100 的效果不同），有两个方向的样本时另存
+    "hue_per_unit_pos" / "hue_per_unit_neg" 等，换算时按要拉的方向取用。
     只用该通道自己的色块；滑块值为 0 的样本忽略。
     """
     if patches is None:
         _, patches = chart()
     b = measure(base, patches)
-    acc: dict[str, dict[str, list[float]]] = {}
+    acc: dict[str, dict[str, list[tuple[int, float]]]] = {}
     for channel, slider, value, img in samples:
         if value == 0 or slider not in SLIDERS:
             continue
@@ -107,10 +109,17 @@ def fit(base: np.ndarray, samples: list[tuple[str, str, int, np.ndarray]], patch
                 vals.append((s1 / max(s0, 1e-6) - 1.0) / value)
             else:
                 vals.append((a[i][0] - b[i][0]) / value)
-        acc.setdefault(channel, {}).setdefault(slider, []).append(float(np.median(vals)))
+        acc.setdefault(channel, {}).setdefault(slider, []).append((value, float(np.median(vals))))
     out = {}
     for ch, d in acc.items():
-        entry = {f"{k}_per_unit": round(float(np.mean(v)), 5) for k, v in d.items()}
+        entry: dict = {}
+        for k, v in d.items():
+            entry[f"{k}_per_unit"] = round(float(np.mean([x for _, x in v])), 5)
+            pos = [x for val, x in v if val > 0]
+            neg = [x for val, x in v if val < 0]
+            if pos and neg:
+                entry[f"{k}_per_unit_pos"] = round(float(np.mean(pos)), 5)
+                entry[f"{k}_per_unit_neg"] = round(float(np.mean(neg)), 5)
         entry["n"] = sum(len(v) for v in d.values())
         out[ch] = entry
     return out

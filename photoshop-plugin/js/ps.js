@@ -60,11 +60,17 @@ function historyStateId(doc) {
   try { return doc.activeHistoryState ? doc.activeHistoryState.id : null; } catch (_) { return null; }
 }
 
+function clipToCanvas(b, doc) {
+  return { left: Math.max(0, b.left), top: Math.max(0, b.top), right: Math.min(doc.width, b.right), bottom: Math.min(doc.height, b.bottom) };
+}
+
 // 读取像素（sRGB、8 位、交错），长边缩到 MAX_SIDE。必须在 executeAsModal 里调用。
 async function readPixels(info, sourceBounds) {
-  const b = sourceBounds || info.bounds;
+  // 图层可能超出画布（移出去一部分）：只读画布内的部分，返回的坐标才能和蒙版对齐
+  const b = clipToCanvas(sourceBounds || info.bounds, info.doc);
   const w = b.right - b.left;
   const h = b.bottom - b.top;
+  if (w < 1 || h < 1) throw new Error("要分析的范围在画布之外。");
   const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
   const opts = {
     documentID: info.doc.id,
@@ -92,10 +98,66 @@ async function readPixels(info, sourceBounds) {
   return out;
 }
 
+function to255(arr, v) {
+  // getData 在 16 位文档里返回 Uint16Array（0–32768），32 位返回 Float32Array（0–1）
+  if (arr instanceof Uint16Array) return Math.min(255, Math.round((v * 255) / 32768));
+  if (arr instanceof Float32Array) return Math.min(255, Math.round(v * 255));
+  return v;
+}
+
+// 取色：只取选区真正选中的像素（套索 / 椭圆 / 魔棒选区不是矩形，不能用外接矩形的平均）
 async function readSelectionPixels(info) {
   const sel = info.doc.selection && info.doc.selection.bounds;
   if (!sel || sel.right - sel.left < 1) throw new Error("请先用选框工具框选要取色的区域（或用吸管设置前景色）。");
-  return readPixels(info, { left: sel.left, top: sel.top, right: sel.right, bottom: sel.bottom });
+  const b = clipToCanvas({ left: sel.left, top: sel.top, right: sel.right, bottom: sel.bottom }, info.doc);
+  const px = await readPixels(info, b);
+  let selImg = null;
+  try {
+    const opts = { documentID: info.doc.id, sourceBounds: b };
+    if (px.width !== b.right - b.left || px.height !== b.bottom - b.top) opts.targetSize = { width: px.width, height: px.height };
+    const res = await imaging.getSelection(opts);
+    selImg = res.imageData;
+    const s = await selImg.getData({ chunky: true });
+    const sw = selImg.width;
+    const sh = selImg.height;
+    const n = px.width * px.height;
+    const c = px.components;
+    const out = new Uint8Array(n * 4);
+    for (let y = 0; y < px.height; y++) {
+      const sy = Math.min(sh - 1, Math.floor((y * sh) / px.height));
+      for (let x = 0; x < px.width; x++) {
+        const sx = Math.min(sw - 1, Math.floor((x * sw) / px.width));
+        const i = y * px.width + x;
+        const src = i * c;
+        out[i * 4] = px.data[src];
+        out[i * 4 + 1] = px.data[src + 1];
+        out[i * 4 + 2] = px.data[src + 2];
+        const a0 = c === 4 ? px.data[src + 3] : 255;
+        out[i * 4 + 3] = Math.min(a0, to255(s, s[sy * sw + sx]));
+      }
+    }
+    return { ...px, data: out, components: 4 };
+  } catch (_) {
+    return px;  // 读不到选区形状（旧版本）时退回外接矩形
+  } finally {
+    if (selImg) selImg.dispose();
+  }
+}
+
+// 灰度蒙版按文档位深建 imageData（16 位文档用 0–32768，32 位用 0–1）
+async function grayImageData(bytes, width, height, depth) {
+  let buf = bytes;
+  const d = String(depth || "");
+  if (d.includes("16")) {
+    buf = new Uint16Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) buf[i] = Math.round((bytes[i] * 32768) / 255);
+  } else if (d.includes("32")) {
+    buf = new Float32Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) buf[i] = bytes[i] / 255;
+  }
+  const opts = { width, height, components: 1, chunky: true, colorSpace: "Grayscale" };
+  if (!d.includes("32")) opts.colorProfile = "Gray Gamma 2.2";
+  return imaging.createImageDataFromBuffer(buf, opts);
 }
 
 function foregroundLab() {
@@ -179,10 +241,8 @@ async function makeAdjustmentLayer(spec) {
 }
 
 // 把灰度蒙版（Uint8Array，w*h）写进图层的用户蒙版，放在文档的 bounds 位置。
-async function putMask(docId, layerId, bytes, width, height, bounds) {
-  const img = await imaging.createImageDataFromBuffer(bytes, {
-    width, height, components: 1, chunky: true, colorSpace: "Grayscale", colorProfile: "Gray Gamma 2.2",
-  });
+async function putMask(docId, layerId, bytes, width, height, bounds, depth) {
+  const img = await grayImageData(bytes, width, height, depth);
   try {
     await imaging.putLayerMask({
       documentID: docId, layerID: layerId, imageData: img, replace: true,
@@ -195,10 +255,8 @@ async function putMask(docId, layerId, bytes, width, height, bounds) {
 }
 
 // 只生成选区（不建图层）：把蒙版写进一个 Alpha 通道再载入选区 —— 用 putSelection。
-async function putSelection(docId, bytes, width, height, bounds) {
-  const img = await imaging.createImageDataFromBuffer(bytes, {
-    width, height, components: 1, chunky: true, colorSpace: "Grayscale", colorProfile: "Gray Gamma 2.2",
-  });
+async function putSelection(docId, bytes, width, height, bounds, depth) {
+  const img = await grayImageData(bytes, width, height, depth);
   try {
     await imaging.putSelection({ documentID: docId, imageData: img, replace: true,
       targetBounds: { left: bounds.left, top: bounds.top }, commandName: "ColorDoctor 选区" });
@@ -254,16 +312,24 @@ async function readModal(fn) {
 // TODO(Windows)：录制“滤镜 → Camera Raw 滤镜”，改一个混色器滑块后确定，把描述符的键名替换到这里。
 // 目前没有可靠的公开文档，所以“生成 Camera Raw 图层”先只做：复制图层 → 转智能对象 → 打开 Camera Raw 对话框
 // （dialogOptions: "display"），并把 .xmp 预设导出给用户在对话框里一键套用。
-async function cameraRawLayer(name, merged) {
-  // 合并可见图层：盖印可见图层（Ctrl+Alt+Shift+E）；否则复制当前图层（Ctrl+J）
-  const first = merged ? { _obj: "mergeVisible", duplicate: true } : { _obj: "copyToLayer" };
+async function cameraRawLayer(name, { merged = false, layerId = null, doc = null } = {}) {
+  // 合并可见图层：在最顶层盖印可见图层（Ctrl+Alt+Shift+E），否则上面的图层会挡住效果；
+  // 单个图层：先选中要处理的图层，再整层复制。不用「通过拷贝的图层」(Ctrl+J)：有选区时它只复制选区里的像素，
+  // 当前选中的是调整图层时还会复制成调整图层。
+  if (merged) await selectTopLayer(doc || app.activeDocument);
+  else if (layerId != null) await selectLayer(layerId);
+  const first = merged
+    ? { _obj: "mergeVisible", duplicate: true }
+    : { _obj: "duplicate", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], version: 5 };
   checkResults(await action.batchPlay([
     first,
     { _obj: "newPlacedLayer" },
     { _obj: "set", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], to: { _obj: "layer", name } },
   ], {}), "准备 Camera Raw 图层");
-  // 打开 Camera Raw 对话框让用户确认（需要 executeAsModal 的 interactive 模式）
-  await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {});
+  // 打开 Camera Raw 对话框让用户确认（需要 executeAsModal 的 interactive 模式）。
+  // 用户点「取消」时 batchPlay 返回错误：抛出，让 modal 不提交历史记录，复制出的图层一并撤回。
+  checkResults(await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {}),
+    "Camera Raw（已取消）");
 }
 
 // Camera Raw 滤镜的参数描述符：录制前为 null。
@@ -313,13 +379,41 @@ async function closeDocument(doc) {
   try { await doc.closeWithoutSaving(); } catch (_) { /* 用户已手动关闭 */ }
 }
 
+// 新建调整图层时，PS 会自动把当前选区变成它的蒙版：没有蒙版的（整体）调整会被意外限制在选区里。
+// 生成前把选区存成临时通道并取消选择，生成后恢复选区、删除临时通道。必须在 executeAsModal 里调用。
+const TEMP_SELECTION = "ColorDoctor 临时选区";
+async function withoutSelection(doc, fn) {
+  let has = false;
+  try { has = !!(doc.selection && doc.selection.bounds); } catch (_) { has = false; }
+  if (!has) return fn();
+  const selRef = [{ _ref: "channel", _property: "selection" }];
+  checkResults(await action.batchPlay([
+    { _obj: "duplicate", _target: selRef, name: TEMP_SELECTION },
+    { _obj: "set", _target: selRef, to: { _enum: "ordinal", _value: "none" } },
+  ], {}), "暂存选区");
+  try {
+    return await fn();
+  } finally {
+    checkResults(await action.batchPlay([
+      { _obj: "set", _target: selRef, to: { _ref: "channel", _name: TEMP_SELECTION } },
+      { _obj: "delete", _target: [{ _ref: "channel", _name: TEMP_SELECTION }] },
+    ], {}), "恢复选区");
+  }
+}
+
+// 「合并可见图层」的结果要作用于整个画面：调整图层必须建在最顶层，否则上面的图层会把效果挡住
+async function selectTopLayer(doc) {
+  const top = doc.layers && doc.layers.length ? doc.layers[0] : null;
+  if (top) await selectLayer(top.id);
+}
+
 async function selectLayer(id) {
   checkResults(await action.batchPlay([{ _obj: "select", _target: [{ _ref: "layer", _id: id }], makeVisible: false }], {}),
     "选中原图层");
 }
 
 module.exports = {
-  selectLayer, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
+  selectLayer, selectTopLayer, withoutSelection, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
   constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor },

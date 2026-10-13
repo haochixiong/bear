@@ -801,8 +801,10 @@ class MainWindow(QMainWindow):
                             on_done=lambda rep: self._rect_done(region, rect, rep, label, "对比"))
             return
         self.statusBar().showMessage("正在分析……")
+        if lasso is None and replace is not None:
+            lasso = replace.lasso
         self._start(self.session.compute_rect, region, ctx, rect, mode, lasso, manual_mask,
-                    on_done=lambda rep: self._rect_done(region, rect, rep, label, None, replace))
+                    on_done=lambda rep: self._rect_done(region, rect, rep, label, None, replace, lasso))
 
     def _start(self, fn, *args, on_done):
         def done(rep):
@@ -845,10 +847,11 @@ class MainWindow(QMainWindow):
             self._pending_problem = None
             self._run_rect(region2, rect2, ctx2, label2, step=1)
 
-    def _rect_done(self, region, rect, rep, label, role=None, replace=None):
+    def _rect_done(self, region, rect, rep, label, role=None, replace=None, lasso=None):
         if replace is not None:
             self.session.remove(replace.id)
         item = self.session.add_rect(region, rect, rep, label, role=role)
+        item.lasso = lasso
         self._after_add(item)
         sev = rep.overall_severity.value
         self.statusBar().showMessage(f"分析完成：{sev}（风险 {rep.overall_risk:.0f}，置信度 {rep.confidence:.2f}）", 8000)
@@ -961,8 +964,16 @@ class MainWindow(QMainWindow):
             return
         from colordoctor.core.skin_mask import skin_mask
         from colordoctor.ui.mask_editor import MaskEditorDialog
+        from colordoctor.ui.session import ai_skin_mask
 
-        auto, _ = skin_mask(item.region)
+        # “恢复自动”与分析时用同一种方式抠皮肤，并限制在套索之内
+        auto = None
+        if self.session.ai_seg:
+            auto, _ = ai_skin_mask(item.region, item.context, rep.part or self.session.part)
+        if auto is None:
+            auto, _ = skin_mask(item.region, within=item.lasso)
+        elif item.lasso is not None:
+            auto = auto & item.lasso
         start = rep.valid_mask if rep.valid_mask is not None else np.ones(item.region.shape[:2], bool)
         dlg = MaskEditorDialog(self, item.region, start, auto)
         if dlg.exec():

@@ -132,7 +132,7 @@ async function runAnalyze() {
     });
     state.result = res;
     state.analyzed = { docId: info.doc.id, layerId: info.layer ? info.layer.id : null, history: historyBefore, bounds: sb,
-      docWidth: info.doc.width, docHeight: info.doc.height };
+      docWidth: info.doc.width, docHeight: info.doc.height, depth: String(info.doc.bitsPerChannel || "") };
     renderResult();
   } catch (e) {
     renderError(e);
@@ -251,24 +251,34 @@ async function generate(ids) {
       return;
     }
   }
+  const docMode = String((app.activeDocument && app.activeDocument.mode) || "");
+  if (docMode && !/rgb/i.test(docMode)) {
+    // 色彩平衡 / 自然饱和度等在 Lab、灰度里不可用，CMYK 里颜色范围和数值含义也不同
+    statusError(new Error("校正图层按 RGB 设计：请先把文档转换为 RGB（图像 → 模式 → RGB 颜色），或在 RGB 副本上生成。"));
+    return;
+  }
   const specs = r.plan.layers.filter((l) => ids.includes(l.id));
   setBusy(true, "正在生成调整图层…");
   try {
-    // 先把所有蒙版取回来（整幅文档大小，分析范围外为 0）；取不到就什么都不建
-    const masks = {};
-    for (const spec of specs) {
-      if (spec.has_mask) masks[spec.id] = await bridge.fetchMask(r.session, spec.id, a.bounds, a.docWidth, a.docHeight);
-    }
+    // 蒙版是整幅文档大小（大图每张几十 MB）：逐层取、用完即弃，不一次全部放在内存里。
+    // 中途任何一步失败，modal 都不提交历史记录，已建的图层整体撤回。
     await ps.modal(ids.length > 1 ? "ColorDoctor 一键校正" : "ColorDoctor 校正", async (ctx, d) => {
-      if (a.layerId != null) await ps.selectLayer(a.layerId);
-      const made = [];
-      for (const spec of specs) {
-        const id = await ps.makeAdjustmentLayer(spec);
-        const m = masks[spec.id];
-        if (m) await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 });
-        made.push(id);
-      }
-      if (made.length > 1) await ps.groupLayers(d, made, r.plan.group_name);
+      if (a.layerId != null) await ps.selectLayer(a.layerId);  // 分析的是单个图层：建在它上方
+      else await ps.selectTopLayer(d);  // 分析的是合并画面：建在最顶层
+      // 当前选区不能变成调整图层的蒙版：暂时取消，生成后恢复
+      await ps.withoutSelection(d, async () => {
+        const made = [];
+        for (let i = 0; i < specs.length; i++) {
+          const spec = specs[i];
+          $("status").textContent = `正在生成 ${i + 1}/${specs.length}：${spec.name}`;
+          let m = spec.has_mask ? await bridge.fetchMask(r.session, spec.id, a.bounds, a.docWidth, a.docHeight) : null;
+          const id = await ps.makeAdjustmentLayer(spec);
+          if (m) await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 }, a.depth);
+          m = null;
+          made.push(id);
+        }
+        if (made.length > 1) await ps.groupLayers(d, made, r.plan.group_name);
+      });
     }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
     setBusy(false);
     $("status").className = "status ok";
@@ -290,7 +300,7 @@ async function makeSelection(id) {
   try {
     const m = await bridge.fetchMask(r.session, id, a.bounds, a.docWidth, a.docHeight);
     await ps.modal("ColorDoctor 选区", async (ctx, d) => {
-      await ps.putSelection(d.id, m.data, m.width, m.height, { left: 0, top: 0 });
+      await ps.putSelection(d.id, m.data, m.width, m.height, { left: 0, top: 0 }, a.depth);
     }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
     setBusy(false);
     $("status").className = "status ok";
@@ -350,20 +360,42 @@ async function exportXmp() {
 
 async function acrLayer() {
   // 先导出预设，再复制图层 → 智能对象 → 打开 Camera Raw 对话框，由用户套用预设并确认。
+  if (state.busy) return;
+  const merged = $("target").value === "merged";
+  const doc = app.activeDocument;
+  const a = state.analyzed;
+  let layerId = null;
+  if (!merged) {
+    // 优先用刚才分析的图层（生成校正后当前选中的往往是调整图层 / 图层组）
+    if (a && doc && a.docId === doc.id && a.layerId != null) layerId = a.layerId;
+    else {
+      const info = refreshTarget();
+      if (!info.ok) { statusError(new Error(info.reason)); return; }
+      layerId = info.layer.id;
+    }
+  }
   await exportXmp();
+  setBusy(true, "正在打开 Camera Raw…");
   try {
-    const merged = $("target").value === "merged";
-    await ps.modal("ColorDoctor Camera Raw", async () => ps.cameraRawLayer("ColorDoctor · Camera Raw", merged), { interactive: true });
-  } catch (e) { renderError(e); }
+    await ps.modal("ColorDoctor Camera Raw", async (ctx, d) => ps.cameraRawLayer("ColorDoctor · Camera Raw", { merged, layerId, doc: d }),
+      { interactive: true });
+    setBusy(false);
+    if (a && doc && a.docId === doc.id) a.history = ps.historyStateId(doc);  // 新建图层不算“图层改动”
+  } catch (e) {
+    setBusy(false);
+    statusError(e);
+  }
 }
 
 // ---------------------------------------------------------------- ACR 滑块校准（需要 Camera Raw 描述符，见 ps.js 的 TODO）
 async function calibrate() {
+  if (state.busy) return;
   if (!ps.acrDescriptorReady()) {
     $("results").innerHTML = `<div class="blocked">ACR 滑块校准需要 Camera Raw 滤镜的 batchPlay 命令格式。这一步要在 Windows 上用 Alchemist 录制一次（见 docs/STAGE6_HANDOFF.md 的 P9），录好之前无法自动校准。</div>`;
     return;
   }
   const progress = (t) => { $("status").className = "status"; $("status").textContent = t; };
+  setBusy(true, "正在准备校准…");  // 防止校准进行中再次点击，两轮样本混在一起
   try {
     const chart = await bridge.calibrationChart();
     const steps = await bridge.calibrationPlan();
@@ -372,7 +404,11 @@ async function calibrate() {
       const { doc, layer } = await ps.createChartDocument(chart);
       try {
       const info = { ok: true, doc, layer, bounds: { left: 0, top: 0, right: chart.width, bottom: chart.height } };
-      await bridge.calibrationSample(await ps.readPixels(info), { slider: "base" });
+      // 基准也要经过一次 Camera Raw（所有滑块为 0）：ACR 本身的默认处理不能算进滑块的效果里
+      const base = await ps.duplicateLayer(layer);
+      await ps.applyCameraRaw(base, {});
+      await bridge.calibrationSample(await ps.readPixels({ ...info, layer: base }), { slider: "base" });
+      await ps.deleteLayer(base);
       for (let i = 0; i < steps.length; i++) {
         const st = steps[i];
         progress(`正在校准 ${i + 1}/${steps.length}：${st.channel} ${st.slider} ${st.value}`);
@@ -387,9 +423,13 @@ async function calibrate() {
     });
     // ACR 版本拿不到，记录 Photoshop 版本作参考（ACR 随 PS 更新）
     const res = await bridge.calibrationFit(`Photoshop ${app.version}`);
+    setBusy(false);
     progress(`校准完成：${Object.keys(res.channels).length} 个通道，已保存到 ${res.saved}`);
     renderAcr((state.result && state.result.acr_params) || {}, true);
-  } catch (e) { renderError(e); }
+  } catch (e) {
+    setBusy(false);
+    statusError(e);
+  }
 }
 
 // ---------------------------------------------------------------- 启动
@@ -425,7 +465,12 @@ async function init() {
   renderAcr({}, false);
   refreshTarget();
   // 选中别的图层、做了修改时刷新“分析对象”栏（不会自动分析）
-  action.addNotificationListener(["select", "make", "set", "delete", "historyStateChanged"], () => refreshTarget());
+  // 画笔涂抹时这些事件非常频繁：合并成每 200 ms 最多刷新一次
+  let timer = null;
+  action.addNotificationListener(["select", "make", "set", "delete", "historyStateChanged"], () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; refreshTarget(); }, 200);
+  });
 }
 
 init();

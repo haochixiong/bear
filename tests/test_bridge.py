@@ -387,3 +387,21 @@ def test_large_image_plan_is_fast_and_masks_align():
     full = plan.full_mask("opposite")
     assert full.shape == img.shape[:2]
     assert full[:, 2200:].mean() > 5 * max(full[:, :1800].mean(), 1)
+
+
+def test_layer_masks_are_zero_where_layer_is_transparent():
+    from synth import lch_color as lc
+
+    rgba = np.zeros((200, 300, 4), np.uint8)
+    rgba[..., :3] = dirty_sky()
+    rgba[:, :100, 3] = 0  # 左边 1/3 透明
+    rgba[:, 100:, 3] = 255
+    rgba[:, 100:150, :3] = lc(70, 40, 60)
+    sessions = bs.Store()
+    res = bs.analyze_request(rgba, "dirty", {}, sessions, bs.Store(), doc_size=(300, 200))
+    sess = sessions.get(res["session"])
+    assert all(ly["has_mask"] for ly in res["plan"]["layers"])
+    for ly in res["plan"]["layers"]:
+        data, w, h = bs.mask_bytes(sess, ly["id"], 300, 200)
+        m = np.frombuffer(data, np.uint8).reshape(h, w)
+        assert m[:, :95].max() == 0, ly["id"]

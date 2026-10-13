@@ -70,3 +70,20 @@ def test_real_model_runs():
     img, _ = face_scene(256, 256)
     seg = sg.segment_skin(img)
     assert seg.labels.shape == (256, 256)
+
+
+def test_segment_skin_keeps_aspect_ratio_for_wide_images():
+    """宽幅图按比例缩放后居中补边，人不被压扁；输出蒙版仍与原图同尺寸、位置对应。"""
+    img, truth = face_scene(200, 200)
+    wide = np.full((200, 800, 3), 40, np.uint8)
+    wide[:, 300:500] = img
+    t = np.zeros((200, 800), bool)
+    t[:, 300:500] = truth
+    sess = FakeSession()
+    seg = sg.segment_skin(wide, session=sess)
+    pad = sess.seen[:, :, 0]
+    assert np.allclose(pad[:90], 0.5) and np.allclose(pad[-90:], 0.5)  # 上下补边
+    both = seg.part(None)
+    assert both.shape == t.shape
+    assert (both & t).sum() / max(1, t.sum()) > 0.75
+    assert (both & ~t).sum() / max(1, both.sum()) < 0.15

@@ -41,6 +41,7 @@ class HistoryItem:
     swatch: tuple[int, int, int]
     source_label: str = ""
     created: float = field(default_factory=time.time)
+    lasso: np.ndarray | None = None  # 套索蒙版（与 region 同尺寸），编辑皮肤蒙版时“恢复自动”要用
 
     @property
     def time_text(self) -> str:

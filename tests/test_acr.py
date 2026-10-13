@@ -118,6 +118,20 @@ def test_fit_recovers_simulated_slider_response(tmp_path, monkeypatch):
     assert 47 <= ac.hue_slider(30, 40, channel="橙色") <= 53
 
 
+def test_calibration_uses_direction_specific_slopes_and_ignores_tiny_ones(monkeypatch):
+    img, patches = cal.chart()
+    samples = [("橙色", "hue", v, _fake_acr(img, "橙色", "hue", v, patches, 0.2 if v > 0 else 0.4)) for v in (-50, 50)]
+    fit = cal.fit(img, samples, patches)["橙色"]
+    assert fit["hue_per_unit_pos"] == pytest.approx(0.2, abs=0.03)
+    assert fit["hue_per_unit_neg"] == pytest.approx(0.4, abs=0.05)
+    ac.set_calibration({"橙色": fit, "蓝色": {"hue_per_unit": 0.0004, "lum_per_unit": float("nan")}})
+    assert 45 <= ac.hue_slider(30, 40, channel="橙色") <= 55  # 往正方向：0.2°/格
+    assert -28 <= ac.hue_slider(40, 30, channel="橙色") <= -22  # 往负方向：0.4°/格
+    # 几乎推不动（噪声）或无效值：退回经验值，不会被换算成 ±100
+    assert ac.hue_slider(30, 40, channel="蓝色") == 33
+    assert ac.lum_slider(5, channel="蓝色") == 20
+
+
 def test_params_for_palette_and_reference_reports_are_not_empty():
     from colordoctor.core import analysis as an
     from colordoctor.core.color_management import synthetic_context

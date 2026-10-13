@@ -108,17 +108,23 @@ def _softmax(x: np.ndarray) -> np.ndarray:
 
 
 def _upsample(prob: np.ndarray, w: int, h: int) -> np.ndarray:
-    return np.asarray(Image.fromarray(prob.astype(np.float32), mode="F").resize((w, h), Image.BILINEAR))
+    return np.asarray(Image.fromarray(np.ascontiguousarray(prob, np.float32), mode="F").resize((w, h), Image.BILINEAR))
 
 
 def segment_skin(rgb: np.ndarray, refine_with_color: bool = True, session=None) -> SkinSegmentation:
     """rgb：(H, W, 3) uint8 sRGB。返回脸部 / 身体皮肤蒙版（与原图同尺寸）。"""
     sess = session or _session()
     h, w = rgb.shape[:2]
-    x = np.asarray(Image.fromarray(np.ascontiguousarray(rgb[..., :3])).resize((INPUT, INPUT), Image.BILINEAR), np.float32) / 255.0
+    # 保持长宽比缩放后居中放进 256×256（四周补灰），避免宽幅 / 竖幅照片里的人被压扁
+    scale = INPUT / max(h, w)
+    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    ox, oy = (INPUT - nw) // 2, (INPUT - nh) // 2
+    x = np.full((INPUT, INPUT, 3), 0.5, np.float32)
+    small = Image.fromarray(np.ascontiguousarray(rgb[..., :3])).resize((nw, nh), Image.BILINEAR)
+    x[oy:oy + nh, ox:ox + nw] = np.asarray(small, np.float32) / 255.0
     inp = sess.get_inputs()[0].name
     logits = sess.run(None, {inp: x[None]})[0][0]  # (256, 256, 6)
-    prob = _softmax(logits.astype(np.float32))
+    prob = _softmax(logits.astype(np.float32))[oy:oy + nh, ox:ox + nw]
     labels_small = prob.argmax(-1).astype(np.uint8)
     face = _upsample(prob[..., FACE], w, h) > 0.5
     body = _upsample(prob[..., BODY], w, h) > 0.5

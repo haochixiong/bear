@@ -52,6 +52,7 @@ class Session:
     shape: tuple[int, int]  # 分析图像（裁剪前）的 (h, w)
     offset: tuple[int, int]  # 裁剪偏移
     doc_size: tuple[int, int]  # 文档 (w, h)
+    opaque: np.ndarray | None = None  # (h, w) bool：图层不透明的地方；None = 全部不透明
 
 
 class Store:
@@ -133,7 +134,17 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
     report = run_analysis(prep, mode, q, refs, layer_name)
     plan = layer_plan.plan_from_report(report, prep.rgb.shape)
     h, w = pixels.shape[:2]
-    sid = sessions.put(Session(plan, (h, w), prep.offset, doc_size or (w, h)))
+    opaque = None
+    if prep.valid is not None:  # 分析的是带透明区域的图层：蒙版在透明处必须为 0，否则调整会作用到下面的图层
+        opaque = np.zeros((h, w), bool)
+        ox, oy = prep.offset
+        vh, vw = prep.valid.shape
+        opaque[oy:oy + vh, ox:ox + vw] = prep.valid
+    sid = sessions.put(Session(plan, (h, w), prep.offset, doc_size or (w, h), opaque))
+    plan_json = plan.to_json()
+    if opaque is not None:
+        for ly in plan_json["layers"]:
+            ly["has_mask"] = True  # 全图类的调整（如曲线）也要限制在这个图层的不透明范围内
     return {
         "session": sid,
         "mode": mode,
@@ -142,7 +153,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "summary": summary(report),
         "findings": to_jsonable(list(report.findings)),
         "adjustments": to_jsonable(list(report.adjustments)),
-        "plan": plan.to_json(),
+        "plan": plan_json,
         "acr_params": acr_preset.params_for_report(report),
         "acr_calibrated": acr_channels.is_calibrated(),
     }
@@ -209,6 +220,8 @@ def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: i
         ox, oy = sess.offset
         mh, mw = m.shape
         full[oy:oy + mh, ox:ox + mw] = m
+    if sess.opaque is not None:
+        full[~sess.opaque] = 0
     tw = sess.doc_size[0] if width is None else int(width)
     th = sess.doc_size[1] if height is None else int(height)
     _check_size(tw, th, "蒙版")

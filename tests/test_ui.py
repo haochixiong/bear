@@ -232,6 +232,24 @@ def test_skin_lasso_and_part_and_mask_editor(win, qtbot, monkeypatch):
     win.edit_skin_mask()
     qtbot.waitUntil(lambda: win.session.history[0].result.mask_info.get("manual"), timeout=15000)
     assert len([h for h in win.session.history if h.kind == "rect"]) == 1  # 替换而不是新增
+    item = win.session.history[0]
+    assert item.lasso is not None and item.lasso.shape == item.region.shape[:2]  # 重新分析后套索仍保留
+
+    # “恢复自动”的蒙版不能超出套索
+    seen = {}
+
+    class SpyDlg:
+        def __init__(self, parent, region, mask, auto):
+            seen["auto"] = auto
+
+        def exec(self):
+            return False
+
+    item.lasso = np.zeros(item.region.shape[:2], bool)
+    item.lasso[:, : item.region.shape[1] // 2] = True
+    monkeypatch.setattr(mask_editor, "MaskEditorDialog", SpyDlg)
+    win.edit_skin_mask()
+    assert seen["auto"].any() and not seen["auto"][~item.lasso].any()
 
 
 def test_mask_canvas_brush_and_undo(qtbot):
@@ -256,6 +274,47 @@ def test_mask_canvas_brush_and_undo(qtbot):
     c.tool = "wand_add"
     qtbot.mousePress(c, Qt.MouseButton.LeftButton, pos=c.to_view(5, 5).toPoint())
     assert c.mask[5, 5]
+
+
+def test_mask_editor_large_image_is_fast_and_keeps_precision(qtbot):
+    """2400 万像素：在缩小副本上编辑，每一笔只重画一小块；确定时没改动的地方保持原蒙版。"""
+    import time
+
+    from colordoctor.ui.mask_editor import MaskEditorDialog
+
+    H, W = 4000, 6000
+    img = np.full((H, W, 3), 150, np.uint8)
+    start = np.zeros((H, W), bool)
+    start[1000:3001, 1001:4999] = True  # 边界不在缩放步长的整数倍上
+    start[2000, 5500] = True  # 单个像素：缩小副本里看不到，确定时也不能丢
+    dlg = MaskEditorDialog(None, img, start, None)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    c = dlg.canvas
+    assert c.step > 1 and c.mask.size <= 2_100_000
+    assert np.array_equal(dlg.mask, start)  # 没动过：原样返回
+    c.tool = "brush_erase"
+    c.brush = 30
+    k = c.step
+    a, b = c.to_view(2500 / k, 2000 / k).toPoint(), c.to_view(3500 / k, 2000 / k).toPoint()
+    qtbot.mousePress(c, Qt.MouseButton.LeftButton, pos=a)
+    t = time.perf_counter()
+    steps = 20
+    for i in range(1, steps + 1):
+        qtbot.mouseMove(c, a + (b - a) * (i / steps))
+    per = (time.perf_counter() - t) / steps
+    qtbot.mouseRelease(c, Qt.MouseButton.LeftButton, pos=b)
+    assert per < 0.25, per
+    out = dlg.mask
+    assert out.shape == (H, W)
+    assert not out[2000, 2600:3400].any()  # 擦掉了
+    assert out[2000, 5500]  # 单个像素保留
+    far = np.zeros((H, W), bool)
+    far[:1500] = True  # 远离笔画的部分逐像素与原蒙版相同
+    assert np.array_equal(out[far], start[far])
+    dlg._undo()
+    assert np.array_equal(dlg.mask, start)
 
 
 def test_copy_export_and_ai_disabled(win, qtbot, tmp_path, monkeypatch):

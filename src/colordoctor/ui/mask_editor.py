@@ -17,8 +17,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from colordoctor.capture.screen_capture import array_to_qimage
 from colordoctor.core import mask_edit as me
 from colordoctor.ui.selection_widget import ImageSelectWidget
+
+EDIT_PIXELS = 2_000_000  # 编辑用的工作分辨率上限；大图在缩小的副本上编辑，确定时再放大回原尺寸
 
 TOOLS = {
     "brush_add": "画笔添加",
@@ -26,6 +29,16 @@ TOOLS = {
     "wand_add": "魔棒添加",
     "wand_erase": "魔棒删除",
 }
+
+
+def work_step(h: int, w: int) -> int:
+    return max(1, int(np.ceil(np.sqrt(h * w / EDIT_PIXELS))))
+
+
+def upscale(small: np.ndarray, step: int, shape: tuple[int, int]) -> np.ndarray:
+    if step == 1:
+        return small
+    return np.repeat(np.repeat(small, step, axis=0), step, axis=1)[: shape[0], : shape[1]]
 
 
 def mask_preview(region: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -37,32 +50,96 @@ def mask_preview(region: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 class MaskCanvas(ImageSelectWidget):
+    """在不超过 EDIT_PIXELS 的工作副本上编辑；每次落笔只重画笔刷经过的那一小块。"""
+
     def __init__(self, region: np.ndarray, mask: np.ndarray, parent=None):
         super().__init__(parent, magnifier=False, allow_zoom=True)
-        self.region = region
-        self.history = me.MaskHistory(mask.astype(bool))
+        self.step = work_step(*region.shape[:2])
+        k = self.step
+        self.region = np.ascontiguousarray(region[::k, ::k, :3])
+        self._lit = self.region.astype(np.uint8)
+        self._dark = mask_preview(self.region, np.zeros(self.region.shape[:2], bool))
+        self.full_shape = tuple(mask.shape[:2])
+        # base：原尺寸的起始蒙版（打开时的蒙版或“恢复自动”）。确定时没改动的地方原样沿用 base，保留原精度
+        self.base = mask.astype(bool)
+        self.base_small = self.base[::k, ::k].copy()
+        self.history = me.MaskHistory(self.base_small)
+        self._bases: list[tuple[np.ndarray, np.ndarray]] = []
         self.tool = "brush_add"
         self.brush = 12.0
         self.tolerance = 8.0
         self._stroke: list[tuple[float, float]] = []
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.refresh()
+        self.set_image(self._compose())
 
     @property
     def mask(self) -> np.ndarray:
+        """工作分辨率下的蒙版。"""
         return self.history.mask
 
-    def refresh(self):
-        z, pan = self.zoom, self.pan
-        self.set_image(mask_preview(self.region, self.mask))
-        self.zoom, self.pan = z, pan
+    def push(self):
+        self.history.push()
+        self._bases.append((self.base, self.base_small))
+        self._bases = self._bases[-self.history.limit :]
+
+    def undo(self) -> bool:
+        if not self.history.undo():
+            return False
+        if self._bases:
+            self.base, self.base_small = self._bases.pop()
+        self.refresh()
+        return True
+
+    def reset_to(self, full: np.ndarray):
+        self.push()
+        k = self.step
+        self.base = full.astype(bool)
+        self.base_small = self.base[::k, ::k].copy()
+        self.history.mask = self.base_small.copy()
+        self.refresh()
+
+    def full_mask(self) -> np.ndarray:
+        """原尺寸蒙版：改动过的地方取编辑结果（放大），没改动的地方保持 base 原样。"""
+        if self.step == 1:
+            return self.mask.copy()
+        changed = self.mask != self.base_small
+        out = self.base.copy()
+        if changed.any():
+            ch = upscale(changed, self.step, self.full_shape)
+            out[ch] = upscale(self.mask, self.step, self.full_shape)[ch]
+        return out
+
+    def _compose(self, y0: int = 0, y1: int | None = None, x0: int = 0, x1: int | None = None) -> np.ndarray:
+        m = self.mask[y0:y1, x0:x1, None]
+        return np.where(m, self._lit[y0:y1, x0:x1], self._dark[y0:y1, x0:x1])
+
+    def refresh(self, box: tuple[float, float, float, float] | None = None):
+        """box = (x0, y0, x1, y1) 时只重画这一块，否则整幅重画（不改变缩放和平移）。"""
+        if box is None or self.image is None:
+            self.arr = np.ascontiguousarray(self._compose())
+            self.image = array_to_qimage(self.arr)
+        else:
+            h, w = self.mask.shape
+            x0, y0 = max(0, int(np.floor(box[0]))), max(0, int(np.floor(box[1])))
+            x1, y1 = min(w, int(np.ceil(box[2])) + 1), min(h, int(np.ceil(box[3])) + 1)
+            if x0 >= x1 or y0 >= y1:
+                return
+            patch = np.ascontiguousarray(self._compose(y0, y1, x0, x1))
+            self.arr[y0:y1, x0:x1] = patch
+            p = QPainter(self.image)
+            p.drawImage(x0, y0, array_to_qimage(patch))
+            p.end()
         self.update()
+
+    def _brush_box(self, ax, ay, bx, by):
+        r = self.brush + 2
+        return (min(ax, bx) - r, min(ay, by) - r, max(ax, bx) + r, max(ay, by) + r)
 
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(ev)
         x, y = self.to_image(ev.position())
-        self.history.push()
+        self.push()
         if self.tool.startswith("wand"):
             region = me.magic_wand(self.region, int(x), int(y), self.tolerance)
             if self.tool == "wand_add":
@@ -73,15 +150,16 @@ class MaskCanvas(ImageSelectWidget):
         else:
             self._stroke = [(x, y)]
             me.paint(self.history.mask, x, y, self.brush, self.tool == "brush_add")
-            self.refresh()
+            self.refresh(self._brush_box(x, y, x, y))
 
     def mouseMoveEvent(self, ev):
         self._cur = ev.position()
         if self._stroke and ev.buttons() & Qt.MouseButton.LeftButton:
             x, y = self.to_image(ev.position())
-            me.stroke(self.history.mask, [self._stroke[-1], (x, y)], self.brush, self.tool == "brush_add")
+            px, py = self._stroke[-1]
+            me.stroke(self.history.mask, [(px, py), (x, y)], self.brush, self.tool == "brush_add")
             self._stroke.append((x, y))
-            self.refresh()
+            self.refresh(self._brush_box(px, py, x, y))
             return
         super().mouseMoveEvent(ev)
 
@@ -163,14 +241,12 @@ class MaskEditorDialog(QDialog):
             super().keyPressEvent(ev)
 
     def _undo(self):
-        if self.canvas.history.undo():
-            self.canvas.refresh()
+        self.canvas.undo()
 
     def _reset(self):
-        self.canvas.history.push()
-        self.canvas.history.mask = self.auto_mask.copy()
-        self.canvas.refresh()
+        self.canvas.reset_to(self.auto_mask)
 
     @property
     def mask(self) -> np.ndarray:
-        return self.canvas.mask
+        """原尺寸（与传入的 region 一样大）的蒙版。"""
+        return self.canvas.full_mask()

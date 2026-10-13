@@ -31,6 +31,8 @@ _M_BRADFORD_D65_TO_D50 = np.array(
 )
 _M_BRADFORD_D50_TO_D65 = np.linalg.inv(_M_BRADFORD_D65_TO_D50)
 
+_M_SRGB_TO_XYZ_D50 = _M_BRADFORD_D65_TO_D50 @ _M_SRGB_TO_XYZ
+
 WHITE_D65 = _M_SRGB_TO_XYZ @ np.ones(3)
 WHITE_D50 = _M_BRADFORD_D65_TO_D50 @ WHITE_D65
 
@@ -42,9 +44,18 @@ def _as_float(rgb) -> np.ndarray:
     return np.asarray(rgb, dtype=np.float64)
 
 
-def srgb8_to_linear(rgb) -> np.ndarray:
+def _srgb8_to_linear_calc(rgb) -> np.ndarray:
     c = _as_float(rgb) / 255.0
     return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+_LINEAR_LUT = _srgb8_to_linear_calc(np.arange(256))
+
+
+def srgb8_to_linear(rgb) -> np.ndarray:
+    if isinstance(rgb, np.ndarray) and rgb.dtype == np.uint8:
+        return _LINEAR_LUT[rgb]  # 整数输入查表，结果与逐个计算相同，大图快很多
+    return _srgb8_to_linear_calc(rgb)
 
 
 def linear_to_srgb_float(lin) -> np.ndarray:
@@ -61,12 +72,13 @@ def float_to_srgb8(c) -> np.ndarray:
 
 
 def srgb8_to_xyz(rgb, white: str = "D50") -> np.ndarray:
-    xyz = srgb8_to_linear(rgb) @ _M_SRGB_TO_XYZ.T
     if white == "D50":
-        xyz = xyz @ _M_BRADFORD_D65_TO_D50.T
-    elif white != "D65":
+        m = _M_SRGB_TO_XYZ_D50
+    elif white == "D65":
+        m = _M_SRGB_TO_XYZ
+    else:
         raise ValueError(f"unknown white point: {white}")
-    return xyz
+    return srgb8_to_linear(rgb) @ m.T
 
 
 def xyz_to_lab(xyz, white: str = "D50") -> np.ndarray:

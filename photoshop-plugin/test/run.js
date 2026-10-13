@@ -94,7 +94,7 @@ function dirtySky(w, h) {
       if (spec.has_mask) {
         const m = await bridge.fetchMask(res.session, spec.id, { left: 0, top: 0, right: 300, bottom: 200 }, 300, 200);
         assert.strictEqual(m.data.length, 300 * 200);
-        await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 });
+        await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 }, "bitDepth8");
       }
       made.push(id);
     }
@@ -141,6 +141,79 @@ function dirtySky(w, h) {
   assert.deepStrictEqual(big.sourceBounds, { left: 0, top: 0, right: 6000, bottom: 4000 });
   const part = await ps.readPixels({ doc: bigDoc, layer: { id: 9 }, bounds: { left: 1000, top: 600, right: 5000, bottom: 3800 } });
   assert.deepStrictEqual(part.sourceBounds, { left: 1000, top: 600, right: 5000, bottom: 3800 });
+
+  // 5d. 图层超出画布：只读画布内的部分
+  let lastOpts = null;
+  fakePs.imaging.getPixels = async (o) => {
+    lastOpts = o;
+    const w = o.sourceBounds.right - o.sourceBounds.left, h = o.sourceBounds.bottom - o.sourceBounds.top;
+    return { level: 0, sourceBounds: o.sourceBounds,
+      imageData: { width: w, height: h, components: 3, getData: async () => new Uint8Array(w * h * 3).fill(200), dispose() {} } };
+  };
+  const smallDoc = { id: 4, width: 100, height: 80, selection: { bounds: { left: 10, top: 10, right: 30, bottom: 20 } } };
+  const out1 = await ps.readPixels({ doc: smallDoc, layer: { id: 1 }, bounds: { left: -50, top: -10, right: 60, bottom: 200 } });
+  assert.deepStrictEqual(lastOpts.sourceBounds, { left: 0, top: 0, right: 60, bottom: 80 });
+  assert.deepStrictEqual(out1.sourceBounds, { left: 0, top: 0, right: 60, bottom: 80 });
+
+  // 5e. 不规则选区：只取选中的像素（选区外 alpha = 0）
+  fakePs.imaging.getSelection = async (o) => {
+    const w = o.sourceBounds.right - o.sourceBounds.left, h = o.sourceBounds.bottom - o.sourceBounds.top;
+    const d = new Uint8Array(w * h);
+    for (let i = 0; i < d.length; i++) d[i] = (i % w) < w / 2 ? 255 : 0;  // 左半边选中
+    return { imageData: { width: w, height: h, getData: async () => d, dispose() {} } };
+  };
+  const selPx = await ps.readSelectionPixels({ doc: smallDoc, layer: null, bounds: null });
+  assert.strictEqual(selPx.components, 4);
+  assert.strictEqual(selPx.data[3], 255);
+  assert.strictEqual(selPx.data[(selPx.width - 1) * 4 + 3], 0);
+
+  // 5f. 16 位文档：蒙版写成 0–32768
+  let made16 = null;
+  fakePs.imaging.createImageDataFromBuffer = async (buf, o) => { made16 = buf; return { buf, ...o, dispose() {} }; };
+  await ps.putMask(1, 2, new Uint8Array([0, 255]), 2, 1, { left: 0, top: 0 }, "bitDepth16");
+  assert.ok(made16 instanceof Uint16Array && made16[1] === 32768);
+  await ps.putMask(1, 2, new Uint8Array([0, 255]), 2, 1, { left: 0, top: 0 }, "bitDepth8");
+  assert.ok(made16 instanceof Uint8Array);
+
+  // 5g. 合并画面：先选中最顶层
+  calls.batchPlay.length = 0;
+  await ps.selectTopLayer({ layers: [{ id: 77 }, { id: 5 }] });
+  assert.strictEqual(calls.batchPlay[0]._target[0]._id, 77);
+
+  // 5h. Camera Raw 图层：单个图层先选中分析的图层再整层复制（不用 copyToLayer：有选区时只复制选区）；
+  //     合并画面在最顶层盖印；用户取消 Camera Raw 时抛错（modal 不提交，复制出的图层撤回）
+  calls.batchPlay.length = 0;
+  await ps.cameraRawLayer("CR", { merged: false, layerId: 7 });
+  assert.strictEqual(calls.batchPlay[0]._obj, "select");
+  assert.strictEqual(calls.batchPlay[0]._target[0]._id, 7);
+  assert.ok(calls.batchPlay.some((c) => c._obj === "duplicate"));
+  assert.ok(!calls.batchPlay.some((c) => c._obj === "copyToLayer"));
+  calls.batchPlay.length = 0;
+  await ps.cameraRawLayer("CR", { merged: true, doc: { layers: [{ id: 88 }] } });
+  assert.strictEqual(calls.batchPlay[0]._target[0]._id, 88);
+  assert.ok(calls.batchPlay.some((c) => c._obj === "mergeVisible" && c.duplicate));
+  const bp0 = fakePs.action.batchPlay;
+  fakePs.action.batchPlay = async (descs) => (descs[0]._obj === "Adobe Camera Raw Filter" ? [{ _obj: "error", result: -128 }] : []);
+  await assert.rejects(ps.cameraRawLayer("CR", { merged: false, layerId: 7 }), /Camera Raw/);
+  fakePs.action.batchPlay = bp0;
+
+  // 5i. 有选区时：先存成临时通道并取消选择，生成后恢复并删除临时通道；没有选区时不碰
+  calls.batchPlay.length = 0;
+  assert.strictEqual(await ps.withoutSelection({ selection: { bounds: null } }, async () => 3), 3);
+  assert.strictEqual(calls.batchPlay.length, 0);
+  const seq = [];
+  const r5 = await ps.withoutSelection({ selection: { bounds: { left: 0, top: 0, right: 5, bottom: 5 } } }, async () => {
+    seq.push(calls.batchPlay.map((c) => c._obj).join(","));
+    return 4;
+  });
+  assert.strictEqual(r5, 4);
+  assert.strictEqual(seq[0], "duplicate,set");
+  assert.deepStrictEqual(calls.batchPlay.map((c) => c._obj), ["duplicate", "set", "set", "delete"]);
+  calls.batchPlay.length = 0;
+  await assert.rejects(ps.withoutSelection({ selection: { bounds: { left: 0, top: 0, right: 5, bottom: 5 } } }, async () => {
+    throw new Error("boom");
+  }), /boom/);
+  assert.deepStrictEqual(calls.batchPlay.map((c) => c._obj), ["duplicate", "set", "set", "delete"]);  // 失败也恢复
 
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });

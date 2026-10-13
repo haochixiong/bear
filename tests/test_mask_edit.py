@@ -45,3 +45,40 @@ def test_undo():
     h.mask[2, 2] = True
     assert h.undo() and not h.mask[2, 2]
     assert not h.undo()
+
+
+def _bfs(m, y, x):
+    from collections import deque
+
+    h, w = m.shape
+    out = np.zeros_like(m)
+    if not m[y, x]:
+        return out
+    q = deque([(y, x)])
+    out[y, x] = True
+    while q:
+        cy, cx = q.popleft()
+        for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
+            if 0 <= ny < h and 0 <= nx < w and m[ny, nx] and not out[ny, nx]:
+                out[ny, nx] = True
+                q.append((ny, nx))
+    return out
+
+
+def test_connected_component_matches_flood_fill():
+    rng = np.random.default_rng(3)
+    for _ in range(200):
+        h, w = rng.integers(1, 30, 2)
+        m = rng.random((h, w)) < rng.uniform(0.3, 0.8)
+        y, x = int(rng.integers(0, h)), int(rng.integers(0, w))
+        assert np.array_equal(me.connected_component(m, y, x), _bfs(m, y, x))
+
+
+def test_magic_wand_large_flat_area_is_fast():
+    import time
+
+    img = np.full((1000, 1000, 3), 180, np.uint8)
+    t = time.perf_counter()
+    m = me.magic_wand(img, 500, 500, 8)
+    assert m.all()
+    assert time.perf_counter() - t < 1.5  # 以前逐像素膨胀约 2.5 秒

@@ -121,8 +121,23 @@ def set_calibration(channels: dict | None) -> None:
 
 
 def _per_unit(channel: str | None, key: str, default: float) -> float:
+    """实测的“每格多少”。太小（不到经验值的 10%，说明这个滑块几乎推不动该通道的色块，多半是测量噪声）时不用，
+    否则任何调整都会被换算成 ±100。"""
     v = calibration().get(channel or "", {}).get(key) if channel else None
-    return float(v) if v and abs(float(v)) > 1e-6 else default
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return default
+    return v if np.isfinite(v) and abs(v) >= 0.1 * abs(default) else default
+
+
+def _slider(delta: float, channel: str | None, key: str, default: float) -> int:
+    u = _per_unit(channel, key, default)
+    # 正负方向分别实测过时，按要拉的方向取对应的系数（方向与总体系数不一致时不用）
+    side = _per_unit(channel, f"{key}_{'pos' if delta / u >= 0 else 'neg'}", u)
+    if side * u <= 0:
+        side = u
+    return int(np.clip(round(delta / side), -100, 100))
 
 
 def is_calibrated(channel: str | None = None) -> bool:
@@ -131,17 +146,17 @@ def is_calibrated(channel: str | None = None) -> bool:
 
 
 def hue_slider(from_hue: float, to_hue: float, channel: str | None = None) -> int:
-    return int(np.clip(round(float(cs.hue_diff(from_hue, to_hue)) / _per_unit(channel, "hue_per_unit", HUE_PER_UNIT)), -100, 100))
+    return _slider(float(cs.hue_diff(from_hue, to_hue)), channel, "hue_per_unit", HUE_PER_UNIT)
 
 
 def sat_slider(from_sat: float, to_sat: float, channel: str | None = None) -> int:
     if from_sat <= 1e-6:
         return 0
-    return int(np.clip(round((to_sat / from_sat - 1.0) / _per_unit(channel, "sat_per_unit", SAT_PER_UNIT)), -100, 100))
+    return _slider(to_sat / from_sat - 1.0, channel, "sat_per_unit", SAT_PER_UNIT)
 
 
 def lum_slider(dL: float, channel: str | None = None) -> int:
-    return int(np.clip(round(dL / _per_unit(channel, "lum_per_unit", LUM_PER_UNIT)), -100, 100))
+    return _slider(dL, channel, "lum_per_unit", LUM_PER_UNIT)
 
 
 def lab_hue_to_hsb_hue(lab_hue: float, L: float = 62.0, C: float = 35.0) -> float:

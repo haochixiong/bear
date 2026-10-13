@@ -59,6 +59,13 @@
 | P8 | 过期提示 | `main.js` `refreshTarget` | 分析后在图层上画一笔，面板提示“可能过期” |
 | P9 | Camera Raw | `ps.js` `cameraRawLayer` | 复制 → 智能对象 → 打开 Camera Raw 对话框。如果描述符名不是 `Adobe Camera Raw Filter`，用 Alchemist 录制后替换；录到带参数的描述符后，可以把 ACR 参数直接写进去，不再需要用户手动套预设，同时实现 `main.js` 里的 `calibrate()` |
 | P10 | 导出 xmp | `main.js` `exportXmp` | 存下的 `.xmp` 能在 ACR 预设面板里导入，并且数值正确 |
+| P11 | 分辨率不是 72 ppi | `ps.js` `inspectTarget` / `readPixels` | 用 300 ppi 的文档确认 `doc.width/height`、`layer.bounds` 都是像素（不是按 72 ppi 换算的点）；否则蒙版位置和大小会错 |
+| P12 | 超大图 | `ps.js` `readPixels` | 长边 > 4096 的文档：返回的 `level` 与 `sourceBounds` 换算后，蒙版与画面对齐（已按 2^level 换算，需在真机确认） |
+| P13 | 16 / 32 位文档 | `ps.js` `putMask` / `grayImageData` | 16 位文档的蒙版写成 0–32768，32 位写成 0–1 浮点，PS 里看到的灰度正确；32 位文档里色彩平衡等是否可用 |
+| P14 | 不规则选区取色 | `ps.js` `readSelectionPixels` | 椭圆 / 套索 / 魔棒选区时 `imaging.getSelection` 返回的灰度与像素对齐；羽化选区的半透明部分按比例计入 |
+| P15 | 有选区时生成 | `ps.js` `withoutSelection` | 有选区时点「生成」：选区先存成临时通道并取消，整体调整图层不带选区蒙版；生成后选区恢复、临时通道删除 |
+| P16 | Camera Raw 图层 | `ps.js` `cameraRawLayer` | 分析单个图层后（当前选中的是调整图层组）点「生成 Camera Raw 图层」：复制的是分析过的图层；合并模式下盖印图层在最顶层；在 Camera Raw 里点「取消」时复制出的图层被撤回 |
+| P17 | 非 RGB 文档 | `main.js` `generate` | CMYK / Lab / 灰度文档里点「生成」给出“请先转换为 RGB”的提示，不建图层；`doc.mode` 的实际取值请打印确认 |
 
 ## 还没做 / 建议下一步（按优先级）
 
