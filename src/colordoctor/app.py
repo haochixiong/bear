@@ -29,6 +29,62 @@ def _install_excepthook(app):
     sys.excepthook = hook
 
 
+def selftest() -> int:
+    """打包后自检：核心算法、内置数据文件、界面能否创建。
+
+    结果写入当前目录的 selftest.log（Windows 窗口程序没有控制台输出），
+    成功时内容为 SELFTEST OK，返回码 0。
+    """
+    import os
+
+    log = os.environ.get("COLORDOCTOR_SELFTEST_LOG", "selftest.log")
+    try:
+        _selftest_body()
+        msg, code = "SELFTEST OK", 0
+    except Exception:
+        msg, code = "SELFTEST FAILED\n" + traceback.format_exc(), 1
+    try:
+        Path(log).write_text(msg + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    if sys.stdout is not None:
+        print(msg)
+    return code
+
+
+def _selftest_body() -> None:
+    import os
+
+    import numpy as np
+
+    from PyQt6.QtCore import QSettings
+    from PyQt6.QtWidgets import QApplication
+
+    from colordoctor.core import analysis, skin_presets
+    from colordoctor.core.color_management import synthetic_context
+
+    presets = skin_presets.builtin_presets()
+    assert len(presets) >= 5, "内置风格预设缺失"
+    img = np.empty((120, 160, 3), np.uint8)
+    img[:] = (40, 80, 200)
+    img.reshape(-1, 3)[::20] = (230, 200, 40)
+    rep = analysis.analyze_region(img, synthetic_context())
+    assert rep.contamination.opposite_fraction > 0.04, "脏色检测异常"
+    app = QApplication.instance() or QApplication([])
+    import tempfile
+
+    from colordoctor.ui.main_window import MainWindow
+
+    tmp = tempfile.mkdtemp()
+    win = MainWindow(settings=QSettings(os.path.join(tmp, "s.ini"), QSettings.Format.IniFormat))
+    win.show()
+    for _ in range(20):  # 不进入 exec()：只需让窗口完成布局和首次绘制
+        app.processEvents()
+    win.grab()
+    win.close()
+    win.deleteLater()
+
+
 def main(argv: list[str] | None = None) -> int:
     from PyQt6.QtWidgets import QApplication
 
@@ -36,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     from colordoctor.ui.theme import STYLESHEET
 
     argv = list(sys.argv if argv is None else argv)
+    if "--selftest" in argv:
+        return selftest()
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("ColorDoctor")
     app.setOrganizationName("ColorDoctor")

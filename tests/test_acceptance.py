@@ -48,3 +48,12 @@ def test_24mp_region_analysis_is_fast_enough():
     assert r.stats.total_pixels == 24_000_000
     assert r.stats.sampled_pixels <= 262_144
     assert np.isclose(r.contamination.opposite_fraction, 0.02, rtol=0.25)
+
+
+def test_selftest_entry_point(qapp, tmp_path, monkeypatch):
+    from colordoctor import app
+
+    log = tmp_path / "selftest.log"
+    monkeypatch.setenv("COLORDOCTOR_SELFTEST_LOG", str(log))
+    assert app.selftest() == 0
+    assert "SELFTEST OK" in log.read_text(encoding="utf-8")
