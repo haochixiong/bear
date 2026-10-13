@@ -91,9 +91,9 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
             continue
         if a.mean_hue is None or b.mean_hue is None:
             continue
-        hs = ac.hue_slider(a.mean_hue, b.mean_hue)
-        ss = ac.sat_slider(a.mean_sat, b.mean_sat)
-        ls = ac.lum_slider((b.mean_lab[0] - a.mean_lab[0]) if (a.mean_lab and b.mean_lab) else 0.0)
+        hs = ac.hue_slider(a.mean_hue, b.mean_hue, channel=a.name)
+        ss = ac.sat_slider(a.mean_sat, b.mean_sat, channel=a.name)
+        ls = ac.lum_slider((b.mean_lab[0] - a.mean_lab[0]) if (a.mean_lab and b.mean_lab) else 0.0, channel=a.name)
         diffs.append(ChannelDiff(name, b.share, a.share, hs, ss, ls))
 
     # 主色对应

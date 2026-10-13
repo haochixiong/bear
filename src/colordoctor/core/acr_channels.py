@@ -93,18 +93,55 @@ def channel_stats(rgb_pixels: np.ndarray, min_sat: float = 8.0) -> list[ChannelS
     return out
 
 
-def hue_slider(from_hue: float, to_hue: float) -> int:
-    return int(np.clip(round(float(cs.hue_diff(from_hue, to_hue)) / HUE_PER_UNIT), -100, 100))
+SAT_PER_UNIT = 0.01  # 饱和度 +100 ≈ ×2
+CALIBRATION_FILE = "acr_calibration.json"
+_calibration: dict | None = None
 
 
-def sat_slider(from_sat: float, to_sat: float) -> int:
+def calibration() -> dict:
+    """用户在自己的 ACR 上实测的换算表（见 acr_calibration.py）；没有时为空，使用经验值。"""
+    global _calibration
+    if _calibration is None:
+        import json
+
+        from colordoctor.core.skin_presets import user_config_dir
+
+        try:
+            data = json.loads((user_config_dir() / CALIBRATION_FILE).read_text(encoding="utf-8"))
+            _calibration = data.get("channels", {}) if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _calibration = {}
+    return _calibration
+
+
+def set_calibration(channels: dict | None) -> None:
+    """测试或校准完成后直接替换内存中的换算表（None = 下次重新读文件）。"""
+    global _calibration
+    _calibration = channels
+
+
+def _per_unit(channel: str | None, key: str, default: float) -> float:
+    v = calibration().get(channel or "", {}).get(key) if channel else None
+    return float(v) if v and abs(float(v)) > 1e-6 else default
+
+
+def is_calibrated(channel: str | None = None) -> bool:
+    cal = calibration()
+    return bool(cal.get(channel)) if channel else bool(cal)
+
+
+def hue_slider(from_hue: float, to_hue: float, channel: str | None = None) -> int:
+    return int(np.clip(round(float(cs.hue_diff(from_hue, to_hue)) / _per_unit(channel, "hue_per_unit", HUE_PER_UNIT)), -100, 100))
+
+
+def sat_slider(from_sat: float, to_sat: float, channel: str | None = None) -> int:
     if from_sat <= 1e-6:
         return 0
-    return int(np.clip(round((to_sat / from_sat - 1.0) * 100), -100, 100))
+    return int(np.clip(round((to_sat / from_sat - 1.0) / _per_unit(channel, "sat_per_unit", SAT_PER_UNIT)), -100, 100))
 
 
-def lum_slider(dL: float) -> int:
-    return int(np.clip(round(dL / LUM_PER_UNIT), -100, 100))
+def lum_slider(dL: float, channel: str | None = None) -> int:
+    return int(np.clip(round(dL / _per_unit(channel, "lum_per_unit", LUM_PER_UNIT)), -100, 100))
 
 
 def lab_hue_to_hsb_hue(lab_hue: float, L: float = 62.0, C: float = 35.0) -> float:

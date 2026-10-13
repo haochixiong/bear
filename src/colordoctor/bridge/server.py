@@ -14,6 +14,9 @@
   POST /reference   同上的像素格式，存为参考图，返回 {"ref": id}
   GET  /mask?session=&layer=[&w=&h=]  ->  w*h 字节灰度（255 = 作用）
   POST /acr-preset  体：{"name":..., "params": {...}} -> .xmp 文本
+  GET  /calibration/chart  色卡像素（RGB）；GET /calibration/plan 要测的 (通道, 滑块, 数值) 列表
+  POST /calibration/sample?slider=base | ?channel=&slider=&value=  上传色卡像素（未调整 / 调整后）
+  POST /calibration/fit  拟合并保存换算表
 """
 
 from __future__ import annotations
@@ -135,6 +138,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ColorDoctorBridge/" + __version__
     sessions: Store
     refs: Store
+    calibration: dict
 
     def log_message(self, fmt, *args):  # 不在控制台刷屏
         pass
@@ -193,6 +197,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return None
+            if url.path == "/calibration/chart":
+                from colordoctor.core import acr_calibration as cal
+
+                img, patches = cal.chart()
+                data = img.tobytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("X-Width", str(img.shape[1]))
+                self.send_header("X-Height", str(img.shape[0]))
+                self.send_header("X-Components", "3")
+                self.end_headers()
+                self.wfile.write(data)
+                return None
+            if url.path == "/calibration/plan":
+                from colordoctor.core import acr_calibration as cal
+
+                steps = [{"channel": n, "slider": s_, "value": v} for n, _ in cal.ac.CHANNELS for s_ in cal.SLIDERS for v in cal.DEFAULT_VALUES]
+                return self._send(200, {"steps": steps})
             return self._send(404, {"error": "not found"})
         except KeyError:
             return self._send(404, {"error": "没有这个图层"})
@@ -215,6 +238,23 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/reference":
                 prep = pixel_guard.prepare(self._pixels())
                 return self._send(200, {"ref": self.refs.put(prep.rgb), "notes": list(prep.notes)})
+            if url.path == "/calibration/sample":
+                img = self._pixels()[..., :3].copy()
+                if q.get("slider") == "base":
+                    self.calibration.clear()
+                    self.calibration["base"] = img
+                else:
+                    self.calibration.setdefault("samples", []).append((q["channel"], q["slider"], int(q["value"]), img))
+                return self._send(200, {"ok": True, "count": len(self.calibration.get("samples", []))})
+            if url.path == "/calibration/fit":
+                from colordoctor.core import acr_calibration as cal
+
+                if "base" not in self.calibration:
+                    raise ValueError("还没有上传未调整的色卡")
+                channels = cal.fit(self.calibration["base"], self.calibration.get("samples", []))
+                req = json.loads(self._body() or b"{}")
+                path = cal.store(channels, req.get("acr_version", ""))
+                return self._send(200, {"channels": channels, "saved": path})
             if url.path == "/acr-preset":
                 from colordoctor.core import acr_preset
 
@@ -236,7 +276,7 @@ def _header_text(v: str) -> str:
 
 
 def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4)})
+    handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4), "calibration": {}})
     srv = ThreadingHTTPServer((HOST, port), handler)
     srv.daemon_threads = True
     return srv

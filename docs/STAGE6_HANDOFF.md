@@ -10,7 +10,7 @@
 | 1 | 本机桥接服务（127.0.0.1） | ✅ 完成 | `src/colordoctor/bridge/server.py`，命令 `colordoctor serve [--port 47321]` | `tests/test_bridge.py` |
 | 2 | 图层方案（问题 → 调整图层 + 羽化蒙版） | ✅ 完成（脏色、发灰、肤色不均、颜色统一） | `src/colordoctor/core/layer_plan.py` | 同上 |
 | 3 | 图层检查（调整图层 / 空白 / 纯色 / 半透明裁剪） | ✅ 完成（服务端兜底） | `src/colordoctor/core/pixel_guard.py` | 同上 |
-| 4 | ACR 预设 .xmp 导出 + 滑块校准色卡 | ⏳ 未开始 | 计划：`core/acr_preset.py`、`core/acr_calibration.py`；服务路由 `/acr-preset` 已预留 | |
+| 4 | ACR 预设 .xmp 导出 + 滑块实测校准 | ✅ 完成（Python 端） | `core/acr_preset.py`（`build_xmp`、`params_from_adjustments`）、`core/acr_calibration.py`（色卡、拟合、保存）；`acr_channels` 的滑块换算按通道读取 `acr_calibration.json`；服务路由 `/acr-preset`、`/calibration/*` | `tests/test_acr.py`、`tests/test_bridge.py` |
 | 5 | UXP 插件 | ⏳ 未开始 | 计划：`photoshop-plugin/` | 只能在 Windows PS Beta 验证 |
 | 6 | RAW（rawpy） | ⏳ 未开始 | 计划：`core/color_management.py` 增加 `load_raw` | |
 | 7 | AI 抠皮肤（onnxruntime + MediaPipe 多类分割） | ⏳ 未开始 | 计划：`core/segmentation.py`（可选依赖） | |
@@ -33,8 +33,17 @@
 
 ## 接手时先做
 
-1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **346 passed**）。
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **352 passed**）。
 2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
+
+## 校准流程（插件端待实现，见 UXP 部分）
+
+1. `GET /calibration/chart` 取色卡像素 → 插件新建 sRGB 文档并 `putPixels`。
+2. 读回未调整的色卡像素 → `POST /calibration/sample?slider=base`。
+3. `GET /calibration/plan` 得到 96 步（8 通道 × 色相/饱和度/明亮度 × −100/−50/+50/+100）。每步：复制色卡图层 → 对副本应用 Camera Raw 滤镜，只设这一个滑块 → 读像素 → `POST /calibration/sample?channel=&slider=&value=` → 删除副本。
+4. `POST /calibration/fit`（体 `{"acr_version": "…"}`）→ 保存到用户配置目录，之后所有混色器数值标为“已校准”。
+- **未验证**：Camera Raw 滤镜的 batchPlay 描述符需要在 Windows 上用 Alchemist 录一次（录“滤镜 → Camera Raw 滤镜”，改一个 HSL 滑块后确定），把录到的键名填进插件的 `acrFilterDescriptor()`。
+- `.xmp` 的字段名（`HueAdjustmentOrange`、`SplitToningShadowHue`、`ColorGradeBlending`、`ToneCurvePV2012` 等）按 ACR 预设格式写，**需要在 Windows 上把导出的预设放进 ACR 预设文件夹验证一次**。
 
 ## 注意
 

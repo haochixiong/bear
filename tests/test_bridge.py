@@ -195,3 +195,35 @@ def test_http_blocked_layer_returns_422(bridge):
     assert code == 422 and "空白" in json.loads(body)["blocked"]
     code, _, body = _req(bridge + "/analyze?mode=dirty", bytes(300), hdr)
     assert code == 400  # 字节数不符
+
+
+def test_http_acr_preset_and_calibration(bridge, tmp_path, monkeypatch):
+    from colordoctor.core import acr_calibration as cal
+    from colordoctor.core import acr_channels as ac
+
+    monkeypatch.setattr("colordoctor.core.skin_presets.user_config_dir", lambda: tmp_path)
+    body = json.dumps({"name": "测试", "params": {"hsl": {"橙色": {"hue": -4}}}}).encode()
+    code, _, x = _req(bridge + "/acr-preset", body, {"Content-Type": "application/json"})
+    assert code == 200 and b'crs:HueAdjustmentOrange="-4"' in x
+    code, h, data = _req(bridge + "/calibration/chart")
+    w, hh = int(h["X-Width"]), int(h["X-Height"])
+    img = np.frombuffer(data, np.uint8).reshape(hh, w, 3)
+    hdr = {"X-Width": str(w), "X-Height": str(hh), "X-Components": "3"}
+    assert _req(bridge + "/calibration/sample?slider=base", img.tobytes(), hdr)[0] == 200
+    _, patches = cal.chart()
+    out = img.copy()
+    for p in patches:
+        if p.channel == "蓝色":
+            x, y, pw, ph = p.rect
+            lab = cs.srgb8_to_lab(out[y:y + ph, x:x + pw])
+            lab[..., 0] += 10
+            out[y:y + ph, x:x + pw] = cs.lab_to_srgb8(lab)
+    assert _req(bridge + "/calibration/sample?channel=%E8%93%9D%E8%89%B2&slider=lum&value=50", out.tobytes(), hdr)[0] == 200
+    code, _, body = _req(bridge + "/calibration/fit", b"{}")
+    assert code == 200, body
+    res = json.loads(body)
+    assert res["channels"]["蓝色"]["lum_per_unit"] == pytest.approx(0.2, abs=0.04)
+    assert (tmp_path / "acr_calibration.json").exists()
+    ac.set_calibration({})
+    code, _, body = _req(bridge + "/calibration/plan")
+    assert len(json.loads(body)["steps"]) == 8 * 3 * 4

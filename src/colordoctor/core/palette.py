@@ -271,8 +271,8 @@ def family_unity(
     sat_goal = float(np.median([c.mean_sat for c in stats])) if stats else 0
     adjs = []
     for c in stats:
-        hs = ac.hue_slider(c.mean_hue, goal)
-        ss = ac.sat_slider(c.mean_sat, sat_goal) if len(stats) > 1 else 0
+        hs = ac.hue_slider(c.mean_hue, goal, channel=c.name)
+        ss = ac.sat_slider(c.mean_sat, sat_goal, channel=c.name) if len(stats) > 1 else 0
         parts = []
         if abs(hs) >= 5:
             parts.append(f"色相 {hs:+d}")
@@ -488,7 +488,7 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
         act = style.get("channel_targets", {}).get(c.name, "keep")
         if act.startswith("toward:"):
             goal = ac.lab_hue_to_hsb_hue(sector_center[act.split(":", 1)[1]])
-            hs = ac.hue_slider(c.mean_hue, goal)
+            hs = ac.hue_slider(c.mean_hue, goal, channel=c.name)
             if abs(hs) >= 8:
                 text = f"{c.name}（占画面颜色 {c.share:.0%}）：色相 {hs:+d}，往“{act.split(':', 1)[1]}”靠"
                 if abs(hs) >= 100:
@@ -497,9 +497,12 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
         elif act.startswith("desat"):
             amount = -int(np.clip(30 + 200 * c.share, 30, 90)) if act != "desat_light" else -15
             text = f"{c.name}（占画面颜色 {c.share:.0%}）：饱和度 {amount:+d}"
+            prm = [("饱和度", amount)]
             if act == "desat_dark":
-                text += f"，明亮度 {-int(np.clip(20 + 100 * c.share, 20, 60)):+d}"
-            out.append(Adjustment("Camera Raw 混色器", text, "中等" if c.share >= 0.15 else "小幅", True, (("饱和度", amount),)))
+                lum = -int(np.clip(20 + 100 * c.share, 20, 60))
+                text += f"，明亮度 {lum:+d}"
+                prm.append(("明亮度", lum))
+            out.append(Adjustment("Camera Raw 混色器", text, "中等" if c.share >= 0.15 else "小幅", True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
     for key, label, t, sel_hi in (("shadow_tint", "阴影", sh, False), ("highlight_tint", "高光", hl, True)):
         spec = style.get(key)
@@ -513,7 +516,8 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
         if float(np.hypot(*(goal[1:] - cur[1:]))) < 2:
             continue
         gh, gs = ac.tint_to_grading(goal[0], goal[1], goal[2])
-        out.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（目标 Lab 色调 a* {goal[1]:+.1f}、b* {goal[2]:+.1f}，当前 a* {cur[1]:+.1f}、b* {cur[2]:+.1f}）", "小幅", True))
+        out.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（目标 Lab 色调 a* {goal[1]:+.1f}、b* {goal[2]:+.1f}，当前 a* {cur[1]:+.1f}、b* {cur[2]:+.1f}）", "小幅", True,
+                              (("色相", gh), ("饱和度", gs))))
         rgb_cur = cs.lab_to_srgb8(cur).astype(int)
         rgb_goal = cs.lab_to_srgb8(goal).astype(int)
         pts = "；".join(f"{n}通道 输入 {a} → 输出 {b}" for n, a, b in zip(("红", "绿", "蓝"), rgb_cur, rgb_goal) if a != b)
