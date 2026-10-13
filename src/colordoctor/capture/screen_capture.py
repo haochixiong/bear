@@ -47,10 +47,18 @@ def screen_info(qs) -> ScreenInfo:
 _icc_cache: dict[str, bytes | None] = {}
 
 
-def icc_for(name: str, refresh: bool = False) -> bytes | None:
-    if refresh or name not in _icc_cache:
-        _icc_cache[name] = monitor_icc_bytes(name)
-    return _icc_cache[name]
+def icc_for(name: str, refresh: bool = False, info: ScreenInfo | None = None) -> bytes | None:
+    """显示器 ICC。name 是 Qt 屏幕名；info 用来在 Qt 返回型号名时按位置找到 GDI 设备名。"""
+    from colordoctor.capture.windows_display import gdi_device_name
+
+    center = None
+    if info is not None:  # Qt 6：每块屏幕的左上角保持物理坐标，尺寸按缩放比例换算
+        center = (int(info.x + info.width * info.dpr / 2), int(info.y + info.height * info.dpr / 2))
+    device = gdi_device_name(name, center) or name
+    key = (device, center)  # 两块同型号显示器不会共用缓存
+    if refresh or key not in _icc_cache:
+        _icc_cache[key] = monitor_icc_bytes(device)
+    return _icc_cache[key]
 
 
 def list_screens() -> list[ScreenInfo]:
@@ -63,7 +71,7 @@ def freeze_all_screens() -> list[ScreenCapture]:
         pm = qs.grabWindow(0)
         arr = qimage_to_array(pm.toImage())
         info = screen_info(qs)
-        out.append(ScreenCapture(info=info, pixels=arr, icc=icc_for(info.name, refresh=True), qscreen=qs))
+        out.append(ScreenCapture(info=info, pixels=arr, icc=icc_for(info.name, refresh=True, info=info), qscreen=qs))
     return out
 
 

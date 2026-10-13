@@ -158,7 +158,7 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence,
                 causes=("多光源（色温不同的灯/窗光）", "局部调色叠加不均匀", "选区包含了不同物体"),
-                adjustments=tuple(rec.contamination_adjustments(ct.base_hue_name, ct.base_hue_name, skin)[:1]),
+                adjustments=tuple(rec.dispersion_adjustments(ct.base_hue_name, skin)),
                 confidence=conf * 0.9,
                 notes=("确认选区内只有同一种材质/物体",) + tuple(base_notes),
             )
@@ -524,7 +524,7 @@ def compare_regions(
         parts.append(f"{word}（Δh {c.dh:+.1f}°，Δa* {c.da:+.1f}，Δb* {c.db:+.1f}）")
     if not parts:
         parts.append(f"两个区域非常接近（ΔE00 {c.delta_e00:.1f}）")
-    adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab))
+    adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin))
     main = Finding(
         problem="问题区相对参考区：" + "；".join(parts),
         severity=severity_from_score(sev_score),
@@ -549,9 +549,10 @@ def compare_regions(
 
 
 # ------------------------------------------------------------------ 整图扫描
-def scan_image(image: np.ndarray, context: ColorContext, rect=None) -> AnalysisReport:
-    stats = rs.compute_stats(image)
-    ct = ct_mod.analyze(image, mode="scan", offset=_offset(rect))
+def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.ndarray | None = None) -> AnalysisReport:
+    """valid：可选的有效像素蒙版（例如半透明图层的不透明部分），蒙版外不计入。"""
+    stats = rs.compute_stats(image, valid=valid)
+    ct = ct_mod.analyze(image, mode="scan", offset=_offset(rect), valid=valid)
     conf, reasons = dr.confidence(stats, context, ct)
     conf *= 0.85  # 整图没有语义，结论更保守
     reasons = ["整图扫描不知道哪里是同一物体，只报告“散点状混杂”和“同色局部发灰”，请逐处确认"] + reasons

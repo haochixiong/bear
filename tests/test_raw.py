@@ -55,6 +55,7 @@ def test_load_raw_decodes_with_camera_wb_to_srgb(monkeypatch, tmp_path):
     src = cm.load_image(f)
     assert src.pixels.shape == (30, 40, 3) and src.pixels[0, 0, 0] == 200
     assert raw.kwargs["use_camera_wb"] is True and raw.kwargs["output_color"] == "sRGB" and raw.kwargs["output_bps"] == 8
+    assert raw.kwargs["gamma"] == (2.4, 12.92)
     assert any("ACR" in w for w in src.context.warnings)
     assert src.context.source == "file" and src.context.device == "x.CR3"
 

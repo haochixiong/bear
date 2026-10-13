@@ -66,7 +66,7 @@ def sample_point(pixels: np.ndarray, x: int, y: int, radius: int, context: Color
     return PointSample(
         x=int(x),
         y=int(y),
-        radius=int(radius),
+        radius=int(max(0, min(radius, MAX_RADIUS))),  # 与实际取样一致（超过上限会被裁到 MAX_RADIUS）
         pixel_count=int(patch.shape[0]),
         values=color_values(patch.astype(np.float64).mean(axis=0)),
         context=context,

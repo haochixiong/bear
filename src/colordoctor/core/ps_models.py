@@ -82,7 +82,13 @@ def color_balance(
 PS_RANGES = {
     "reds": (315.0, 345.0, 15.0, 45.0),
     "yellows": (15.0, 45.0, 75.0, 105.0),
+    "greens": (75.0, 105.0, 135.0, 165.0),
+    "cyans": (135.0, 165.0, 195.0, 225.0),
+    "blues": (195.0, 225.0, 255.0, 285.0),
+    "magentas": (255.0, 285.0, 315.0, 345.0),
 }
+RANGE_NAMES = {"reds": "红色", "yellows": "黄色", "greens": "绿色", "cyans": "青色", "blues": "蓝色", "magentas": "洋红"}
+SKIN_RANGES = ("reds", "yellows")
 
 
 def _range_weight(hue_deg: np.ndarray, rng: str) -> np.ndarray:
@@ -205,11 +211,11 @@ def _mean_lab(x: np.ndarray) -> np.ndarray:
     return cs.srgb8_to_lab(np.clip(x, 0, 1) * 255.0).mean(axis=0)
 
 
-def _range_for(x: np.ndarray) -> str:
+def _range_for(x: np.ndarray, candidates=SKIN_RANGES) -> str:
+    """在候选的 PS 颜色范围里选覆盖这些像素最多的一个（肤色只在红色 / 黄色之间选）。"""
     h, _, _ = _rgb_to_hsl(x)
-    w_r = _range_weight(h * 360.0, "reds").mean()
-    w_y = _range_weight(h * 360.0, "yellows").mean()
-    return "reds" if w_r >= w_y else "yellows"
+    weights = {r: float(_range_weight(h * 360.0, r).mean()) for r in candidates}
+    return max(candidates, key=lambda r: weights[r])
 
 
 def _apply(tool: str, x: np.ndarray, p: np.ndarray, rng: str) -> np.ndarray:
@@ -222,7 +228,7 @@ def _apply(tool: str, x: np.ndarray, p: np.ndarray, rng: str) -> np.ndarray:
     raise ValueError(tool)
 
 
-def solve(pixels: np.ndarray, target_lab, tool: str, max_pixels: int = 3000) -> Solution:
+def solve(pixels: np.ndarray, target_lab, tool: str, max_pixels: int = 3000, ranges=SKIN_RANGES) -> Solution:
     """在模型下用确定性坐标搜索寻找整数参数，使平均色尽量接近 target_lab（ΔE00）。"""
     x = np.asarray(pixels, dtype=float).reshape(-1, 3)
     if x.shape[0] > max_pixels:
@@ -230,7 +236,7 @@ def solve(pixels: np.ndarray, target_lab, tool: str, max_pixels: int = 3000) -> 
         x = x[step // 2 :: step]
     target = np.asarray(target_lab, dtype=float)
     names, (lo, hi), reg = TOOL_SPECS[tool]
-    rng = _range_for(x) if tool != "color_balance" else "master"
+    rng = _range_for(x, ranges) if tool != "color_balance" else "master"
 
     def cost(p):
         lab = _mean_lab(_apply(tool, x, p, rng))

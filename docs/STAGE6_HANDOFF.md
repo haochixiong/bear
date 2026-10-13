@@ -12,7 +12,7 @@
 | 3 | 图层检查（调整图层 / 空白 / 纯色 / 半透明裁剪） | ✅ 完成（服务端兜底） | `src/colordoctor/core/pixel_guard.py` | 同上 |
 | 4 | ACR 预设 .xmp 导出 + 滑块实测校准 | ✅ 完成（Python 端） | `core/acr_preset.py`（`build_xmp`、`params_from_adjustments`）、`core/acr_calibration.py`（色卡、拟合、保存）；`acr_channels` 的滑块换算按通道读取 `acr_calibration.json`；服务路由 `/acr-preset`、`/calibration/*` | `tests/test_acr.py`、`tests/test_bridge.py` |
 | 5 | UXP 插件 | 🟡 代码完成，**未在真实 PS 上运行过** | `photoshop-plugin/`（见其 README）；新增服务模式 `patch`（取色）和 `/options` | `tests/test_plugin_js.py`（Node + 假 photoshop 模块 + 真实服务） |
-| 6 | RAW（rawpy） | ✅ 完成（未用真实 RAW 文件测过） | `color_management.load_raw / load_image / is_raw`；桌面版“打开 JPG / RAW”、命令行 `--raw-preview`；设置键 `raw/use_preview`（界面上还没有开关） | `tests/test_raw.py`（假 rawpy 模块） |
+| 6 | RAW（rawpy） | ✅ 完成（未用真实 RAW 文件测过） | `color_management.load_raw / load_image / is_raw`；桌面版“打开 JPG / RAW”、命令行 `--raw-preview`；设置里有“RAW 使用内嵌预览”开关 | `tests/test_raw.py`（假 rawpy 模块） |
 | 7 | AI 抠皮肤（onnxruntime + MediaPipe 多类分割） | ✅ 完成（Linux CPU 上用 MediaPipe 示例人像验证过：约 1 秒，脸 / 身体 / 头发 / 衣服分得开） | `core/segmentation.py`；服务 `mode=skin&seg=ai`，插件“抠皮肤”下拉框；模型不在仓库里，`build_windows.bat` 构建时下载到 `packaging/models/` 并打包；运行时查找顺序见 `model_candidates()`；没有模型或 onnxruntime 时自动退回肤色规则 | `tests/test_segmentation.py`（假推理会话；设 `COLORDOCTOR_SEG_MODEL` 时也跑真实模型） |
 
 ## 已定的接口约定（插件按这个写）
@@ -33,7 +33,7 @@
 
 ## 接手时先做
 
-1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **366 passed, 1 skipped**（需要 Node 才会跑插件 JS 测试））。
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **386 passed, 1 skipped**（需要 Node 才会跑插件 JS 测试））。
 2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
 
 ## 校准流程（插件端待实现，见 UXP 部分）

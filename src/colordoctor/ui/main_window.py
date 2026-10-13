@@ -582,7 +582,7 @@ class MainWindow(QMainWindow):
         if res is None:
             return
         patch, info, (gx, gy) = res
-        srgb, ctx = screen_pixels_to_srgb(patch, sc.icc_for(info.name), self._managed(), device=info.name, scale=info.dpr)
+        srgb, ctx = screen_pixels_to_srgb(patch, sc.icc_for(info.name, info=info), self._managed(), device=info.name, scale=info.dpr)
         vals = color_values(srgb.reshape(-1, 3).astype(float).mean(axis=0))
         self._live = (srgb, ctx, info, gx, gy, vals)
         r, g, b = vals.rgb

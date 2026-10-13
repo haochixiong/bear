@@ -113,3 +113,26 @@ def test_fit_recovers_simulated_slider_response(tmp_path, monkeypatch):
     assert ac.hue_slider(30, 40, channel="蓝色") == 33
     ac.set_calibration(None)  # 重新从文件读
     assert 47 <= ac.hue_slider(30, 40, channel="橙色") <= 53
+
+
+def test_params_for_palette_and_reference_reports_are_not_empty():
+    from colordoctor.core import analysis as an
+    from colordoctor.core.color_management import synthetic_context
+
+    img = np.zeros((120, 160, 3), np.uint8)
+    img[:] = cs.lab_to_srgb8(cs.lch_to_lab(np.array([55.0, 40.0, 140.0])))
+    img[:, :60] = cs.lab_to_srgb8(cs.lch_to_lab(np.array([65.0, 30.0, 60.0])))
+    rep = an.analyze_palette_report(img, synthetic_context(), style_key="teal_orange")
+    p = ap.params_for_report(rep)
+    assert p.get("hsl"), p
+    ref = np.zeros_like(img)
+    ref[:] = cs.lab_to_srgb8(cs.lch_to_lab(np.array([40.0, 30.0, 205.0])))
+    rep2 = an.compare_reference(img, ref, synthetic_context())
+    p2 = ap.params_for_report(rep2)
+    assert p2.get("hsl") or p2.get("grading"), p2
+
+
+def test_curve_duplicate_inputs_are_merged():
+    _, seqs = ap.settings_from_params({"curve": {"composite": [[0, 10], [0, 20], [128, 140]]}})
+    xs = [int(p.split(",")[0]) for p in seqs["ToneCurvePV2012"]]
+    assert len(xs) == len(set(xs))

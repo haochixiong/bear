@@ -86,10 +86,11 @@ def decode_pixels(body: bytes, width: int, height: int, comps: int) -> np.ndarra
     return np.frombuffer(body, np.uint8).reshape(height, width, comps)
 
 
-def run_analysis(rgb: np.ndarray, mode: str, q: dict, refs: Store, layer_name: str = ""):
+def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
     ctx = photoshop_context(layer_name)
+    rgb, valid = prep.rgb, prep.valid
     if mode == "dirty":
-        return analysis.scan_image(rgb, ctx)
+        return analysis.scan_image(rgb, ctx, valid=valid)
     if mode == "skin":
         part = q.get("part") or None
         manual = None
@@ -98,19 +99,26 @@ def run_analysis(rgb: np.ndarray, mode: str, q: dict, refs: Store, layer_name: s
 
             try:
                 manual = sg.segment_skin(rgb).part(part)
+                if valid is not None:
+                    manual &= valid
             except sg.SegmentationUnavailable as e:
                 ctx = dataclasses.replace(ctx, warnings=(*ctx.warnings, f"{e}；已改用肤色规则抠皮肤"))
             else:
                 if not manual.any():
                     raise pixel_guard.BlockedError("AI 没有在画面里找到这个部位的皮肤。可以换成「肤色规则」，或改选部位。")
+        if manual is None and valid is not None:
+            from colordoctor.core.skin_mask import skin_mask
+
+            manual = skin_mask(rgb, within=valid)[0]
         return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=part, manual_mask=manual)
     if mode == "palette":
-        return analysis.analyze_palette_report(rgb, ctx, style_key=q.get("style") or None, family=q.get("family") or None)
+        return analysis.analyze_palette_report(prep.filled_for_statistics(), ctx, style_key=q.get("style") or None,
+                                               family=q.get("family") or None)
     if mode == "reference":
         ref = refs.get(q.get("ref", ""))
         if ref is None:
             raise ValueError("找不到参考图，请重新选择参考图")
-        return analysis.compare_reference(rgb, ref, ctx)
+        return analysis.compare_reference(prep.filled_for_statistics(), ref, ctx)
     raise ValueError(f"未知模式：{mode}")
 
 
@@ -121,7 +129,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
     if mode == "patch":
         return patch_values(pixels)
     prep = pixel_guard.prepare(pixels)
-    report = run_analysis(prep.rgb, mode, q, refs, layer_name)
+    report = run_analysis(prep, mode, q, refs, layer_name)
     plan = layer_plan.plan_from_report(report, prep.rgb.shape)
     h, w = pixels.shape[:2]
     sid = sessions.put(Session(plan, (h, w), prep.offset, doc_size or (w, h)))
@@ -363,7 +371,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, res)
         if url.path == "/reference":
             prep = pixel_guard.prepare(self._pixels())
-            return self._send(200, {"ref": self.refs.put(prep.rgb), "notes": list(prep.notes)})
+            return self._send(200, {"ref": self.refs.put(prep.filled_for_statistics()), "notes": list(prep.notes)})
         if url.path == "/calibration/sample":
             from colordoctor.core import acr_calibration as cal
 

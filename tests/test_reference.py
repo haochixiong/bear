@@ -71,3 +71,24 @@ def test_palette_report_with_style_and_unity():
     assert "青橙" in probs and "统一度" in probs and "6:3:1" in probs
     st = [f for f in r.findings if "青橙" in f.problem][0]
     assert st.severity in (Severity.NORMAL, Severity.MILD)
+
+
+def test_grading_direction_uses_difference():
+    """我的阴影偏黄（b* +10），参考阴影 b* +3：应往蓝（色相约 200–300），而不是继续加黄。"""
+    import numpy as np
+
+    from colordoctor.core import color_spaces as cs
+    from colordoctor.core import reference_match as rm
+
+    def scene(shadow_b):
+        img = np.zeros((120, 160, 3), np.uint8)
+        L = np.linspace(8, 90, 160)[None, :].repeat(120, 0)
+        lab = np.stack([L, np.zeros_like(L), np.where(L < 30, shadow_b, 0.0)], -1)
+        img[:] = cs.lab_to_srgb8(lab)
+        return img
+
+    m = rm.match_reference(scene(10.0), scene(3.0))
+    g = [a for a in m.adjustments if a.tool == "Camera Raw 颜色分级" and a.instruction.startswith("阴影")]
+    assert g, [a.instruction for a in m.adjustments]
+    hue = dict(g[0].params)["色相"]
+    assert 180 <= hue <= 300, hue

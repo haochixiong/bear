@@ -99,7 +99,10 @@ def settings_from_params(params: dict) -> tuple[dict[str, str], dict[str, list[s
     for ch, pts in (params.get("curve") or {}).items():
         if ch not in CURVE_KEYS:
             raise ValueError(f"未知的曲线通道：{ch}")
-        clean = sorted({(_int(x, 0, 255), _int(y, 0, 255)) for x, y in pts})
+        by_x: dict[int, int] = {}
+        for x, y in pts:  # 同一个输入值只能有一个点
+            by_x.setdefault(_int(x, 0, 255), _int(y, 0, 255))
+        clean = sorted(by_x.items())
         if clean[0][0] != 0:
             clean.insert(0, (0, 0))
         if clean[-1][0] != 255:
@@ -169,7 +172,19 @@ def params_from_adjustments(adjustments) -> dict:
 
 def params_for_report(report) -> dict:
     """一份分析结果能直接写进 ACR 的全部数值：混色器、颜色分级，以及仿色的 RGB 复合曲线。"""
-    out = params_from_adjustments(getattr(report, "adjustments", ()) or ())
+    adjs = list(getattr(report, "adjustments", ()) or ())
+    for f in getattr(report, "findings", ()) or ():
+        adjs.extend(f.adjustments)
+    pal = getattr(report, "palette", None)
+    if pal is not None and getattr(pal, "style", None) is not None:
+        adjs.extend(pal.style.adjustments)
+    seen, uniq = set(), []
+    for a in adjs:  # 同一条建议可能同时出现在结论和风格结果里
+        key = (a.tool, a.instruction)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(a)
+    out = params_from_adjustments(uniq)
     ref = getattr(report, "reference", None)
     if ref is not None and getattr(ref, "curve_points", None):
         out["curve"] = {"composite": [[int(a), int(b)] for a, b in ref.curve_points]}

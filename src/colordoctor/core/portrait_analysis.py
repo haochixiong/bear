@@ -47,19 +47,44 @@ def ita_label(ita: float) -> str:
 
 
 def tendency_of(a: float, b: float) -> tuple[str, float]:
-    """相对自然肤色的总体倾向与超出量（度）。"""
+    """相对自然肤色的总体倾向与超出量（度，≥ 0：到自然区间最近一端的色相差）。
+
+    色相按顺时针连续处理：0° 两侧不再跳变（h = 359° 与 h = 1° 的超出量相近）。
+    a* < 0 时皮肤已经没有红色成分：b* ≥ 0 视为偏绿，b* < 0 视为偏青/偏蓝。
+    """
     h = math.degrees(math.atan2(b, a)) % 360.0
-    if h > 180:  # b < 0：偏洋红/紫
-        return "偏洋红", float(MAGENTA_HUE + (360 - h))
+    lo, hi = NATURAL_HUE
+    if a < 0:
+        return ("偏绿" if b >= 0 else "偏青/偏蓝"), float(abs(((h - hi + 180) % 360) - 180) if b >= 0 else abs(((h - lo + 180) % 360) - 180))
+    if h > 180:  # a ≥ 0、b < 0：红偏紫
+        return "偏洋红", float(lo + (360 - h))
     if h > GREEN_HUE or a <= GREEN_A:
-        return "偏绿", float(h - NATURAL_HUE[1])
-    if h > NATURAL_HUE[1]:
-        return "偏黄", float(h - NATURAL_HUE[1])
+        return "偏绿", float(max(0.0, h - hi))
+    if h > hi:
+        return "偏黄", float(h - hi)
     if h < MAGENTA_HUE:
-        return "偏洋红", float(NATURAL_HUE[0] - h)
-    if h < NATURAL_HUE[0]:
-        return "偏红", float(NATURAL_HUE[0] - h)
+        return "偏洋红", float(lo - h)
+    if h < lo:
+        return "偏红", float(lo - h)
     return "正常", 0.0
+
+
+def _expected_saturation(preset: SkinPreset | None, L: float) -> tuple[float, float]:
+    """肤色饱和度（C*/L*）的目标范围。
+
+    选了具体风格时按该风格；没选或选“自然通用”时，按明度找所有覆盖这个明度的内置风格，取最宽的范围——
+    浅肤色天然 C*/L* 较低（日系、韩系、cos 都在 0.14–0.22），不能因此被判为“发灰”。
+    """
+    if preset is not None and preset.key != "natural":
+        return (preset.chroma[0] / preset.L[1], preset.chroma[1] / preset.L[0])
+    from colordoctor.core.skin_presets import builtin_presets
+
+    cover = [p for p in builtin_presets() if p.L[0] - 3 <= L <= p.L[1] + 3]
+    if not cover:
+        return NATURAL_SATURATION
+    lo = min(p.chroma[0] / p.L[1] for p in cover)
+    hi = max(p.chroma[1] / p.L[0] for p in cover)
+    return (min(lo, NATURAL_SATURATION[0]), max(hi, NATURAL_SATURATION[1]))
 
 
 def _band_mean(lab, sel):
@@ -112,7 +137,7 @@ def analyze_skin(
     hl_shift, hl_hue = shift(hi)
     sh_shift, sh_hue = shift(lo)
 
-    exp_sat = (preset.chroma[0] / preset.L[1], preset.chroma[1] / preset.L[0]) if preset else NATURAL_SATURATION
+    exp_sat = _expected_saturation(preset, float(mean[0]))
     contam = ct.analyze(region, mode="skin", max_samples=max_samples, valid=valid)
     return SkinReport(
         mean_lab=tuple(round(float(v), 3) for v in mean),
@@ -208,12 +233,16 @@ def preset_fit(report: SkinReport, preset: SkinPreset) -> dict[str, str]:
         ("色度 C*", C, preset.chroma, ""),
         ("色相角 h°", h, preset.hue, "°"),
     ):
+        if key.startswith("色相"):
+            # 色相是环形的：把当前色相换到以区间中心为参照的连续刻度上再比较（区间可能跨过 0°）
+            center = lo + (hi - lo) / 2.0
+            val = center + float(cs.hue_diff(center % 360, val % 360))
         if val < lo:
-            out[key] = f"偏低（{val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
+            out[key] = f"偏低（{val % 360 if unit == '°' else val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
         elif val > hi:
-            out[key] = f"偏高（{val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
+            out[key] = f"偏高（{val % 360 if unit == '°' else val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
         else:
-            out[key] = f"在范围内（{val:.1f}{unit}）"
+            out[key] = f"在范围内（{val % 360 if unit == '°' else val:.1f}{unit}）"
     return out
 
 

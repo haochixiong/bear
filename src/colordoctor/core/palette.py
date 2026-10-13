@@ -504,7 +504,7 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
                 prm.append(("明亮度", lum))
             out.append(Adjustment("Camera Raw 混色器", text, "中等" if c.share >= 0.15 else "小幅", True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
-    for key, label, t, sel_hi in (("shadow_tint", "阴影", sh, False), ("highlight_tint", "高光", hl, True)):
+    for key, label, t in (("shadow_tint", "阴影", sh), ("highlight_tint", "高光", hl)):
         spec = style.get(key)
         if spec is None or t is None:
             continue
@@ -515,7 +515,8 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
         goal = np.array([cur[0], goal_c * np.cos(np.radians(goal_h)), goal_c * np.sin(np.radians(goal_h))])
         if float(np.hypot(*(goal[1:] - cur[1:]))) < 2:
             continue
-        gh, gs = ac.tint_to_grading(goal[0], goal[1], goal[2])
+        # 颜色分级是在现有色调上“加”一个色调：要加的是差值（目标 − 当前），不是目标本身
+        gh, gs = ac.tint_to_grading(goal[0], goal[1] - cur[1], goal[2] - cur[2])
         out.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（目标 Lab 色调 a* {goal[1]:+.1f}、b* {goal[2]:+.1f}，当前 a* {cur[1]:+.1f}、b* {cur[2]:+.1f}）", "小幅", True,
                               (("色相", gh), ("饱和度", gs))))
         rgb_cur = cs.lab_to_srgb8(cur).astype(int)

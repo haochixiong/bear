@@ -88,7 +88,13 @@ def test_skin_yellow_patch_plan():
     ly = yellow[0]
     assert ly.kind == "hueSaturation"
     r = ly.params["ranges"][0]
-    assert r["localRange"] == 2 and r["hue"] < 0  # 黄色往红拉回
+    assert r["hue"] < 0  # 往红拉回
+    # 范围以问题块的 PS 色相为中心（而不是固定的“黄色”范围，肤色只落在它的边缘）
+    from colordoctor.core import acr_channels as ac
+
+    center = ac.lab_hue_to_hsb_hue(70.0, L=68, C=25)
+    lo, hi = r["beginSustain"], r["endSustain"]
+    assert (center - lo) % 360 <= 25 and (hi - center) % 360 <= 25
     assert ly.mask[150, 55] > 200 and ly.mask[30, 150] == 0
 
 
@@ -310,3 +316,27 @@ def test_calibration_rejects_wrong_size_and_empty_fit(bridge):
     hdr = {"X-Width": "10", "X-Height": "10", "X-Components": "3"}
     code, _, body = _req(bridge + "/calibration/sample?slider=base", bytes(300), hdr)
     assert code == 400 and "色卡尺寸" in json.loads(body)["error"]
+
+
+def test_hsb_shift_differs_from_lab_degrees():
+    # 绿色区域：Lab 10° 约等于 HSB 20°；肤色区域：Lab 10° 只有 HSB 5° 左右
+    assert abs(lp.hsb_shift(130, 140, 55, 40)) > 14
+    assert abs(lp.hsb_shift(50, 60, 68, 25)) < 8
+
+
+def test_transparent_pixels_do_not_count_as_grey():
+    from colordoctor.core import palette as pl
+
+    rgba = np.zeros((100, 100, 4), np.uint8)
+    yy, xx = np.mgrid[0:100, 0:100]
+    disc = (yy - 50) ** 2 + (xx - 50) ** 2 < 40 ** 2
+    rgba[disc, :3] = lch_color(50, 60, 30)
+    rgba[disc, 3] = 255
+    prep = pg.prepare(rgba)
+    assert prep.valid is not None and not prep.valid.all()
+    filled = prep.filled_for_statistics()
+    grey_before = [c.family for c in pl.ratio_631(cs.srgb8_to_lab(prep.rgb))[0]]
+    fams = [c.family for c in pl.ratio_631(cs.srgb8_to_lab(filled))[0]]
+    assert "灰" in grey_before and "灰" not in fams, fams
+    res = bs.analyze_request(rgba, "dirty", {}, bs.Store(), bs.Store())
+    assert res["plan"]["layers"] == []

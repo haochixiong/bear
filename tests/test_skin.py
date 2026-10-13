@@ -152,3 +152,33 @@ def test_compare_to_preset():
     assert d.dL > 5  # 需要提亮
     assert d.db < -3  # 需要减黄
     assert d.delta_e00 > 5
+
+
+def test_tendency_continuous_and_non_negative():
+    import math
+
+    from colordoctor.core.portrait_analysis import tendency_of
+
+    def at(h, c=20.0):
+        return tendency_of(c * math.cos(math.radians(h)), c * math.sin(math.radians(h)))
+
+    t0, t359 = at(0.5), at(359.5)
+    assert t0[0] == t359[0] == "偏洋红"
+    assert abs(t0[1] - t359[1]) < 2  # 0° 两侧连续
+    assert at(351.5)[1] > at(8.5)[1]  # 越往外超出越多
+    assert tendency_of(2.0, 1.0)[1] >= 0 and tendency_of(1.5, 3.0)[1] >= 0
+    assert tendency_of(-3.0, -4.0)[0] == "偏青/偏蓝"
+    assert tendency_of(-3.0, 6.0)[0] == "偏绿"
+    assert at(55)[0] == "正常"
+
+
+def test_pale_skin_not_flagged_grey_with_default_preset():
+    from colordoctor.core import analysis as an
+    from colordoctor.core import skin_presets as sp
+    from colordoctor.core.color_management import synthetic_context
+
+    img = skin_region(80, 8, 14, h=120, w=120)  # 浅肤色，C*/L* ≈ 0.2（日系 / 韩系常见）
+    rep = an.analyze_skin_region(img, synthetic_context(), preset=sp.get_preset("natural", sp.builtin_presets()), auto_mask=False)
+    lo, _ = rep.skin.expected_saturation
+    assert lo <= 0.16
+    assert not any("发灰" in f.problem for f in rep.findings), [f.problem for f in rep.findings]

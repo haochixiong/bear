@@ -29,10 +29,23 @@ class BlockedError(ValueError):
 
 @dataclass
 class Prepared:
-    rgb: np.ndarray  # (h, w, 3) uint8
+    rgb: np.ndarray  # (h, w, 3) uint8；透明处已填中性灰
     offset: tuple[int, int]  # 裁剪后的左上角（在原图中的位置）
     opaque_fraction: float
     notes: tuple[str, ...]
+    valid: np.ndarray | None = None  # (h, w) bool：不透明像素；全不透明时为 None
+
+    def filled_for_statistics(self) -> np.ndarray:
+        """给只看整体分布的分析（比例、鲜艳度、影调、仿色）用：透明处用本图层的不透明像素随机重采样填满，
+        这样颜色和明度的分布与只统计不透明像素相同，不会多出一块“灰色”。"""
+        if self.valid is None:
+            return self.rgb
+        out = self.rgb.copy()
+        src = self.rgb[self.valid]
+        holes = ~self.valid
+        rng = np.random.default_rng(0)
+        out[holes] = src[rng.integers(0, src.shape[0], int(holes.sum()))]
+        return out
 
 
 def check_layer_kind(kind: str | None, name: str = "") -> None:
@@ -49,6 +62,7 @@ def prepare(pixels: np.ndarray) -> Prepared:
         raise BlockedError("没有收到有效的像素（图层为空或尺寸为 0）。")
     notes: list[str] = []
     offset = (0, 0)
+    valid = None
     rgb = pixels[..., :3]
     frac = 1.0
     if pixels.shape[2] == 4:
@@ -61,10 +75,11 @@ def prepare(pixels: np.ndarray) -> Prepared:
             y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
             offset = (int(x0), int(y0))
             rgb = rgb[y0:y1, x0:x1].copy()
-            rgb[~opaque[y0:y1, x0:x1]] = 128  # 中性灰：不计入颜色
+            valid = opaque[y0:y1, x0:x1].copy()
+            rgb[~valid] = 128  # 中性灰；各分析通过 valid 蒙版排除这些像素
             notes.append(f"图层有 {1 - frac:.0%} 是透明的，只分析不透明部分")
     flat = rgb.reshape(-1, 3)
     sample = flat[:: max(1, flat.shape[0] // 200_000)]
     if float(sample.astype(np.float32).std(axis=0).max()) < 0.5:
         raise BlockedError("当前图层是一整块纯色，没有可分析的颜色变化。")
-    return Prepared(np.ascontiguousarray(rgb), offset, frac, tuple(notes))
+    return Prepared(np.ascontiguousarray(rgb), offset, frac, tuple(notes), valid)

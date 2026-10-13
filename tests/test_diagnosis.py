@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from colordoctor.core import analysis as an
+from colordoctor.core import color_spaces as cs
 from colordoctor.core import recommendations as rec
 from colordoctor.core.color_management import synthetic_context
 from colordoctor.core.color_models import ColorContext, Severity
@@ -262,3 +263,39 @@ def test_manual_mask_overrides_auto():
     m[:, 60:] = True
     r = an.analyze_skin_region(img, CTX, manual_mask=m)
     assert r.mask_info.get("manual") and not r.valid_mask[:, :60].any()
+
+
+def test_non_skin_compare_uses_matching_range_and_channel():
+    from colordoctor.core import recommendations as rec
+
+    blue = np.array([[70, 110, 200]] * 50, np.uint8)
+    target = cs.srgb8_to_lab(np.array([60, 130, 210], np.uint8))
+    adjs = rec.skin_adjustments(blue, target, skin=False)
+    text = " ".join(a.instruction for a in adjs)
+    assert "皮肤" not in text and "肤色" not in text
+    hs = [a for a in adjs if a.tool == "色相/饱和度"][0]
+    assert "蓝色" in hs.instruction or "青色" in hs.instruction
+
+
+def test_skin_brightening_not_applied_twice():
+    from colordoctor.core import recommendations as rec
+
+    skin = np.array([[180, 135, 110]] * 50, np.uint8)
+    cur = cs.srgb8_to_lab(skin[0])
+    target = np.array([cur[0] + 10, cur[1], cur[2]])
+    adjs = rec.skin_adjustments(skin, target)
+    curve = [a for a in adjs if a.tool == "曲线" and a.instruction.startswith("颜色")]
+    light = [a for a in adjs if a.tool == "曲线" and a.instruction.startswith("明度")]
+    assert curve and light
+    # 颜色曲线保持明度：各通道输出接近输入
+    for name, out in curve[0].params:
+        inp = int(name.split()[1].rstrip("→"))
+        assert abs(out - inp) <= 4, (name, out)
+
+
+def test_dispersion_advice_is_meaningful():
+    adj = rec.dispersion_adjustments("肤色", True)
+    text = " ".join(a.instruction for a in adj)
+    assert "“肤色”" not in text and "橙色" in text and "红色" in text and "黄色" in text
+    adj = rec.dispersion_adjustments("绿", False)
+    assert "黄色" in adj[0].instruction and "浅绿色" in adj[0].instruction

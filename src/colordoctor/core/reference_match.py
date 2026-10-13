@@ -74,7 +74,11 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     lm, lr = lab_m.reshape(-1, 3), lab_r.reshape(-1, 3)
     tm = tuple(float(v) for v in np.percentile(lm[:, 0], PCTS))
     tr = tuple(float(v) for v in np.percentile(lr[:, 0], PCTS))
-    curve = tuple((_gray(a), _gray(b)) for a, b in zip(tm, tr) if abs(_gray(a) - _gray(b)) >= 2)
+    pts: dict[int, int] = {}
+    for a, b in zip(tm, tr, strict=True):  # 多个百分位可能落在同一个输入值上（例如都为 0）：只保留一个点
+        if abs(_gray(a) - _gray(b)) >= 2:
+            pts.setdefault(_gray(a), _gray(b))
+    curve = tuple(sorted(pts.items()))
     cast_m, cast_r = _neutral_cast(lm), _neutral_cast(lr)
     cf_m, cf_r = pl.colorfulness(s_m, lch_m).value, pl.colorfulness(s_r, lch_r).value
 
@@ -159,7 +163,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         tm_ = _neutral_cast(lm, sel_fn(lm[:, 0], pm))
         tr_ = _neutral_cast(lr, sel_fn(lr[:, 0], pr))
         if np.hypot(tr_[0] - tm_[0], tr_[1] - tm_[1]) >= 2:
-            gh, gs = ac.tint_to_grading(60.0, tr_[0], tr_[1])
+            gh, gs = ac.tint_to_grading(60.0, tr_[0] - tm_[0], tr_[1] - tm_[1])  # 要加的是差值
             adjs.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（参考{label}色调 a* {tr_[0]:+.1f}、b* {tr_[1]:+.1f}，我的 a* {tm_[0]:+.1f}、b* {tm_[1]:+.1f}）", "小幅",
                                    True, (("色相", gh), ("饱和度", gs))))
     for d in diffs:

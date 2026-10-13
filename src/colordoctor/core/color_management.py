@@ -174,7 +174,7 @@ def _decode_jpeg(opener, name: str) -> SourceImage:
 
 RAW_EXTS = {".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf", ".orf", ".rw2", ".dng",
             ".pef", ".srw", ".3fr", ".iiq", ".erf", ".kdc", ".mos", ".mrw", ".x3f"}
-RAW_WARNING = ("RAW 由 LibRaw 解码（相机白平衡、sRGB）：颜色与 ACR 的相机配置文件（如“Adobe 颜色”）不同，"
+RAW_WARNING = ("RAW 由 LibRaw 解码（相机白平衡、sRGB、自动亮度）：颜色和明暗与 ACR 的相机配置文件（如“Adobe 颜色”）不同，"
                "数值只作参考。要与 ACR 一致，请在 PS 插件里分析 ACR 打开后的画面")
 
 
@@ -205,7 +205,9 @@ def load_raw(path: str | os.PathLike, use_preview: bool = False) -> SourceImage:
             sizes = raw.sizes
             if sizes.width * sizes.height > MAX_PIXELS:
                 raise ImageLoadError(f"图片过大（{sizes.width}×{sizes.height}），超过 {MAX_PIXELS // 1_000_000} MP 上限")
-            rgb = raw.postprocess(use_camera_wb=True, output_color=rawpy.ColorSpace.sRGB, output_bps=8)
+            # gamma=(2.4, 12.92)：sRGB 传递曲线（LibRaw 默认是 BT.709 的 2.222/4.5，中灰会暗约 13 级）
+            rgb = raw.postprocess(use_camera_wb=True, output_color=rawpy.ColorSpace.sRGB, output_bps=8,
+                                  gamma=(2.4, 12.92))
     except ImageLoadError:
         raise
     except Exception as e:  # rawpy 的错误类型较多（LibRawFileUnsupportedError 等）

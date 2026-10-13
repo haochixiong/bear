@@ -5,8 +5,8 @@
 ## 安装（开发模式）
 
 1. 启动本机分析服务（二选一）：
-   - 已安装 Python 包：`colordoctor serve`
-   - 打包版：`ColorDoctor.exe serve`
+   - 打开 ColorDoctor 桌面版：启动时自动开启服务，状态栏会提示（设置里可以关闭）；
+   - 或者用 Python 包的命令行：`colordoctor serve`（打包版是窗口程序，没有控制台，请用第一种方式）。
 2. 安装 Adobe **UXP Developer Tool**（Creative Cloud → 所有应用 → UXP Developer Tools），打开 Photoshop Beta。
 3. UXP Developer Tool → Add Plugin → 选本目录的 `manifest.json` → Load。
 4. Photoshop：增效工具 → ColorDoctor。

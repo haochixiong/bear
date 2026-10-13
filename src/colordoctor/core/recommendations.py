@@ -38,7 +38,7 @@ def strength_label(magnitude: float) -> str | None:
     return "中等"
 
 
-def acr_directions(dL: float, da: float, db: float, dC: float, dh: float) -> list[Adjustment]:
+def acr_directions(dL: float, da: float, db: float, dC: float, dh: float, channel: str = "橙色", skin: bool = True) -> list[Adjustment]:
     """把“需要的变化量”（目标 - 当前）映射为 Camera Raw 调整方向。"""
     out: list[Adjustment] = []
     s = strength_label(db)
@@ -59,18 +59,21 @@ def acr_directions(dL: float, da: float, db: float, dC: float, dh: float) -> lis
     if s:
         out.append(
             Adjustment("Camera Raw", f"混色器 → 色相 → 橙色向{'黄' if dh > 0 else '红'}移动（肤色更{'黄' if dh > 0 else '红润'}）", s)
+            if skin else
+            Adjustment("Camera Raw", f"混色器 → 色相 → {channel}滑块往{'右（+）' if dh > 0 else '左（−）'}", s)
         )
     s = strength_label(dC)
     if s:
-        out.append(Adjustment("Camera Raw", f"混色器 → 饱和度 → 橙色{'提高' if dC > 0 else '降低'}", s))
+        out.append(Adjustment("Camera Raw", f"混色器 → 饱和度 → {channel}{'提高' if dC > 0 else '降低'}", s))
     s = strength_label(dL)
     if s:
-        out.append(Adjustment("Camera Raw", f"混色器 → 明亮度 → 橙色{'提高' if dL > 0 else '降低'}（只影响肤色亮度）", s))
+        out.append(Adjustment("Camera Raw", f"混色器 → 明亮度 → {channel}{'提高' if dL > 0 else '降低'}"
+                              + ("（只影响肤色亮度）" if skin else ""), s))
     if out:
         out.append(
             Adjustment(
                 "Camera Raw",
-                "提示：色温/色调是全局调整，会影响整张照片；只想改肤色时优先用混色器（HSL）或局部蒙版",
+                "提示：色温/色调是全局调整，会影响整张照片；只想改" + ("肤色" if skin else "这种颜色") + "时优先用混色器（HSL）或局部蒙版",
                 None,
             )
         )
@@ -81,9 +84,17 @@ def _fmt(params) -> str:
     return "，".join(f"{n} {int(v):+d}" for n, v in params if int(v) != 0) or "无需调整"
 
 
-def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool = False) -> list[Adjustment]:
-    """当前肤色像素 -> 目标 Lab 的 Photoshop/Camera Raw 参数建议。"""
+def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool = False, skin: bool = True) -> list[Adjustment]:
+    """当前像素 -> 目标 Lab 的 Photoshop/Camera Raw 参数建议。
+
+    skin=True：肤色（色相/饱和度、可选颜色只在红色 / 黄色范围里选）；
+    skin=False：任意颜色，范围按像素本身的色相从六个范围里选。
+    """
     px = np.asarray(pixels_rgb8, dtype=float).reshape(-1, 3)
+    if px.shape[0] > 200_000:  # 平均色和曲线点不需要全部像素
+        px = px[:: int(np.ceil(px.shape[0] / 200_000))]
+    ranges = pm.SKIN_RANGES if skin else tuple(pm.PS_RANGES)
+    where = "皮肤" if skin else "这块区域"
     cur_lab = cs.srgb8_to_lab(px).mean(axis=0)
     tgt = np.array(target_lab, dtype=float)
     if keep_lightness:
@@ -93,16 +104,21 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
     if de < 1.0:
         return [Adjustment("提示", f"当前肤色与目标已经非常接近（ΔE00 {de:.1f}），无需调整", None, False)]
 
-    # 曲线：对取样平均色精确
+    # 曲线：对取样平均色精确。明度差较大时，通道曲线只改颜色（保持当前明度），
+    # 明度另用下面的 RGB 复合曲线处理，避免两步叠加把明度调两次。
+    dL = float(tgt[0] - cur_lab[0])
+    split_lightness = abs(dL) >= 1.5
+    curve_tgt = np.array([cur_lab[0], tgt[1], tgt[2]]) if split_lightness else tgt
     mean_rgb = np.rint(px.mean(axis=0)).astype(int)
-    tgt_rgb = cs.lab_to_srgb8(tgt).astype(int)
+    tgt_rgb = cs.lab_to_srgb8(curve_tgt).astype(int)
     pts = pm.curves_points(mean_rgb, tgt_rgb)
-    gamut_note = "" if cs.lab_in_srgb_gamut(tgt) else "（目标超出 sRGB，已裁切）"
+    gamut_note = "" if cs.lab_in_srgb_gamut(curve_tgt) else "（目标超出 sRGB，已裁切）"
     out.append(
         Adjustment(
             "曲线",
-            "在 RGB 曲线的各通道上加一个点：" + "；".join(f"{ch}通道 输入 {i} → 输出 {o}" for ch, (i, o) in pts.items())
-            + gamut_note + "。建议用蒙版只作用于皮肤",
+            ("颜色：" if split_lightness else "") + "在 RGB 曲线的各通道上加一个点："
+            + "；".join(f"{ch}通道 输入 {i} → 输出 {o}" for ch, (i, o) in pts.items())
+            + gamut_note + f"。建议用蒙版只作用于{where}",
             strength_label(de),
             estimated=False,
             params=tuple((f"{ch}通道 {i}→", float(o)) for ch, (i, o) in pts.items()),
@@ -110,15 +126,14 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
     )
 
     # 明度单独用 RGB 复合曲线处理；颜色工具只负责颜色（目标保持当前明度）
-    dL = float(tgt[0] - cur_lab[0])
-    if abs(dL) >= 1.5:
+    if split_lightness:
         g_in = int(cs.lab_to_srgb8(np.array([cur_lab[0], 0.0, 0.0]))[0])
         g_out = int(cs.lab_to_srgb8(np.array([tgt[0], 0.0, 0.0]))[0])
         out.append(
             Adjustment(
                 "曲线",
-                f"明度：RGB 复合曲线加一个点 输入 {g_in} → 输出 {g_out}（L* {cur_lab[0]:.1f} → {tgt[0]:.1f}），"
-                "先调明度再调颜色",
+                f"明度：RGB 复合曲线加一个点 输入 {g_in} → 输出 {g_out}（L* {cur_lab[0]:.1f} → {tgt[0]:.1f}）。"
+                "放在调颜色的那条曲线上方（先调颜色、再调明度），两者不要合并到同一条曲线",
                 strength_label(dL),
                 estimated=True,
                 params=(("RGB 输入", float(g_in)), ("RGB 输出", float(g_out))),
@@ -136,8 +151,8 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
             params=sol.params,
         )
     )
-    sol = pm.solve(x, color_tgt, "hue_saturation")
-    rng_name = "红色" if sol.extra.get("range") == "reds" else "黄色"
+    sol = pm.solve(x, color_tgt, "hue_saturation", ranges=ranges)
+    rng_name = pm.RANGE_NAMES.get(sol.extra.get("range"), "全图")
     out.append(
         Adjustment(
             "色相/饱和度",
@@ -147,8 +162,8 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
             params=sol.params,
         )
     )
-    sol = pm.solve(x, color_tgt, "selective_color")
-    rng_name = "红色" if sol.extra.get("range") == "reds" else "黄色"
+    sol = pm.solve(x, color_tgt, "selective_color", ranges=ranges)
+    rng_name = pm.RANGE_NAMES.get(sol.extra.get("range"), "红色")
     dirs = []
     for n, v in sol.params:
         if abs(v) >= 1:
@@ -172,8 +187,37 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
         db=float(tgt[2] - cur_lab[2]),
         dC=float(tgt_lch[1] - cur_lch[1]),
         dh=float(cs.hue_diff(cur_lch[2], tgt_lch[2])),
+        channel="橙色" if skin else _acr_channel(cur_lch),
+        skin=skin,
     )
     return out
+
+
+_NEIGHBOURS = {  # ACR 混色器通道的左右邻居
+    "红色": ("洋红", "橙色"), "橙色": ("红色", "黄色"), "黄色": ("橙色", "绿色"), "绿色": ("黄色", "浅绿色"),
+    "浅绿色": ("绿色", "蓝色"), "蓝色": ("浅绿色", "紫色"), "紫色": ("蓝色", "洋红"), "洋红": ("紫色", "红色"),
+}
+
+
+def dispersion_adjustments(base_name: str, skin: bool) -> list[Adjustment]:
+    """同一区域里色相分散：把两侧相邻通道的色相往主色收拢，而不是降低主色饱和度。"""
+    acr, ps = ("橙色", "红色") if skin or base_name in ("肤色", "") else CHANNELS.get(base_name, (base_name, base_name))
+    acr = acr.split("/")[0]
+    left, right = _NEIGHBOURS.get(acr, ("相邻通道", "相邻通道"))
+    return [
+        Adjustment("Camera Raw 混色器",
+                   f"色相：“{left}”往右、“{right}”往左（都往“{acr}”收拢），起步各 10–20；"
+                   f"“{acr}”本身的色相和饱和度先不动。用蒙版只作用于这块区域", "小幅"),
+        Adjustment("色相/饱和度",
+                   f"编辑范围选“{ps}”，把范围两侧拉宽后整体色相小幅调整（±3–8），让偏离的部分并回主色；"
+                   "或用“色彩平衡”分别修正偏离的那一部分", "轻微"),
+    ]
+
+
+def _acr_channel(lch) -> str:
+    from colordoctor.core import acr_channels as ac
+
+    return ac.channel_of_lab_hue(float(lch[2])) if lch[1] >= 4 else "橙色"
 
 
 def contamination_adjustments(contaminant: str, base: str, skin: bool) -> list[Adjustment]:

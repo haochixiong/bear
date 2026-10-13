@@ -138,6 +138,23 @@ def ps_range_for_lab_hue(lab_hue: float) -> tuple[int, str, tuple[int, int, int,
     return best[0], best[1], best[3]
 
 
+def hsb_shift(lab_from: float, lab_to: float, L: float = 62.0, C: float = 30.0) -> float:
+    """Lab 色相从 lab_from 变到 lab_to，对应 PS（HSB）色相要转多少度。
+
+    两种色相刻度差别很大（绿色区域约 2 倍、肤色区域约 0.5 倍），不能直接拿 Lab 度数当 PS 滑块值。
+    """
+    a = ac.lab_hue_to_hsb_hue(lab_from % 360, L=L, C=max(C, 8.0))
+    b = ac.lab_hue_to_hsb_hue(lab_to % 360, L=L, C=max(C, 8.0))
+    return ((b - a + 180) % 360) - 180
+
+
+def custom_range(hsb_center: float, half_core: int = 10, half_ramp: int = 30) -> tuple[int, tuple[int, int, int, int]]:
+    """以某个 HSB 色相为中心的自定义颜色范围（PS 色相/饱和度里可以拖动范围滑块，效果相同）。"""
+    idx = min(PS_RANGES, key=lambda r: abs(((hsb_center - r[2] + 180) % 360) - 180))[0]
+    c = int(round(hsb_center))
+    return idx, ((c - half_ramp) % 360, (c - half_core) % 360, (c + half_core) % 360, (c + half_ramp) % 360)
+
+
 def _huesat(range_idx: int, ramps, hue=0, sat=0, light=0, master=False) -> dict:
     if master:
         return {"master": {"hue": int(hue), "saturation": int(sat), "lightness": int(light)}, "ranges": []}
@@ -170,7 +187,7 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
             layers.append(LayerSpec(
                 "opposite", f"{ct.base_hue_name}里的{ct.opposite_hue_name} · 色相/饱和度", "hueSaturation",
                 _huesat(idx, ramps, sat=sat),
-                f"{ct.base_hue_name}中混入{ct.opposite_hue_name}（占有彩像素 {ct.opposite_fraction:.1%}）：{rname} 饱和度 {sat}",
+                f"{ct.base_hue_name}中混入{ct.opposite_hue_name}（占分析像素 {ct.opposite_fraction:.1%}）：{rname} 饱和度 {sat}",
                 feather(dilate(opp, max(1, rad // 2)), rad)))
     # 2) 局部发灰：自然饱和度，只作用于发灰位置
     if ct is not None and flags is not None and ct.graying_fraction > 0:
@@ -193,7 +210,8 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
             dh = float(np.average([p.hue_shift for p in ps], weights=[p.area_fraction for p in ps]))
             ds = float(np.average([p.sat_shift for p in ps], weights=[p.area_fraction for p in ps]))
             mask = feather(_bbox_mask(shape, [p.bbox for p in ps], offset, skin), rad)
-            spec = _skin_layer(kind, dh, ds)
+            lab = np.average([p.lab for p in ps], axis=0, weights=[p.area_fraction for p in ps])
+            spec = _skin_layer(kind, dh, ds, tuple(float(v) for v in lab))
             if spec is None:
                 continue
             lkind, params, text = spec
@@ -204,12 +222,17 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     if pal is not None and pal.unity is not None and pal.unity.patches:
         u = pal.unity
         for i, p in enumerate(u.patches):
-            hue = _clip(-p.hue_shift, -30, 30)
+            L0, a0, b0 = u.mean_lab
+            main_h = float(np.degrees(np.arctan2(b0, a0))) % 360
+            patch_h = main_h + p.hue_shift
+            C0 = float(np.hypot(a0, b0))
+            hue = _clip(hsb_shift(patch_h, main_h, L0, C0), -30, 30)  # 把偏离的一簇推回主色
             if hue == 0:
                 continue
-            idx, rname, ramps = ps_range_for_lab_hue(float(np.degrees(np.arctan2(u.mean_lab[2], u.mean_lab[1]))) % 360)
+            idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(patch_h % 360, L=L0, C=max(C0, 8.0)))
+            rname = PS_RANGES[idx - 1][1]
             layers.append(LayerSpec(f"unity_{i}", f"{u.family}统一 {i + 1} · 色相/饱和度", "hueSaturation",
-                                    _huesat(idx, ramps, hue=hue), f"{p.note}：{rname} 色相 {hue:+d}",
+                                    _huesat(idx, ramps, hue=hue), f"{p.note}：{rname}（范围已对准这一簇）色相 {hue:+d}",
                                     feather(_bbox_mask(shape, [p.bbox], offset), rad)))
     # 5) 仿色：把影调拉向参考的 RGB 复合曲线（全图，无蒙版）
     ref = getattr(report, "reference", None)
@@ -226,20 +249,25 @@ _KIND_NAME = {"hueSaturation": "色相/饱和度", "colorBalance": "色彩平衡
 _MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色", "reference": "仿色"}
 
 
-def _skin_layer(kind: str, dh: float, ds: float):
-    """肤色问题块 -> (图层类型, 参数, 说明)。dh：相对整体的色相偏移（度，正 = 偏黄）。"""
-    if kind == "偏黄":
-        hue = -_clip(abs(dh), 2, 15)
-        sat = -_clip(abs(ds) * 60, 0, 20) if ds > 0 else 0
-        return "hueSaturation", _huesat(2, PS_RANGES[1][3], hue=hue, sat=sat), f"黄色 色相 {hue}，饱和度 {sat}"
+def _skin_layer(kind: str, dh: float, ds: float, lab=(68.0, 14.0, 19.0)):
+    """肤色问题块 -> (图层类型, 参数, 说明)。dh：相对整体的 Lab 色相偏移（度，正 = 偏黄）；lab：问题块平均色。"""
+    L, a, b = lab
+    hp = float(np.degrees(np.arctan2(b, a))) % 360
+    C = float(np.hypot(a, b))
+    if kind in ("偏黄", "偏洋红"):
+        shift = hsb_shift(hp, hp - dh, L, C)  # 把问题块拉回整体肤色
+        hue = int(np.sign(shift) or (-1 if kind == "偏黄" else 1)) * _clip(abs(shift), 2, 15)
+        idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(hp, L=L, C=max(C, 8.0)))
+        rname = PS_RANGES[idx - 1][1]
+        if kind == "偏黄":
+            sat = -_clip(abs(ds) * 60, 0, 20) if ds > 0 else 0
+            return "hueSaturation", _huesat(idx, ramps, hue=hue, sat=sat), f"{rname}（范围已对准问题色）色相 {hue:+d}，饱和度 {sat}"
+        return "hueSaturation", _huesat(idx, ramps, hue=hue), f"{rname}（范围已对准问题色）色相 {hue:+d}（往黄）"
     if kind == "偏红橙":
         cr = -_clip(abs(dh) / 2, 2, 15)
         yb = -_clip(abs(dh) / 3, 1, 10)  # 负值 = 往黄
         return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, 0, yb], "highlights": [0, 0, 0], "preserveLuminosity": True},
                 f"中间调 青-红 {cr}，黄-蓝 {yb}")
-    if kind == "偏洋红":
-        hue = _clip(abs(dh), 2, 15)
-        return "hueSaturation", _huesat(1, PS_RANGES[0][3], hue=hue), f"红色 色相 +{hue}（往黄）"
     if kind == "偏青绿":
         cr = _clip(abs(dh) / 2, 3, 15)
         return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, -_clip(cr / 2, 1, 8), 0], "highlights": [0, 0, 0],

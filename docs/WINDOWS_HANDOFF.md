@@ -13,7 +13,7 @@ pip install -e .
 python -m pytest -q
 ```
 
-预期：全部通过。Linux 上的基线为 **332 passed**。
+预期：全部通过。Linux 上的基线为 **386 passed, 1 skipped**（插件 JS 测试需要 Node.js）。
 
 如果在 Windows 上失败，请先确认失败的测试是不是只与平台相关，例如路径或字体。**不要为了让测试通过而放宽算法阈值。**
 
