@@ -45,3 +45,4 @@ input[type=number] { width: 54px; }
 .acr td { padding: 2px; }
 .bottom { padding: 10px; border-top: 1px solid #1a1a1a; background: #2a2a2a; display: flex; flex-direction: column; gap: 6px; position: sticky; bottom: 0; }
 .bottom .primary { height: 36px; }
+input.bad { border-color: #e0614a; color: #ffb4a8; }

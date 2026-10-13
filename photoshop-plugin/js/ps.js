@@ -46,8 +46,10 @@ function inspectTarget(target) {
       reason: `「${layer.name}」是调整图层或填充图层，本身没有像素。请选中像素图层，或把分析对象改为「合并可见图层」。` };
   }
   if (NEED_MERGED_KINDS[kind]) {
+    // 图层组不能栅格化，只能合并
+    const fix = kind === "group" ? "或先合并这个组（Ctrl+E）" : "或先栅格化（图层 → 栅格化）";
     return { ok: false, layer, kind, label,
-      reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「合并可见图层」，或先栅格化。` };
+      reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「合并可见图层」，${fix}。` };
   }
   const b = layer.boundsNoEffects || layer.bounds;
   if (!b || b.right - b.left < 2 || b.bottom - b.top < 2) {
@@ -328,8 +330,35 @@ async function cameraRawLayer(name, { merged = false, layerId = null, doc = null
   ], {}), "准备 Camera Raw 图层");
   // 打开 Camera Raw 对话框让用户确认（需要 executeAsModal 的 interactive 模式）。
   // 用户点「取消」时 batchPlay 返回错误：抛出，让 modal 不提交历史记录，复制出的图层一并撤回。
-  checkResults(await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {}),
-    "Camera Raw（已取消）");
+  const res = await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {});
+  if (isCancel(res)) {
+    const e = new Error("已取消，没有新建图层。");
+    e.cancelled = true;
+    throw e;
+  }
+  checkResults(res, "Camera Raw");
+}
+
+// PS 对话框里点「取消」：batchPlay 返回 error，result 为 -128（userCanceledErr）
+function isCancel(results) {
+  return (results || []).some((r) => r && r._obj === "error" && (r.result === -128 || /cancel|取消/i.test(String(r.message || ""))));
+}
+
+// 在文档（含所有图层组）里按 id 找图层；找不到返回 null
+function findLayer(doc, id) {
+  const walk = (layers) => {
+    for (const l of layers || []) {
+      if (l.id === id) return l;
+      const hit = walk(l.layers);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return doc ? walk(doc.layers) : null;
+}
+
+function findDocument(id) {
+  return (app.documents || []).find((d) => d.id === id) || null;
 }
 
 // Camera Raw 滤镜的参数描述符：录制前为 null。
@@ -413,7 +442,7 @@ async function selectLayer(id) {
 }
 
 module.exports = {
-  selectLayer, selectTopLayer, withoutSelection, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
+  selectLayer, selectTopLayer, withoutSelection, findLayer, findDocument, isCancel, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
   constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor },

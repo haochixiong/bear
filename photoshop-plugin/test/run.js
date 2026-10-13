@@ -194,7 +194,9 @@ function dirtySky(w, h) {
   assert.ok(calls.batchPlay.some((c) => c._obj === "mergeVisible" && c.duplicate));
   const bp0 = fakePs.action.batchPlay;
   fakePs.action.batchPlay = async (descs) => (descs[0]._obj === "Adobe Camera Raw Filter" ? [{ _obj: "error", result: -128 }] : []);
-  await assert.rejects(ps.cameraRawLayer("CR", { merged: false, layerId: 7 }), /Camera Raw/);
+  await assert.rejects(ps.cameraRawLayer("CR", { merged: false, layerId: 7 }), (e) => e.cancelled === true && /已取消/.test(e.message));
+  assert.strictEqual(ps.findLayer({ layers: [{ id: 1, layers: [{ id: 9 }] }] }, 9).id, 9);
+  assert.strictEqual(ps.findLayer({ layers: [{ id: 1 }] }, 9), null);
   fakePs.action.batchPlay = bp0;
 
   // 5i. 有选区时：先存成临时通道并取消选择，生成后恢复并删除临时通道；没有选区时不碰
