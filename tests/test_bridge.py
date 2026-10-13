@@ -227,3 +227,21 @@ def test_http_acr_preset_and_calibration(bridge, tmp_path, monkeypatch):
     ac.set_calibration({})
     code, _, body = _req(bridge + "/calibration/plan")
     assert len(json.loads(body)["steps"]) == 8 * 3 * 4
+
+
+def test_patch_mode_returns_values_even_for_solid_color():
+    from synth import lch_color as lc
+
+    px = np.zeros((5, 5, 4), np.uint8)
+    px[..., :3] = lc(68, 24.6, 53)
+    px[..., 3] = 255
+    res = bs.analyze_request(px, "patch", {}, bs.Store(), bs.Store(), layer_kind="pixel")
+    assert res["values"]["lab"][0] == pytest.approx(68, abs=1)
+    assert res["quick_rule"] is not None and res["purity"] == 1.0
+    assert {c["channel"] for c in res["acr_channels"]} <= {"红色", "橙色", "黄色"}
+
+
+def test_http_options(bridge):
+    code, _, body = _req(bridge + "/options")
+    res = json.loads(body)
+    assert code == 200 and len(res["styles"]) >= 28 and res["presets"] and "绿" in res["families"]

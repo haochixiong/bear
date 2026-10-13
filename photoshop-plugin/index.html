@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">ColorDoctor</span>
+    <span id="svc" class="chip ok">本机分析 · 不上传</span>
+  </header>
+
+  <section class="target">
+    <div class="row">
+      <select id="target" aria-label="分析对象">
+        <option value="layer">当前图层</option>
+        <option value="merged">合并可见图层</option>
+      </select>
+      <button id="analyze" class="primary">分析当前图层</button>
+    </div>
+    <div id="targetName" class="strong">—</div>
+    <div id="status" class="status">只在点击按钮时分析</div>
+  </section>
+
+  <nav class="cats">
+    <button data-cat="color" class="cat on">色彩</button>
+    <button data-cat="portrait" class="cat">人像</button>
+    <button data-cat="reference" class="cat">仿色</button>
+  </nav>
+  <nav id="subs" class="subs"></nav>
+
+  <section id="controls" class="controls"></section>
+
+  <main id="results" class="results">
+    <p class="hint">选好要分析的图层，点「分析当前图层」。</p>
+  </main>
+
+  <section id="acr" class="acr hidden">
+    <div class="row between"><span class="strong">ACR 参数（可改）</span><span id="acrBadge" class="chip warn">估计</span></div>
+    <div id="acrTable"></div>
+    <div class="row">
+      <button id="acrLayer">生成 Camera Raw 图层</button>
+      <button id="acrExport">导出预设 .xmp</button>
+    </div>
+  </section>
+
+  <footer class="bottom">
+    <button id="generateAll" class="primary" disabled>一键生成全部（带蒙版）</button>
+    <div class="row">
+      <button id="toggleAcr">ACR 参数</button>
+      <button id="calibrate">校准 ACR 滑块…</button>
+    </div>
+  </footer>
+
+  <script src="js/main.js"></script>
+</body>
+</html>

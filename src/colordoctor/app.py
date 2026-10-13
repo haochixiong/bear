@@ -88,6 +88,22 @@ def _selftest_body() -> None:
     win.deleteLater()
 
 
+def _start_bridge(win) -> None:
+    """同时启动给 PS 插件用的本机服务（只监听 127.0.0.1）。端口被占用（已有一个在运行）时跳过。"""
+    import threading
+
+    from colordoctor.bridge.server import DEFAULT_PORT, make_server
+
+    if win.settings.value("bridge/enabled", True, type=bool) is False:
+        return
+    try:
+        srv = make_server(DEFAULT_PORT)
+    except OSError:
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True, name="colordoctor-bridge").start()
+    win.statusBar().showMessage(f"PS 插件服务已就绪：127.0.0.1:{DEFAULT_PORT}（只接受本机连接）", 8000)
+
+
 def main(argv: list[str] | None = None) -> int:
     from PyQt6.QtWidgets import QApplication
 
@@ -109,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     _install_excepthook(app)
     win = MainWindow()
     win.show()
+    _start_bridge(win)
     for a in argv[1:]:
         if Path(a).suffix.lower() in (".jpg", ".jpeg") and Path(a).exists():
             win.open_jpg(a)

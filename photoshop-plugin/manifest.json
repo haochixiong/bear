@@ -1,0 +1,24 @@
+{
+  "id": "com.colordoctor.panel",
+  "name": "ColorDoctor",
+  "version": "0.1.0",
+  "main": "index.html",
+  "manifestVersion": 5,
+  "host": [{ "app": "PS", "minVersion": "25.0.0" }],
+  "requiredPermissions": {
+    "network": { "domains": ["http://127.0.0.1:47321"] },
+    "localFileSystem": "request",
+    "allowCodeGenerationFromStrings": false
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "colordoctorPanel",
+      "label": { "default": "ColorDoctor" },
+      "minimumSize": { "width": 300, "height": 480 },
+      "maximumSize": { "width": 2000, "height": 4000 },
+      "preferredDockedSize": { "width": 340, "height": 900 },
+      "preferredFloatingSize": { "width": 360, "height": 900 }
+    }
+  ]
+}

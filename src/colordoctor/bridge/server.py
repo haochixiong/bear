@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from colordoctor import __version__
-from colordoctor.core import analysis, layer_plan, pixel_guard
+from colordoctor.core import acr_channels, acr_preset, analysis, layer_plan, pixel_guard
 from colordoctor.core.color_models import ColorContext
 from colordoctor.core.report_json import summary, to_jsonable
 
@@ -41,7 +41,7 @@ DEFAULT_PORT = 47321
 CLIENT_HEADER = "X-ColorDoctor-Client"
 MAX_BODY = 400 * 1024 * 1024  # 约 1 亿像素的 RGBA
 MAX_SESSIONS = 8
-MODES = ("dirty", "skin", "palette", "reference")
+MODES = ("dirty", "skin", "palette", "reference", "patch")
 
 
 @dataclass
@@ -104,6 +104,8 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
                     doc_size: tuple[int, int] | None = None, layer_kind: str = "", layer_name: str = "") -> dict:
     """服务端核心逻辑（与 HTTP 解耦，便于测试）。不能分析时抛 pixel_guard.BlockedError。"""
     pixel_guard.check_layer_kind(layer_kind, layer_name)
+    if mode == "patch":
+        return patch_values(pixels)
     prep = pixel_guard.prepare(pixels)
     report = run_analysis(prep.rgb, mode, q, refs, layer_name)
     plan = layer_plan.plan_from_report(report, prep.rgb.shape)
@@ -118,7 +120,39 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "findings": to_jsonable(list(report.findings)),
         "adjustments": to_jsonable(list(report.adjustments)),
         "plan": plan.to_json(),
+        "acr_params": acr_preset.params_from_adjustments(report.adjustments),
+        "acr_calibrated": acr_channels.is_calibrated(),
     }
+
+
+def patch_values(pixels: np.ndarray) -> dict:
+    """取色：一小块像素（PS 选区或吸管范围）的平均颜色、肤色快速规则、所属 ACR 通道、纯度。"""
+    from colordoctor.core import acr_channels as ac
+    from colordoctor.core import color_spaces as cs
+    from colordoctor.core.portrait_analysis import quick_rule_check
+    from colordoctor.core.sampling import color_values
+    from colordoctor.core.skin_presets import global_quick_rule
+
+    px = pixels.reshape(-1, pixels.shape[2])
+    if pixels.shape[2] == 4:
+        px = px[px[:, 3] >= pixel_guard.ALPHA_MIN]
+    if px.shape[0] == 0:
+        raise pixel_guard.BlockedError("取样范围内没有不透明像素。")
+    rgb = px[:, :3]
+    vals = color_values(rgb.astype(np.float64).mean(axis=0))
+    lab = cs.srgb8_to_lab(rgb[:: max(1, rgb.shape[0] // 50_000)])
+    qr = quick_rule_check(lab, global_quick_rule())
+    w = ac.memberships(np.array([vals.hsb[0]]))[0] if vals.lch[1] >= 4 else np.zeros(len(ac.NAMES))
+    channels = [{"channel": n, "weight": round(float(x), 3)} for n, x in zip(ac.NAMES, w, strict=True) if x > 0.01]
+    purity = None
+    if vals.lch[1] >= 8:
+        lch = cs.lab_to_lch(lab)
+        chrom = lch[..., 1] >= 6
+        if chrom.any():
+            d = np.abs(((lch[..., 2][chrom] - vals.lch[2] + 180) % 360) - 180)
+            purity = round(float((d <= 30).mean()), 4)
+    return {"mode": "patch", "pixels": int(px.shape[0]), "values": to_jsonable(vals), "quick_rule": to_jsonable(qr),
+            "acr_channels": channels, "purity": purity}
 
 
 def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: int | None = None) -> tuple[bytes, int, int]:
@@ -184,6 +218,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/health":
                 return self._send(200, {"ok": True, "version": __version__, "modes": list(MODES)})
+            if url.path == "/options":
+                from colordoctor.core import palette as pl
+                from colordoctor.core import skin_presets as sp
+                from colordoctor.core.color_spaces import HUE_SECTORS
+
+                return self._send(200, {
+                    "styles": [{"key": st["key"], "name": st["name"], "category": st.get("category", "")} for st in pl.load_styles()],
+                    "presets": [{"key": pr.key, "name": pr.name} for pr in sp.load_presets()],
+                    "families": [name for name, _, _ in HUE_SECTORS],
+                })
             if url.path == "/mask":
                 sess = self.sessions.get(q.get("session", ""))
                 if sess is None:
@@ -256,8 +300,6 @@ class Handler(BaseHTTPRequestHandler):
                 path = cal.store(channels, req.get("acr_version", ""))
                 return self._send(200, {"channels": channels, "saved": path})
             if url.path == "/acr-preset":
-                from colordoctor.core import acr_preset
-
                 req = json.loads(self._body() or b"{}")
                 xmp = acr_preset.build_xmp(req.get("name") or "ColorDoctor", req.get("params") or {})
                 return self._send(200, xmp.encode("utf-8"), "application/rdf+xml; charset=utf-8")

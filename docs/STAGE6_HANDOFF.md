@@ -11,7 +11,7 @@
 | 2 | 图层方案（问题 → 调整图层 + 羽化蒙版） | ✅ 完成（脏色、发灰、肤色不均、颜色统一） | `src/colordoctor/core/layer_plan.py` | 同上 |
 | 3 | 图层检查（调整图层 / 空白 / 纯色 / 半透明裁剪） | ✅ 完成（服务端兜底） | `src/colordoctor/core/pixel_guard.py` | 同上 |
 | 4 | ACR 预设 .xmp 导出 + 滑块实测校准 | ✅ 完成（Python 端） | `core/acr_preset.py`（`build_xmp`、`params_from_adjustments`）、`core/acr_calibration.py`（色卡、拟合、保存）；`acr_channels` 的滑块换算按通道读取 `acr_calibration.json`；服务路由 `/acr-preset`、`/calibration/*` | `tests/test_acr.py`、`tests/test_bridge.py` |
-| 5 | UXP 插件 | ⏳ 未开始 | 计划：`photoshop-plugin/` | 只能在 Windows PS Beta 验证 |
+| 5 | UXP 插件 | 🟡 代码完成，**未在真实 PS 上运行过** | `photoshop-plugin/`（见其 README）；新增服务模式 `patch`（取色）和 `/options` | `tests/test_plugin_js.py`（Node + 假 photoshop 模块 + 真实服务） |
 | 6 | RAW（rawpy） | ⏳ 未开始 | 计划：`core/color_management.py` 增加 `load_raw` | |
 | 7 | AI 抠皮肤（onnxruntime + MediaPipe 多类分割） | ⏳ 未开始 | 计划：`core/segmentation.py`（可选依赖） | |
 
@@ -33,7 +33,7 @@
 
 ## 接手时先做
 
-1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **352 passed**）。
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **356 passed**（需要 Node 才会跑插件 JS 测试））。
 2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
 
 ## 校准流程（插件端待实现，见 UXP 部分）
@@ -44,6 +44,21 @@
 4. `POST /calibration/fit`（体 `{"acr_version": "…"}`）→ 保存到用户配置目录，之后所有混色器数值标为“已校准”。
 - **未验证**：Camera Raw 滤镜的 batchPlay 描述符需要在 Windows 上用 Alchemist 录一次（录“滤镜 → Camera Raw 滤镜”，改一个 HSL 滑块后确定），把录到的键名填进插件的 `acrFilterDescriptor()`。
 - `.xmp` 的字段名（`HueAdjustmentOrange`、`SplitToningShadowHue`、`ColorGradeBlending`、`ToneCurvePV2012` 等）按 ACR 预设格式写，**需要在 Windows 上把导出的预设放进 ACR 预设文件夹验证一次**。
+
+## 插件：必须在 Windows PS Beta 上逐条确认
+
+| # | 内容 | 位置 | 怎么验证 / 可能要改的地方 |
+|---|---|---|---|
+| P1 | 能加载 | `manifest.json` | UXP Developer Tool 加载无报错。如果网络权限的写法 `http://127.0.0.1:47321` 不被接受，改成 `"domains": "all"` 或 `["http://localhost:47321"]`，同时把 `js/bridge.js` 的 BASE 改成一致 |
+| P2 | 图层检查 | `ps.js` `inspectTarget` | 分别选中像素图层、曲线调整图层、空白新图层、组、文字图层，确认提示正确。`layer.kind` 的实际取值请打印确认（目前按字符串比较；如果是枚举对象，改成 `constants.LayerKind.*`） |
+| P3 | 读像素 | `ps.js` `readPixels` | 16 位、Lab、CMYK 文档也能读成 sRGB 8 位；`targetSize` 缩放正确；图层不在 (0,0) 时 `sourceBounds` 正确 |
+| P4 | 建调整图层 | `ps.js` `makeAdjustmentLayer` | 色相/饱和度（尤其 `localRange` 黄色那一档的数值）、色彩平衡、自然饱和度、曲线的参数在属性面板里显示正确。如果描述符不对，用 Alchemist 录一次替换 |
+| P5 | 写蒙版 | `ps.js` `putMask` | 调整图层自带的白色蒙版被替换成羽化蒙版，位置对齐；分析对象是局部图层时，`targetBounds` 以外的蒙版应为黑色（不确定，需要确认） |
+| P6 | 编组 | `ps.js` `groupLayers` | `doc.createLayerGroup({fromLayers})` 能把新建的图层收进一个组 |
+| P7 | 一步撤销 | `ps.js` `modal` | 一键生成后按一次 Ctrl+Z 全部撤销 |
+| P8 | 过期提示 | `main.js` `refreshTarget` | 分析后在图层上画一笔，面板提示“可能过期” |
+| P9 | Camera Raw | `ps.js` `cameraRawLayer` | 复制 → 智能对象 → 打开 Camera Raw 对话框。如果描述符名不是 `Adobe Camera Raw Filter`，用 Alchemist 录制后替换；录到带参数的描述符后，可以把 ACR 参数直接写进去，不再需要用户手动套预设，同时实现 `main.js` 里的 `calibrate()` |
+| P10 | 导出 xmp | `main.js` `exportXmp` | 存下的 `.xmp` 能在 ACR 预设面板里导入，并且数值正确 |
 
 ## 注意
 
