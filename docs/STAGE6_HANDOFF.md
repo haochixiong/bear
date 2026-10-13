@@ -13,7 +13,7 @@
 | 4 | ACR 预设 .xmp 导出 + 滑块实测校准 | ✅ 完成（Python 端） | `core/acr_preset.py`（`build_xmp`、`params_from_adjustments`）、`core/acr_calibration.py`（色卡、拟合、保存）；`acr_channels` 的滑块换算按通道读取 `acr_calibration.json`；服务路由 `/acr-preset`、`/calibration/*` | `tests/test_acr.py`、`tests/test_bridge.py` |
 | 5 | UXP 插件 | 🟡 代码完成，**未在真实 PS 上运行过** | `photoshop-plugin/`（见其 README）；新增服务模式 `patch`（取色）和 `/options` | `tests/test_plugin_js.py`（Node + 假 photoshop 模块 + 真实服务） |
 | 6 | RAW（rawpy） | ✅ 完成（未用真实 RAW 文件测过） | `color_management.load_raw / load_image / is_raw`；桌面版“打开 JPG / RAW”、命令行 `--raw-preview`；设置键 `raw/use_preview`（界面上还没有开关） | `tests/test_raw.py`（假 rawpy 模块） |
-| 7 | AI 抠皮肤（onnxruntime + MediaPipe 多类分割） | ⏳ 未开始 | 计划：`core/segmentation.py`（可选依赖） | |
+| 7 | AI 抠皮肤（onnxruntime + MediaPipe 多类分割） | ✅ 完成（Linux CPU 上用 MediaPipe 示例人像验证过：约 1 秒，脸 / 身体 / 头发 / 衣服分得开） | `core/segmentation.py`；服务 `mode=skin&seg=ai`，插件“抠皮肤”下拉框；模型不在仓库里，`build_windows.bat` 构建时下载到 `packaging/models/` 并打包；运行时查找顺序见 `model_candidates()`；没有模型或 onnxruntime 时自动退回肤色规则 | `tests/test_segmentation.py`（假推理会话；设 `COLORDOCTOR_SEG_MODEL` 时也跑真实模型） |
 
 ## 已定的接口约定（插件按这个写）
 
@@ -33,7 +33,7 @@
 
 ## 接手时先做
 
-1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **360 passed**（需要 Node 才会跑插件 JS 测试））。
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **363 passed, 1 skipped**（需要 Node 才会跑插件 JS 测试））。
 2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
 
 ## 校准流程（插件端待实现，见 UXP 部分）
@@ -59,6 +59,20 @@
 | P8 | 过期提示 | `main.js` `refreshTarget` | 分析后在图层上画一笔，面板提示“可能过期” |
 | P9 | Camera Raw | `ps.js` `cameraRawLayer` | 复制 → 智能对象 → 打开 Camera Raw 对话框。如果描述符名不是 `Adobe Camera Raw Filter`，用 Alchemist 录制后替换；录到带参数的描述符后，可以把 ACR 参数直接写进去，不再需要用户手动套预设，同时实现 `main.js` 里的 `calibrate()` |
 | P10 | 导出 xmp | `main.js` `exportXmp` | 存下的 `.xmp` 能在 ACR 预设面板里导入，并且数值正确 |
+
+## 还没做 / 建议下一步（按优先级）
+
+1. **在 Windows PS Beta 上跑通插件**：逐条完成上面的 P1–P10。这一步最重要，插件代码还没在真实 Photoshop 里运行过。
+2. **Camera Raw 描述符**（P9）：录到之后：
+   - 实现“生成 Camera Raw 图层”时直接写入参数；
+   - 实现 `main.js` 的 `calibrate()`，流程见上文“校准流程”。
+3. **桌面版接入 AI 抠皮肤**：`ui/session.py` 的肤色分析目前只用肤色规则。可加一个“AI 抠皮肤”勾选，调用 `segmentation.segment_skin(region).part(part)` 作为 `manual_mask` 传入；蒙版编辑器照常可用。
+4. **桌面版设置**：加“RAW 使用内嵌预览”（设置键 `raw/use_preview`）和“允许 PS 插件连接”（`bridge/enabled`）两个开关。
+5. **DirectML**：在 Windows 上确认 `onnxruntime-directml` 能选中 `DmlExecutionProvider`，状态信息里会显示 provider 名称。
+6. **仿色和风格的 ACR 参数**：
+   - 现在 `acr_params` 只从“混色器 / 颜色分级”建议里收集；
+   - 仿色的 `ChannelDiff` 滑块和风格模板的 recipe 也可以转成参数；
+   - 曲线的点（`reference_match` 的 RGB 复合曲线）可以写进 `curve`。
 
 ## 注意
 

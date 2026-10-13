@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 import uuid
@@ -89,7 +90,19 @@ def run_analysis(rgb: np.ndarray, mode: str, q: dict, refs: Store, layer_name: s
     if mode == "dirty":
         return analysis.scan_image(rgb, ctx)
     if mode == "skin":
-        return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=q.get("part") or None)
+        part = q.get("part") or None
+        manual = None
+        if q.get("seg") == "ai":
+            from colordoctor.core import segmentation as sg
+
+            try:
+                manual = sg.segment_skin(rgb).part(part)
+            except sg.SegmentationUnavailable as e:
+                ctx = dataclasses.replace(ctx, warnings=(*ctx.warnings, f"{e}；已改用肤色规则抠皮肤"))
+            else:
+                if not manual.any():
+                    raise pixel_guard.BlockedError("AI 没有在画面里找到这个部位的皮肤。可以换成「肤色规则」，或改选部位。")
+        return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=part, manual_mask=manual)
     if mode == "palette":
         return analysis.analyze_palette_report(rgb, ctx, style_key=q.get("style") or None, family=q.get("family") or None)
     if mode == "reference":

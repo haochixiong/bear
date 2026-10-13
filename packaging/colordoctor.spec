@@ -7,6 +7,10 @@ import os
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 SRC = os.path.join(ROOT, "src")
 
+# AI 抠皮肤模型（可选）：build_windows.bat 会下载到 packaging/models/；没有就不打包，程序自动退回肤色规则
+MODEL = os.path.join(SPECPATH, "models", "selfie_multiclass_256x256.onnx")
+EXTRA = [(MODEL, "models")] if os.path.isfile(MODEL) else []
+
 a = Analysis(
     [os.path.join(SPECPATH, "run_colordoctor.py")],
     pathex=[SRC],
@@ -14,7 +18,7 @@ a = Analysis(
     datas=[
         (os.path.join(SRC, "colordoctor", "data", "skin_presets.json"), "colordoctor/data"),
         (os.path.join(SRC, "colordoctor", "data", "grading_styles.json"), "colordoctor/data"),
-    ],
+    ] + EXTRA,
     hiddenimports=["colordoctor.data"],
     excludes=[
         "tkinter",

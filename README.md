@@ -225,9 +225,20 @@ colordoctor styles       （列出整图风格）
 
 ---
 
+## Photoshop 插件（开发中）
+
+- `photoshop-plugin/` 是 PS（最新 Beta）的 UXP 面板。功能：
+  - 「分析当前图层」，只在手动点击时才分析；调整图层和空白图层会被拦下。
+  - 每条问题可以单独生成调整图层并自动加蒙版，也可以一键生成全部。
+  - ACR 参数可以修改，并导出 .xmp 预设。
+- 分析由本机服务完成：`colordoctor serve`，或打开桌面版时自动启动。服务只监听 127.0.0.1，不联网。
+- 支持读取相机 RAW（`pip install rawpy`）。
+- AI 抠皮肤：MediaPipe 多类人像分割，需要 `pip install onnxruntime`（Windows 显卡加速装 `onnxruntime-directml`）和模型文件，脸和身体分开抠。
+- 安装和尚未在真实 PS 上验证的项目，见 `photoshop-plugin/README.md` 和 `docs/STAGE6_HANDOFF.md`。
+
 ## 测试
 
-`python -m pytest -q`，目前共 332 个测试，覆盖以下方面：
+`python -m pytest -q`，目前共 364 个测试（其中 1 个需要真实模型，默认跳过），覆盖以下方面：
 
 - **色彩换算**：使用 ΔE00 的 Sharma 标准数据校验。
 - **色彩管理**：sRGB、无 ICC、Adobe RGB、P3 显示器。

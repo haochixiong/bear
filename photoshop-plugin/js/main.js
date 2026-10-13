@@ -70,7 +70,8 @@ function renderControls() {
   } else if (state.sub === "ratio") {
     c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>`;
   } else if (state.sub === "skin") {
-    c.innerHTML = `<div class="row"><label>肤色风格</label>${select("preset", o.presets)}</div>
+    c.innerHTML = `<div class="row"><label>抠皮肤</label><select id="seg"><option value="ai">AI 人像分割（显卡）</option><option value="color">肤色规则（不用 AI）</option></select></div>
+      <div class="row"><label>肤色风格</label>${select("preset", o.presets)}</div>
       <div class="row"><label>部位</label><select id="part"><option value="脸部">脸部</option><option value="身体">身体</option><option value="">全部皮肤</option></select></div>`;
   } else if (MODE_OF[state.sub] === "patch") {
     c.innerHTML = `<div class="row"><button id="fg">读取前景色（先用吸管取色）</button></div>
@@ -89,7 +90,7 @@ function query() {
   const v = (id) => ($(id) ? $(id).value : "");
   if (state.sub === "style") q.style = v("style");
   if (state.sub === "ratio" && v("family")) q.family = v("family");
-  if (state.sub === "skin") { q.preset = v("preset"); q.part = v("part"); }
+  if (state.sub === "skin") { q.preset = v("preset"); q.part = v("part"); q.seg = v("seg"); }
   if (state.sub === "reference") q.ref = state.refId || "";
   return q;
 }
