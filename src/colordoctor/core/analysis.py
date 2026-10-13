@@ -91,7 +91,9 @@ def _finalize(mode, context, stats, components, findings, extra_conf_reasons, co
                 notes=tuple(extra_conf_reasons) or ("结论基于当前选区；换一个区域可能得到不同结果",),
             )
         ] + list(findings)
-    findings = sorted(findings, key=lambda f: -[Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG].index(f.severity))
+    order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
+    # 真实问题优先；“与目标风格的差距”不是错误，排在问题之后
+    findings = sorted(findings, key=lambda f: (f.problem.startswith("与目标风格"), -order.index(f.severity)))
     return AnalysisReport(
         mode=mode,
         context=context,

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from colordoctor.core import contamination as ct
-from synth import BLUE, SKIN, YELLOW, flat, lch_color, noisy, patch, skin_region, sprinkle
+from synth import BLUE, YELLOW, flat, lch_color, noisy, patch, skin_region, sprinkle
 
 
 def run(img, **kw):

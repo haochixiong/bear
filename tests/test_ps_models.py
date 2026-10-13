@@ -78,7 +78,6 @@ def test_apply_curves_is_monotonic_and_keeps_endpoints():
 
 def test_solver_recovers_a_color_balance_move():
     rng = np.random.default_rng(1)
-    base = cs.srgb8_to_linear(np.array([200, 150, 125]))  # 仅用于造数据
     px = np.clip(np.array([200, 150, 125]) / 255 + rng.normal(0, 0.03, (300, 3)), 0, 1)
     moved = pm.color_balance(px, midtones=(12, -6, -10))
     target = cs.srgb8_to_lab(np.rint(moved * 255)).mean(axis=0)

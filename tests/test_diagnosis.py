@@ -1,6 +1,5 @@
 """诊断规则、置信度、建议映射与总体流程（含误报专项）。"""
 
-import numpy as np
 import pytest
 
 from colordoctor.core import analysis as an
