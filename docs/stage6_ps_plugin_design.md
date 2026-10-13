@@ -1,0 +1,83 @@
+# 第六轮设计（待确认）：Photoshop 插件、自动图层与蒙版、ACR 参数、AI 抠皮肤、RAW
+
+界面原型：https://claude.ai/artifact/V6wzgXjExY5kESVCaXkzM6
+原型共 4 块画板：PS 面板、生成的图层组、ACR 参数页、桌面版。画板里的数字都是示例数据。
+
+## 1. 总体结构
+
+```
+Photoshop（最新 Beta）
+ └─ UXP 面板（HTML/JS）
+      │ imaging.getPixels 读取文档像素
+      ▼
+   本机引擎 colordoctor（Python，只监听 127.0.0.1）
+      │ 复用现有 core/：脏色、肤色、均匀度、整图、仿色、PS 参数反算
+      ▼
+   返回 JSON：问题区域蒙版 + 每层参数
+      │
+ UXP 面板 → batchPlay 新建调整图层 → imaging.putLayerMask 写入蒙版
+```
+
+- 分析仍全部在本机完成。插件与引擎之间只走 `127.0.0.1` 的本机回环地址，不连外网。
+- 网络代码继续只放在独立包里，新增的是 `colordoctor/bridge`。
+- `test_acceptance` 的检查范围相应放宽到 `ai/` 和 `bridge/` 两个包，并检查 bridge 只绑定 127.0.0.1。
+- 不把算法移植到 JS：重写一遍容易出现两套不一致的结果。
+
+## 2. 自动生成校正图层组（“鸳鸯锅”式）
+
+- 我对“鸳鸯锅”的理解：把方向相反的两种修正，例如偏黄区和偏红区，各放一个调整图层，各自带蒙版，在同一个组里分开控制。
+- 如果你说的是某个具体插件或动作，请发截图给我。
+
+点击“生成校正图层组”后的步骤：
+
+1. 新建图层组：`ColorDoctor · 肤色均匀`。
+2. 每类问题建一个调整图层，参数由引擎按目标 Lab 反算（复用 `ps_models.solve`）：
+   - 偏黄 → 色相/饱和度（黄色通道）。
+   - 偏红橙 → 色彩平衡（中间调）。
+   - 发灰 → 自然饱和度，或色相/饱和度（饱和度）。
+   - 明暗不匀 → 曲线。
+3. 蒙版来自 `skin_uniformity` 的问题块和 `contamination` 的问题区，按原图分辨率生成，边缘羽化，用 `imaging.putLayerMask` 写入。
+4. 另加一个“观察层”（黑白 + 曲线），默认隐藏。
+5. 所有步骤放进一次 `executeAsModal` 历史记录，按一次 Ctrl+Z 就能全部撤销。
+
+关于“不修改原图”：原来的规则是绝不改图。这一功能只**新增**调整图层和蒙版，不碰原图像素，删掉这个组就能还原。
+
+**需要你确认**：是否接受这种做法。
+
+## 3. ACR 参数
+
+- **滑块换算没有官方数据。** Adobe 没有公布“色相滑块 1 格 = 多少度”。社区的说法是这些滑块是界面上的相对量，不是 HSL 角度。[来源](https://community.adobe.com/t5/lightroom-classic-discussions/hsl-format-confusion/m-p/9972815)
+  - 因此改为**实测校准**：插件生成一张色卡文档（8 个通道 × 3 个亮度），对每个滑块分别应用 ±50 和 ±100，量出 Lab 的变化，拟合出你这台机器、这一版 ACR 的换算表。
+  - 写入 `acr_calibration.json` 后，界面上对应的数值从“估计”改为“已校准”。
+- **两种交付方式：**
+  1. 导出 ACR 预设（.xmp，使用 `crs:` 字段），在 ACR 中直接选用。这只是写一个预设文件，不碰图片。
+  2. 在智能对象上应用 Camera Raw 智能滤镜，非破坏性。具体描述符需要先在 Windows 上用 Alchemist 录一次再写入。
+- 色彩平衡、可选颜色同样可以用色卡校准（`WINDOWS_HANDOFF.md` 第 2 节），流程相同。
+
+## 4. AI 抠皮肤 / 抠人（显卡加速）
+
+| 方案 | 能分什么 | 许可 | 说明 |
+|---|---|---|---|
+| **MediaPipe 多类人像分割**（selfie_multiclass_256x256，已有 ONNX 版） | 背景 / 头发 / **身体皮肤** / **脸部皮肤** / 衣服 / 其他 | Apache-2.0 | **首选**：直接区分脸和身体；模型约 16 MB；输入 256×256，需要用原图引导滤波细化边缘。[说明](https://docs.openvino.ai/2023.0/notebooks/243-tflite-selfie-segmentation-with-output.html)、[ONNX](https://huggingface.co/FreeHugsForRobots/ps-skin-seg) |
+| BiSeNet 人脸解析（yakhyo/face-parsing，可导出 ONNX） | 19 类：皮肤、眉、眼、鼻、唇、脖子、头发…… | 代码 MIT；训练数据 CelebAMask-HQ 仅限非商业用途 | 用于精细排除眉眼和嘴唇；[项目](https://github.com/yakhyo/face-parsing) |
+| PS 自带“选择主体” | 人物整体 | PS 内置 | 插件模式的备选：主体选区 ∩ 现有的肤色规则 |
+
+- 运行方式：`onnxruntime-directml`。DirectML 在 Windows 上 N 卡、A 卡、I 卡都能用，没有显卡时自动退回 CPU。
+- 模型文件随安装包分发，不在运行时下载。
+- AI 蒙版仍可用现有的蒙版编辑器手动加减。
+- AI 结果再与现有的肤色规则蒙版取交集，用于去掉衣服、头发边缘的误选。
+
+## 5. RAW
+
+- 桌面版用 `rawpy`（LibRaw）解码：相机白平衡、sRGB、16 位。另提供“使用内嵌 JPG 预览”选项。
+- **局限**：LibRaw 的渲染不等于 ACR 的相机配置文件（如 Adobe 颜色、Adobe 人像），所以分析结果与你在 ACR 里看到的会有差别。界面会明确提示这一点。
+- 插件模式下不存在这个问题：分析的是 PS 文档中已经过 ACR 渲染的像素，所以 JPG 和 RAW 都能用。
+
+## 6. 实施顺序（确认后进行）
+
+1. `bridge`：本机 HTTP 接口 `/analyze`、`/layers`、`/acr`。可在 Linux 上测试。
+2. 图层计划生成（`layer_plan.py`）：问题区域 → 调整图层参数 + 蒙版。可在 Linux 上测试。
+3. ACR 预设 .xmp 导出，以及色卡生成与校准拟合。可在 Linux 上测试。
+4. `segmentation/`：onnxruntime 推理和引导滤波细化。可在 Linux 上用 CPU 测试；DirectML 部分交给 Windows。
+5. RAW 读取（`rawpy`）。可在 Linux 上测试。
+6. UXP 插件（manifest v5、面板、batchPlay 描述符）。只能在 Windows 的 PS Beta 上验证，写入交接文档交给 Codex。
