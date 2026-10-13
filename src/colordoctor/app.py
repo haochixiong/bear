@@ -67,7 +67,7 @@ def _selftest_body() -> None:
     assert len(presets) >= 12, "内置肤色风格缺失"
     from colordoctor.core import palette
 
-    assert len(palette.load_styles()) >= 7, "内置整图风格模板缺失"
+    assert len(palette.load_styles()) >= 28, "内置整图风格模板缺失"
     img = np.empty((120, 160, 3), np.uint8)
     img[:] = (40, 80, 200)
     img.reshape(-1, 3)[::20] = (230, 200, 40)

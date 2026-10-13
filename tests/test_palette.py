@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from colordoctor.core import acr_channels as ac
+from colordoctor.core import color_spaces as cs
 from colordoctor.core import palette as pl
 from synth import flat, lch_color, noisy
 
@@ -153,3 +154,68 @@ def test_analyze_palette_full():
     assert r.style is not None and r.unity is not None
     assert len(r.tone) == 5
     assert r.ratio.roles
+
+
+# ------------------------------------------------------------------ 风格库：常见风格 + 富士 / 柯达胶片
+CHANNELS = {"红色", "橙色", "黄色", "绿色", "浅绿色", "蓝色", "紫色", "洋红"}
+ACTIONS = {"keep", "desat", "desat_dark", "desat_light"}
+
+
+def test_style_library_has_common_looks_and_film_stocks():
+    styles = pl.load_styles()
+    keys = {s["key"] for s in styles}
+    assert {"french", "morandi", "forest", "japanese_fresh"} <= keys
+    fuji = [s for s in styles if s["category"] == "富士胶片"]
+    kodak = [s for s in styles if s["category"] == "柯达胶片"]
+    assert len(fuji) >= 10 and len(kodak) >= 8
+    assert {"fuji_classic_chrome", "fuji_classic_neg", "fuji_nostalgic_neg", "fuji_velvia"} <= keys
+    assert {"kodak_portra400", "kodak_ektar100", "kodak_gold200", "kodak_kodachrome64"} <= keys
+    assert len(keys) == len(styles)
+
+
+@pytest.mark.parametrize("style", pl.load_styles(), ids=lambda s: s["key"])
+def test_style_entries_are_well_formed(style):
+    assert style["category"] in {"色彩风格", "富士胶片", "柯达胶片"}
+    sectors = {s["name"] for s in style.get("sectors", [])}
+    for sec in style.get("sectors", []):
+        assert all(0 <= v <= 360 for v in sec["hue"])
+    lo, hi = style["colorfulness"]
+    assert 0 <= lo < hi
+    if "contrast" in style:
+        assert 0 < style["contrast"][0] < style["contrast"][1] <= 100
+    for ch, act in style["channel_targets"].items():
+        assert ch in CHANNELS
+        assert act in ACTIONS or (act.startswith("toward:") and act.split(":", 1)[1] in sectors), (ch, act)
+    for key in ("shadow_tint", "highlight_tint"):
+        if key in style:
+            assert len(style[key]["hue"]) == 2 and style[key]["chroma"][0] <= style[key]["chroma"][1]
+    assert style["recipe"] and style["description"]
+    if style["category"] != "色彩风格":
+        assert style.get("basis"), "胶片模板必须写明依据"
+    # 每个模板都能在任意图上跑通
+    m = pl.style_match(_teal_orange_image(), style)
+    assert 0 <= m.score <= 100 and m.category == style["category"]
+
+
+def _gradient(lo, hi, h=120, w=160):
+    L = np.linspace(lo, hi, w)[None, :].repeat(h, axis=0)
+    lab = np.stack([L, np.full_like(L, 8.0), np.full_like(L, 14.0)], axis=-1)
+    return cs.lab_to_srgb8(lab)
+
+
+def test_film_look_flags_crushed_blacks_and_high_contrast():
+    portra = pl.get_style("kodak_portra400")
+    harsh = pl.style_match(_gradient(0, 100), portra)
+    soft = pl.style_match(_gradient(12, 80), portra)
+    assert any("黑位太深" in g for g in harsh.gaps)
+    assert any("对比度" in g and "降低" in g for g in harsh.gaps)
+    assert not any("黑位太深" in g or "对比度" in g for g in soft.gaps)
+    assert soft.score > harsh.score
+    curves = [a.instruction for a in harsh.adjustments if a.tool == "曲线"]
+    assert any("黑场抬起" in t for t in curves) and any("降低对比" in t for t in curves)
+    assert harsh.contrast > soft.contrast
+
+
+def test_high_contrast_style_asks_for_more_contrast():
+    m = pl.style_match(_gradient(35, 65), pl.get_style("fuji_velvia"))
+    assert any("对比度" in g and "提高" in g for g in m.gaps)

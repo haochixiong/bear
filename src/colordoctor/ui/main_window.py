@@ -310,8 +310,14 @@ class MainWindow(QMainWindow):
         self.style_box.addItem("（不比较风格）", None)
         from colordoctor.core import palette as pl
 
+        last_cat = None
         for st in pl.load_styles():
+            cat = st.get("category", "")
+            if cat != last_cat:
+                self.style_box.insertSeparator(self.style_box.count())
+                last_cat = cat
             self.style_box.addItem(st["name"], st["key"])
+            self.style_box.setItemData(self.style_box.count() - 1, f"{cat}：{st['description']}", Qt.ItemDataRole.ToolTipRole)
         self.style_box.currentIndexChanged.connect(lambda _i: setattr(self.session, "style_key", self.style_box.currentData()))
         self.family_box = QComboBox()
         self.family_box.addItem("（不检查）", None)

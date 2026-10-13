@@ -83,7 +83,7 @@ def run(argv: list[str]) -> int:
         return 0
     if args.cmd == "styles":
         for s in pl.load_styles():
-            print(f"{s['key']:16s} {s['name']}  {s['description']}")
+            print(f"{s['key']:22s} [{s.get('category', '')}] {s['name']}  {s['description']}")
         return 0
     try:
         src = load_jpeg(args.image)

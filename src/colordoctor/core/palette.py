@@ -109,6 +109,8 @@ class StyleMatch:
     adjustments: tuple[Adjustment, ...]
     recipe: dict = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    contrast: float | None = None  # P95 − P5 明度差
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -392,7 +394,8 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     cf = colorfulness(sub, lch)
     cr = tuple(style.get("colorfulness", [0, 200]))
     cf_ok = cr[0] <= cf.value <= cr[1]
-    p5, p15, p50, p85 = np.percentile(L, [5, 15, 50, 85])
+    p5, p15, p50, p85, p95 = np.percentile(L, [5, 15, 50, 85, 95])
+    contrast = float(p95 - p5)
     # 调色加在阴影/高光上的色调，主要体现在“接近中性”的像素上（灰墙、白衣、暗部），
     # 本身就很鲜艳的物体（绿叶、蓝天）不能代表色调。
     sh = _tint(lab2, (L <= p15) & (C < TINT_MAX_C), min_share=0.05, band=L <= p15)
@@ -420,6 +423,13 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
         gaps.append(f"黑位不够深：P5 明度 {p5:.0f}（目标 ≤ {bp_max}）")
     if style.get("min_median_L") and p50 < style["min_median_L"]:
         gaps.append(f"整体偏暗：中位明度 {p50:.0f}（目标 ≥ {style['min_median_L']}）")
+    bp_min = style.get("black_point_min")
+    if bp_min is not None and p5 < bp_min:
+        gaps.append(f"黑位太深：P5 明度 {p5:.0f}（这种风格黑场是抬起的，目标 ≥ {bp_min}）")
+    ct = style.get("contrast")
+    ct_ok = None if ct is None else bool(ct[0] <= contrast <= ct[1])
+    if ct_ok is False:
+        gaps.append(f"对比度：亮暗差（P95−P5 明度）{contrast:.0f}，目标 {ct[0]}–{ct[1]}，需要{'降低' if contrast > ct[1] else '提高'}")
 
     # 评分
     parts = [(0.5, min(1.0, on_target / 0.85)) if has_sectors else (0.5, 1.0 if cf_ok else 0.5)]
@@ -429,9 +439,23 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
             parts.append((wgt, 1.0 if ok else 0.3))
     if bp_max is not None:
         parts.append((0.1, 1.0 if p5 <= bp_max else max(0.0, 1 - (p5 - bp_max) / 20)))
+    if bp_min is not None:
+        parts.append((0.1, 1.0 if p5 >= bp_min else max(0.0, 1 - (bp_min - p5) / 10)))
+    if ct_ok is not None:
+        dist = 0.0 if ct_ok else min(abs(contrast - ct[0]), abs(contrast - ct[1]))
+        parts.append((0.15, max(0.0, 1 - dist / 25)))
     score = 100 * sum(wt * v for wt, v in parts) / sum(wt for wt, _ in parts)
 
     adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl)
+    if bp_min is not None and p5 < bp_min:
+        gray = int(cs.lab_to_srgb8(np.array([float(bp_min), 0.0, 0.0]))[0])
+        adjs.insert(0, Adjustment("曲线", f"RGB 黑场抬起：输入 0 → 输出约 {gray}（P5 明度 {p5:.0f} → ≥ {bp_min}）", "小幅", False))
+    if ct_ok is False:
+        if contrast > ct[1]:
+            text = f"RGB 降低对比：亮暗差 {contrast:.0f} → {ct[1]} 以内（黑场抬、白场略压，或中间调 S 曲线减弱）"
+        else:
+            text = f"RGB 加对比：亮暗差 {contrast:.0f} → ≥ {ct[0]}（S 形曲线，暗部下压、亮部上提）"
+        adjs.insert(0, Adjustment("曲线", text, "小幅", True))
     return StyleMatch(
         key=style["key"],
         name=style["name"],
@@ -450,6 +474,8 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
         adjustments=tuple(adjs),
         recipe=style.get("recipe", {}),
         notes=tuple(style.get("notes", ())),
+        contrast=round(contrast, 1),
+        category=style.get("category", ""),
     )
 
 
