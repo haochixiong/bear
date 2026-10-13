@@ -102,7 +102,8 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
                 if valid is not None:
                     manual &= valid
             except sg.SegmentationUnavailable as e:
-                ctx = dataclasses.replace(ctx, warnings=(*ctx.warnings, f"{e}；已改用肤色规则抠皮肤"))
+                part = None  # 肤色规则分不出脸和身体，不能再标“脸部”
+                ctx = dataclasses.replace(ctx, warnings=(*ctx.warnings, f"{e}；已改用肤色规则抠皮肤（不区分脸和身体）"))
             else:
                 if not manual.any():
                     raise pixel_guard.BlockedError("AI 没有在画面里找到这个部位的皮肤。可以换成「肤色规则」，或改选部位。")
@@ -137,7 +138,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "session": sid,
         "mode": mode,
         "layer": layer_name,
-        "notes": list(prep.notes),
+        "notes": list(prep.notes) + [w for w in report.context.warnings if w not in photoshop_context().warnings],
         "summary": summary(report),
         "findings": to_jsonable(list(report.findings)),
         "adjustments": to_jsonable(list(report.adjustments)),
@@ -177,6 +178,10 @@ def patch_values(pixels: np.ndarray) -> dict:
             "acr_channels": channels, "purity": purity}
 
 
+class NotFound(LookupError):
+    """会话 / 图层不存在（返回 404）。"""
+
+
 MAX_SIDE = 30_000  # 单边像素上限（PS 文档最大 300000，但这里只接受常见尺寸，防止内存耗尽）
 MAX_MASK_PIXELS = 300_000_000
 MAX_CAL_SAMPLES = 200
@@ -197,13 +202,13 @@ def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: i
     place：(left, top, 文档宽, 文档高)。给出时返回整幅文档大小的蒙版，图层范围以外为 0（不作用），
     插件就能把它写到文档 (0, 0)，不用担心范围外保持白色。
     """
-    ly = sess.plan.get(layer_id)
+    m = sess.plan.full_mask(layer_id)
     h, w = sess.shape
-    full = np.full((h, w), 255, np.uint8) if ly.mask is None else np.zeros((h, w), np.uint8)
-    if ly.mask is not None:
+    full = np.full((h, w), 255, np.uint8) if m is None else np.zeros((h, w), np.uint8)
+    if m is not None:
         ox, oy = sess.offset
-        mh, mw = ly.mask.shape
-        full[oy:oy + mh, ox:ox + mw] = ly.mask
+        mh, mw = m.shape
+        full[oy:oy + mh, ox:ox + mw] = m
     tw = sess.doc_size[0] if width is None else int(width)
     th = sess.doc_size[1] if height is None else int(height)
     _check_size(tw, th, "蒙版")
@@ -290,8 +295,10 @@ class Handler(BaseHTTPRequestHandler):
             fn()
         except pixel_guard.BlockedError as e:
             self._send(422, {"blocked": str(e)})
+        except NotFound as e:
+            self._send(404, {"error": str(e)})
         except KeyError as e:
-            self._send(404, {"error": f"找不到：{e.args[0] if e.args else ''}"})
+            self._send(400, {"error": f"缺少参数：{e.args[0] if e.args else ''}"})
         except ValueError as e:
             self._send(400, {"error": str(e)})
         except Exception as e:  # 分析出错也要回一个响应，插件才能显示真实原因
@@ -340,8 +347,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError(f"参数 {k} 不是整数") from e
 
             place = None
+            if ("doc_w" in q) != ("doc_h" in q):
+                raise ValueError("doc_w 和 doc_h 必须同时提供")
             if "doc_w" in q:
                 place = (num("left") or 0, num("top") or 0, num("doc_w"), num("doc_h"))
+            try:
+                sess.plan.get(q.get("layer", ""))
+            except KeyError as e:
+                raise NotFound("没有这个图层，请重新分析") from e
             data, w, h = mask_bytes(sess, q.get("layer", ""), num("w"), num("h"), place)
             return self._send(200, data, "application/octet-stream", {"X-Width": w, "X-Height": h})
         if url.path == "/calibration/chart":
@@ -386,6 +399,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if q.get("slider") not in cal.SLIDERS:
                         raise ValueError("slider 应为 hue / sat / lum / base")
+                    if q.get("channel") not in cal.ac.NAMES:
+                        raise ValueError(f"未知的混色器通道：{q.get('channel')}")
                     samples = self.calibration.setdefault("samples", [])
                     if len(samples) >= MAX_CAL_SAMPLES:
                         raise ValueError("校准样本太多")
@@ -411,7 +426,10 @@ class Handler(BaseHTTPRequestHandler):
             params = req.get("params") or {}
             if not isinstance(params, dict):
                 raise ValueError("params 应为对象")
-            xmp = acr_preset.build_xmp(str(req.get("name") or "ColorDoctor"), params)
+            try:
+                xmp = acr_preset.build_xmp(str(req.get("name") or "ColorDoctor"), params)
+            except (TypeError, AttributeError, IndexError) as e:
+                raise ValueError(f"ACR 参数格式不对：{e}") from e
             return self._send(200, xmp.encode("utf-8"), "application/rdf+xml; charset=utf-8")
         return self._send(404, {"error": "not found"})
 

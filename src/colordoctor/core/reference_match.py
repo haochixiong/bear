@@ -41,8 +41,8 @@ class MatchReport:
     tone_ref: tuple[float, ...]
     tone_mine: tuple[float, ...]
     curve_points: tuple[tuple[int, int], ...]  # RGB 复合曲线 (输入, 输出)
-    cast_ref: tuple[float, float]  # 中性区域平均 (a*, b*)
-    cast_mine: tuple[float, float]
+    cast_ref: tuple[float, float] | None  # 中性区域平均 (a*, b*)；中性像素太少时为 None（无法判断）
+    cast_mine: tuple[float, float] | None
     colorfulness_ref: float
     colorfulness_mine: float
     channels: tuple[ChannelDiff, ...]
@@ -54,13 +54,15 @@ class MatchReport:
     adjustments: tuple[Adjustment, ...]
 
 
-def _neutral_cast(lab: np.ndarray, sel: np.ndarray | None = None) -> tuple[float, float]:
+def _neutral_cast(lab: np.ndarray, sel: np.ndarray | None = None) -> tuple[float, float] | None:
+    """接近中性的像素的平均色调。太少（< 20 个）时返回 None：画面里没有可参考的中性色，
+    不能当成“没有偏色”，否则会按错误的起点给出色温 / 颜色分级建议。"""
     C = np.hypot(lab[:, 1], lab[:, 2])
     m = C < NEUTRAL_C
     if sel is not None:
         m &= sel
     if m.sum() < 20:
-        return (0.0, 0.0)
+        return None
     return (float(lab[m, 1].mean()), float(lab[m, 2].mean()))
 
 
@@ -74,11 +76,16 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     lm, lr = lab_m.reshape(-1, 3), lab_r.reshape(-1, 3)
     tm = tuple(float(v) for v in np.percentile(lm[:, 0], PCTS))
     tr = tuple(float(v) for v in np.percentile(lr[:, 0], PCTS))
-    pts: dict[int, int] = {}
-    for a, b in zip(tm, tr, strict=True):  # 多个百分位可能落在同一个输入值上（例如都为 0）：只保留一个点
-        if abs(_gray(a) - _gray(b)) >= 2:
-            pts.setdefault(_gray(a), _gray(b))
-    curve = tuple(sorted(pts.items()))
+    pts: list[tuple[int, int]] = []
+    for a, b in zip(tm, tr, strict=True):
+        x, y = _gray(a), _gray(b)
+        if abs(x - y) < 2:
+            continue
+        # 曲线点之间至少相隔 12 级、输出单调不降，否则曲线过陡会出现断层（PS 也可能合并太近的点）
+        if pts and (x - pts[-1][0] < 12 or y < pts[-1][1]):
+            continue
+        pts.append((x, y))
+    curve = tuple(pts)
     cast_m, cast_r = _neutral_cast(lm), _neutral_cast(lr)
     cf_m, cf_r = pl.colorfulness(s_m, lch_m).value, pl.colorfulness(s_r, lch_r).value
 
@@ -118,7 +125,8 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         skin_delta = (round(float(cs.delta_e_2000(sm, sr)), 2), *(round(float(v), 2) for v in sr - sm))
 
     tone_d = float(np.mean(np.abs(np.array(tr) - np.array(tm))))
-    cast_d = float(np.hypot(cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]))
+    both_cast = cast_r is not None and cast_m is not None
+    cast_d = float(np.hypot(cast_r[0] - cast_m[0], cast_r[1] - cast_m[1])) if both_cast else 0.0
     sim = 100 - 2.0 * pal_de - 1.2 * tone_d - 0.4 * abs(cf_r - cf_m) - 1.5 * cast_d
     if skin_delta is not None:
         sim -= 1.5 * skin_delta[0]
@@ -126,7 +134,8 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
 
     gaps = [
         f"影调（L* 中位）参考 {tr[2]:.0f} / 我的 {tm[2]:.0f}；暗部 P5 {tr[0]:.0f} / {tm[0]:.0f}；亮部 P95 {tr[4]:.0f} / {tm[4]:.0f}",
-        f"中性区域偏色：参考 a* {cast_r[0]:+.1f}、b* {cast_r[1]:+.1f}；我的 a* {cast_m[0]:+.1f}、b* {cast_m[1]:+.1f}",
+        (f"中性区域偏色：参考 a* {cast_r[0]:+.1f}、b* {cast_r[1]:+.1f}；我的 a* {cast_m[0]:+.1f}、b* {cast_m[1]:+.1f}" if both_cast
+         else "中性区域偏色：有一张图几乎没有接近中性的颜色，无法比较白平衡"),
         f"色彩丰富度：参考 {cf_r:.0f} / 我的 {cf_m:.0f}",
         f"主色平均差异 ΔE00 {pal_de:.1f}",
     ]
@@ -152,7 +161,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     if curve:
         adjs.append(Adjustment("曲线", "RGB 复合曲线（把影调拉向参考）：" + "；".join(f"输入 {a} → 输出 {b}" for a, b in curve), "小幅", False,
                                tuple((f"输入 {a}", float(b)) for a, b in curve)))
-    da, db = cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]
+    da, db = (cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]) if both_cast else (0.0, 0.0)
     if abs(db) >= 1.5:
         adjs.append(Adjustment("Camera Raw", f"色温往{'黄' if db > 0 else '蓝'}（中性区域 b* 需要 {db:+.1f}）", "小幅"))
     if abs(da) >= 1.5:
@@ -162,6 +171,8 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         pr = np.percentile(lr[:, 0], [15, 85])
         tm_ = _neutral_cast(lm, sel_fn(lm[:, 0], pm))
         tr_ = _neutral_cast(lr, sel_fn(lr[:, 0], pr))
+        if tm_ is None or tr_ is None:
+            continue  # 这一段没有可比较的中性色
         if np.hypot(tr_[0] - tm_[0], tr_[1] - tm_[1]) >= 2:
             gh, gs = ac.tint_to_grading(60.0, tr_[0] - tm_[0], tr_[1] - tm_[1])  # 要加的是差值
             adjs.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（参考{label}色调 a* {tr_[0]:+.1f}、b* {tr_[1]:+.1f}，我的 a* {tm_[0]:+.1f}、b* {tm_[1]:+.1f}）", "小幅",
@@ -183,8 +194,8 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         tone_ref=tuple(round(v, 1) for v in tr),
         tone_mine=tuple(round(v, 1) for v in tm),
         curve_points=curve,
-        cast_ref=tuple(round(v, 2) for v in cast_r),
-        cast_mine=tuple(round(v, 2) for v in cast_m),
+        cast_ref=None if cast_r is None else tuple(round(v, 2) for v in cast_r),
+        cast_mine=None if cast_m is None else tuple(round(v, 2) for v in cast_m),
         colorfulness_ref=round(cf_r, 1),
         colorfulness_mine=round(cf_m, 1),
         channels=tuple(diffs),

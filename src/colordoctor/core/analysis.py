@@ -327,14 +327,19 @@ def analyze_skin_region(
     findings += _uniformity_findings(uni, conf, reasons)
     sc = {c.key: c for c in components}["skin_cast"]
     if sc.severity != Severity.NORMAL:
-        target = (sp.get_preset("natural", presets) if preset is None else preset).target_lab
+        preset_lab = (sp.get_preset("natural", presets) if preset is None else preset).target_lab
+        # 这条只管“偏色”（色相）：保留当前的明度和色度，只把色相拉向目标。
+        # 否则会按“自然肤色”的明度要求深肤色提亮、浅肤色压暗，违背“不按深浅判断肤色”的原则。
+        cur_lch = cs.lab_to_lch(np.asarray(skin.mean_lab, dtype=float))
+        tgt_h = float(cs.lab_to_lch(np.asarray(preset_lab, dtype=float))[2])
+        target = cs.lch_to_lab(np.array([cur_lch[0], cur_lch[1], tgt_h]))
         findings.append(
             Finding(
                 problem=f"肤色整体{skin.tendency}",
                 severity=sc.severity,
                 evidence=sc.evidence,
                 causes=("白平衡（色温/色调）偏移", "HSL 橙色/红色的色相被移动"),
-                adjustments=tuple(a for a in rec.skin_adjustments(skin_px, target) if a.tool == "Camera Raw"),
+                adjustments=tuple(a for a in rec.skin_adjustments(skin_px, target, keep_lightness=True) if a.tool == "Camera Raw"),
                 confidence=conf,
                 notes=(sc.note,) + tuple(reasons),
             )

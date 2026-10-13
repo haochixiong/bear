@@ -52,6 +52,8 @@ def tendency_of(a: float, b: float) -> tuple[str, float]:
     色相按顺时针连续处理：0° 两侧不再跳变（h = 359° 与 h = 1° 的超出量相近）。
     a* < 0 时皮肤已经没有红色成分：b* ≥ 0 视为偏绿，b* < 0 视为偏青/偏蓝。
     """
+    if math.hypot(a, b) < 4.0:
+        return "正常", 0.0  # 几乎没有颜色（灰 / 黑白）：色相只是噪声，发灰另有判断
     h = math.degrees(math.atan2(b, a)) % 360.0
     lo, hi = NATURAL_HUE
     if a < 0:
@@ -79,7 +81,11 @@ def _expected_saturation(preset: SkinPreset | None, L: float) -> tuple[float, fl
         return (preset.chroma[0] / preset.L[1], preset.chroma[1] / preset.L[0])
     from colordoctor.core.skin_presets import builtin_presets
 
-    cover = [p for p in builtin_presets() if p.L[0] - 3 <= L <= p.L[1] + 3]
+    presets = builtin_presets()
+    lo_L = min(p.L[0] for p in presets) - 3
+    hi_L = max(p.L[1] for p in presets) + 3
+    L = min(max(L, lo_L), hi_L)  # 超出所有风格明度范围的极亮 / 极暗皮肤：按最接近的风格判断，避免下限突然跳变
+    cover = [p for p in presets if p.L[0] - 3 <= L <= p.L[1] + 3]
     if not cover:
         return NATURAL_SATURATION
     lo = min(p.chroma[0] / p.L[1] for p in cover)
@@ -234,15 +240,22 @@ def preset_fit(report: SkinReport, preset: SkinPreset) -> dict[str, str]:
         ("色相角 h°", h, preset.hue, "°"),
     ):
         if key.startswith("色相"):
-            # 色相是环形的：把当前色相换到以区间中心为参照的连续刻度上再比较（区间可能跨过 0°）
-            center = lo + (hi - lo) / 2.0
-            val = center + float(cs.hue_diff(center % 360, val % 360))
+            # 色相是环形的。区间可能写成 (-5, 10)，也可能写成 lo > hi 的 (350, 20)，两种都表示跨过 0°
+            span = (hi - lo) % 360 or 360.0
+            center = (lo + span / 2.0) % 360
+            d = float(cs.hue_diff(center, val % 360))
+            shown = val % 360
+            if abs(d) <= span / 2.0:
+                out[key] = f"在范围内（{shown:.1f}°）"
+            else:
+                out[key] = f"{'偏低' if d < 0 else '偏高'}（{shown:.1f}°，目标 {lo:g}–{hi:g}°）"
+            continue
         if val < lo:
-            out[key] = f"偏低（{val % 360 if unit == '°' else val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
+            out[key] = f"偏低（{val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
         elif val > hi:
-            out[key] = f"偏高（{val % 360 if unit == '°' else val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
+            out[key] = f"偏高（{val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"
         else:
-            out[key] = f"在范围内（{val % 360 if unit == '°' else val:.1f}{unit}）"
+            out[key] = f"在范围内（{val:.1f}{unit}）"
     return out
 
 

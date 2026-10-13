@@ -340,3 +340,51 @@ def test_transparent_pixels_do_not_count_as_grey():
     assert "灰" in grey_before and "灰" not in fams, fams
     res = bs.analyze_request(rgba, "dirty", {}, bs.Store(), bs.Store())
     assert res["plan"]["layers"] == []
+
+
+def test_http_error_codes_round2(bridge):
+    hdr = {"X-Width": "1", "X-Height": "1", "X-Components": "3"}
+    code, _, _ = _req(bridge + "/mask?session=nope&layer=x")
+    assert code == 404
+    code, _, body = _req(bridge + "/acr-preset", json.dumps({"params": {"hsl": {"红色": 5}}}).encode())
+    assert code == 400
+    code, _, body = _req(bridge + "/acr-preset", json.dumps({"params": {"curve": {"composite": []}}}).encode())
+    assert code in (200, 400)
+    from colordoctor.core import acr_calibration as cal
+
+    img, _ = cal.chart()
+    h = {"X-Width": str(img.shape[1]), "X-Height": str(img.shape[0]), "X-Components": "3"}
+    code, _, body = _req(bridge + "/calibration/sample?slider=hue&value=10", img.tobytes(), h)
+    assert code == 400 and "通道" in json.loads(body)["error"]
+    code, _, body = _req(bridge + "/calibration/sample?slider=hue&value=10&channel=%E7%B4%AB%E7%BA%A2", img.tobytes(), h)
+    assert code == 400
+
+
+def test_skin_fallback_note_and_no_part_label(monkeypatch):
+    from synth import face_scene
+
+    from colordoctor.core import segmentation as sg
+
+    def boom(*a, **k):
+        raise sg.SegmentationUnavailable("找不到模型文件")
+
+    monkeypatch.setattr(sg, "segment_skin", boom)
+    img, _ = face_scene(160, 160)
+    res = bs.analyze_request(img, "skin", {"seg": "ai", "part": "脸部"}, bs.Store(), bs.Store())
+    assert any("肤色规则" in n for n in res["notes"])
+    assert not any("脸部" in f["problem"] for f in res["findings"])
+
+
+def test_large_image_plan_is_fast_and_masks_align():
+    import time
+
+    img = noisy(flat(BLUE, 3000, 4000), 2)
+    img[:, 2000:] = sprinkle(img[:, 2000:], YELLOW, 0.05, seed=4)
+    rep = an.scan_image(img, synthetic_context())
+    t = time.perf_counter()
+    plan = lp.plan_from_report(rep, img.shape)
+    dt = time.perf_counter() - t
+    assert dt < 5.0, dt
+    full = plan.full_mask("opposite")
+    assert full.shape == img.shape[:2]
+    assert full[:, 2200:].mean() > 5 * max(full[:, :1800].mean(), 1)

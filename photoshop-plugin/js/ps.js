@@ -79,8 +79,15 @@ async function readPixels(info, sourceBounds) {
   const res = await imaging.getPixels(opts);
   const img = res.imageData;
   const data = await img.getData({ chunky: true });
-  const out = { data: new Uint8Array(data), width: img.width, height: img.height, components: img.components,
-    sourceBounds: res.sourceBounds || b };
+  // 用 targetSize 缩小读取时，PS 可能从金字塔缓存的第 level 级读：返回的 sourceBounds 是该级的坐标
+  // （每级缩小一半），不是文档坐标。换算回文档坐标，再裁到画布内。
+  const f = Math.pow(2, res.level || 0);
+  const sb = res.sourceBounds || b;
+  const docB = {
+    left: Math.max(0, Math.round(sb.left * f)), top: Math.max(0, Math.round(sb.top * f)),
+    right: Math.min(info.doc.width, Math.round(sb.right * f)), bottom: Math.min(info.doc.height, Math.round(sb.bottom * f)),
+  };
+  const out = { data: new Uint8Array(data), width: img.width, height: img.height, components: img.components, sourceBounds: docB };
   img.dispose();
   return out;
 }
@@ -216,10 +223,15 @@ function collect(layers, out = []) {
 }
 
 // 在一次历史记录里执行 fn(ctx)
-async function modal(name, fn, { interactive = false } = {}) {
+async function modal(name, fn, { interactive = false, docId = null, docSize = null } = {}) {
   return core.executeAsModal(async (ctx) => {
     const doc = app.activeDocument;
     if (!doc) throw new Error("没有打开的文档。");
+    // 防止分析后切换了文档、或改了画布尺寸：在错误的文档里建图层 / 写蒙版
+    if (docId != null && doc.id !== docId) throw new Error("当前文档不是刚才分析的那一个，请切回原文档或重新分析。");
+    if (docSize && (doc.width !== docSize[0] || doc.height !== docSize[1])) {
+      throw new Error("文档尺寸在分析后改变了（裁剪 / 画布大小 / 图像大小），请重新分析。");
+    }
     const id = await ctx.hostControl.suspendHistory({ documentID: doc.id, name });
     let ok = false;
     try {
@@ -275,7 +287,7 @@ async function applyCameraRaw(layer, params) {
 async function createChartDocument(px) {
   const doc = await app.createDocument({
     width: px.width, height: px.height, resolution: 72, mode: "RGBColorMode", fill: "white",
-    name: "ColorDoctor 校准色卡",
+    name: "ColorDoctor 校准色卡", profile: "sRGB IEC61966-2.1",  // 色卡按 sRGB 测量，文档必须也是 sRGB
   });
   const layer = await doc.createPixelLayer({ name: "色卡" });
   const img = await imaging.createImageDataFromBuffer(px.data, {
@@ -301,8 +313,13 @@ async function closeDocument(doc) {
   try { await doc.closeWithoutSaving(); } catch (_) { /* 用户已手动关闭 */ }
 }
 
+async function selectLayer(id) {
+  checkResults(await action.batchPlay([{ _obj: "select", _target: [{ _ref: "layer", _id: id }], makeVisible: false }], {}),
+    "选中原图层");
+}
+
 module.exports = {
-  acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
+  selectLayer, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
   constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor },

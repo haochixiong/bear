@@ -71,6 +71,10 @@ def measure(img: np.ndarray, patches: list[Patch]) -> np.ndarray:
     return np.array(out)
 
 
+def _hsb_sat(lab: np.ndarray) -> float:
+    return float(cs.srgb8_to_hsb(cs.lab_to_srgb8(lab))[1])
+
+
 def _hsb_hue(lab: np.ndarray) -> float:
     return float(cs.srgb8_to_hsb(cs.lab_to_srgb8(lab))[0])
 
@@ -98,8 +102,9 @@ def fit(base: np.ndarray, samples: list[tuple[str, str, int, np.ndarray]], patch
                 d = ((_hsb_hue(a[i]) - _hsb_hue(b[i]) + 180) % 360) - 180
                 vals.append(d / value)
             elif slider == "sat":
-                c0, c1 = np.hypot(*b[i][1:]), np.hypot(*a[i][1:])
-                vals.append((c1 / max(c0, 1e-6) - 1.0) / value)
+                # 与 acr_channels.sat_slider 用同一种量：HSB 饱和度的比例
+                s0, s1 = _hsb_sat(b[i]), _hsb_sat(a[i])
+                vals.append((s1 / max(s0, 1e-6) - 1.0) / value)
             else:
                 vals.append((a[i][0] - b[i][0]) / value)
         acc.setdefault(channel, {}).setdefault(slider, []).append(float(np.median(vals)))

@@ -446,7 +446,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
         parts.append((0.15, max(0.0, 1 - dist / 25)))
     score = 100 * sum(wt * v for wt, v in parts) / sum(wt for wt, _ in parts)
 
-    adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl)
+    adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok)
     if bp_min is not None and p5 < bp_min:
         gray = int(cs.lab_to_srgb8(np.array([float(bp_min), 0.0, 0.0]))[0])
         adjs.insert(0, Adjustment("曲线", f"RGB 黑场抬起：输入 0 → 输出约 {gray}（P5 明度 {p5:.0f} → ≥ {bp_min}）", "小幅", False))
@@ -479,7 +479,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     )
 
 
-def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
+def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None) -> list[Adjustment]:
     out: list[Adjustment] = []
     sector_center = {s["name"]: _center(*s["hue"]) for s in style.get("sectors", [])}
     for c in ac.channel_stats(sub):
@@ -504,15 +504,23 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl) -> list[Adjustment]:
                 prm.append(("明亮度", lum))
             out.append(Adjustment("Camera Raw 混色器", text, "中等" if c.share >= 0.15 else "小幅", True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
-    for key, label, t in (("shadow_tint", "阴影", sh), ("highlight_tint", "高光", hl)):
+    for key, label, t, ok in (("shadow_tint", "阴影", sh, sh_ok), ("highlight_tint", "高光", hl, hl_ok)):
         spec = style.get(key)
-        if spec is None or t is None:
-            continue
+        if spec is None or t is None or ok is True:
+            continue  # 已经达标就不再建议
         lo, hi = spec["hue"]
-        goal_h = _center(lo, hi) if spec["hue"] != [0, 360] else t[0]
-        goal_c = float(np.mean(spec["chroma"]))
         cur = t[2]
-        goal = np.array([cur[0], goal_c * np.cos(np.radians(goal_h)), goal_c * np.sin(np.radians(goal_h))])
+        if spec["hue"] == [0, 360]:
+            # 只限制色度（例如“阴影接近中性”）：只在超标时把现有色调减弱到上限，绝不加新的色相
+            cmax = float(spec["chroma"][1])
+            if t[1] <= cmax:
+                continue
+            k = cmax / max(t[1], 1e-6)
+            goal = np.array([cur[0], cur[1] * k, cur[2] * k])
+        else:
+            goal_h = _center(lo, hi)
+            goal_c = float(np.mean(spec["chroma"]))
+            goal = np.array([cur[0], goal_c * np.cos(np.radians(goal_h)), goal_c * np.sin(np.radians(goal_h))])
         if float(np.hypot(*(goal[1:] - cur[1:]))) < 2:
             continue
         # 颜色分级是在现有色调上“加”一个色调：要加的是差值（目标 − 当前），不是目标本身

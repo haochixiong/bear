@@ -75,7 +75,10 @@ def _fake_acr(img, channel, slider, value, patches, k):
             out[y:y + h, x:x + w] = cs.hsb_to_srgb8(hsb)
             continue
         if slider == "sat":
-            lab[..., 1:] *= 1 + k * value
+            hsb = cs.srgb8_to_hsb(out[y:y + h, x:x + w]).astype(float)
+            hsb[..., 1] = np.clip(hsb[..., 1] * (1 + k * value), 0, 100)
+            out[y:y + h, x:x + w] = cs.hsb_to_srgb8(hsb)
+            continue
         else:
             lab[..., 0] += k * value
         out[y:y + h, x:x + w] = cs.lab_to_srgb8(lab)
@@ -136,3 +139,24 @@ def test_curve_duplicate_inputs_are_merged():
     _, seqs = ap.settings_from_params({"curve": {"composite": [[0, 10], [0, 20], [128, 140]]}})
     xs = [int(p.split(",")[0]) for p in seqs["ToneCurvePV2012"]]
     assert len(xs) == len(set(xs))
+
+
+def test_params_not_summed_and_hidden_values_skipped():
+    adjs = [
+        Adjustment("Camera Raw 混色器", "绿色（占画面颜色 40%）：色相 +30", None, True, (("色相", 30),)),
+        Adjustment("Camera Raw 混色器", "绿色（参考占 30%，我的占 40%）：色相 -20", None, True, (("色相", -20), ("饱和度", 0), ("明亮度", -8))),
+        Adjustment("Camera Raw 混色器", "浅绿色（参考占 5%，我的占 6%）：饱和度 -12", None, True, (("色相", 3), ("饱和度", -12), ("明亮度", 0))),
+    ]
+    p = ap.params_from_adjustments(adjs)
+    assert p["hsl"]["绿色"] == {"hue": 30}  # 第一条为准，不相加；没显示的明亮度 -8 不写
+    assert p["hsl"]["浅绿色"] == {"sat": -12}  # 色相 3 低于门槛、没显示，不写
+
+
+def test_xmp_details_round2():
+    attrs, seqs = ap.settings_from_params({"grading": {"shadow": {"hue": 370, "sat": 10}}, "curve": {"red": []},
+                                           "hsl": {"橙色": {"hue": 5}}})
+    assert attrs["SplitToningShadowHue"] == "10"
+    assert "ToneCurvePV2012Red" not in seqs
+    assert "ConvertToGrayscale" not in attrs
+    x = ap.build_xmp("t", {"curve": {"composite": [[64, 70]]}})
+    assert "ProcessVersion" not in x and 'crs:ToneCurveName2012="Custom"' in x

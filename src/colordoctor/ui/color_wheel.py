@@ -137,7 +137,8 @@ class ColorWheel(QWidget):
 
         if self.preset is not None:
             self._draw_sector(p, self.preset.hue, self.preset.chroma, QColor(255, 255, 255, 40), QColor(255, 255, 255, 150))
-            mid = (self.preset.hue[0] + self.preset.hue[1]) / 2
+            h0, h1 = self.preset.hue
+            mid = h0 + ((h1 - h0) % 360) / 2
             pos = self.to_xy(
                 self.preset.chroma[1] * math.cos(math.radians(mid)), self.preset.chroma[1] * math.sin(math.radians(mid))
             )
@@ -193,6 +194,7 @@ class ColorWheel(QWidget):
 
     def _draw_sector(self, p, hue_rng, c_rng, fill, edge, dashed=False):
         h0, h1 = hue_rng
+        h1 = h0 + ((h1 - h0) % 360 or 360)  # (350, 20) 这类跨 0° 的写法：画 350→380
         c0, c1 = c_rng
         path = QPainterPath()
         steps = 24

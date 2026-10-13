@@ -12,7 +12,7 @@ const SUBS = {
 const MODE_OF = { dirty: "dirty", patch: "patch", skinpatch: "patch", ratio: "palette", style: "palette", skin: "skin", reference: "reference" };
 
 const state = {
-  cat: "color", sub: "dirty", options: null,
+  cat: "color", sub: "dirty", options: null, busy: false,
   result: null,            // 最近一次分析返回
   analyzed: null,          // {docId, layerId, history, bounds, target}
   refId: null,
@@ -32,7 +32,7 @@ function refreshTarget() {
     st.textContent = info.reason;
     return info;
   }
-  $("analyze").disabled = false;
+  $("analyze").disabled = state.busy;
   const a = state.analyzed;
   if (a && info.doc && a.docId === info.doc.id && a.layerId === (info.layer ? info.layer.id : null)) {
     const stale = a.history !== ps.historyStateId(info.doc);
@@ -70,7 +70,7 @@ function renderControls() {
   } else if (state.sub === "ratio") {
     c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>`;
   } else if (state.sub === "skin") {
-    c.innerHTML = `<div class="row"><label>抠皮肤</label><select id="seg"><option value="ai">AI 人像分割（显卡）</option><option value="color">肤色规则（不用 AI）</option></select></div>
+    c.innerHTML = `<div class="row"><label>抠皮肤</label><select id="seg"><option value="ai">AI 人像分割（显卡）</option><option value="color">肤色规则（不分脸和身体）</option></select></div>
       <div class="row"><label>肤色风格</label>${select("preset", o.presets)}</div>
       <div class="row"><label>部位</label><select id="part"><option value="脸部">脸部</option><option value="身体">身体</option><option value="">全部皮肤</option></select></div>`;
   } else if (MODE_OF[state.sub] === "patch") {
@@ -90,17 +90,28 @@ function query() {
   const v = (id) => ($(id) ? $(id).value : "");
   if (state.sub === "style") q.style = v("style");
   if (state.sub === "ratio" && v("family")) q.family = v("family");
-  if (state.sub === "skin") { q.preset = v("preset"); q.part = v("part"); q.seg = v("seg"); }
+  if (state.sub === "skin") {
+    q.preset = v("preset"); q.seg = v("seg");
+    q.part = q.seg === "ai" ? v("part") : "";  // 肤色规则分不出脸和身体：不标部位
+  }
   if (state.sub === "reference") q.ref = state.refId || "";
   return q;
 }
 
 // ---------------------------------------------------------------- 分析
 async function runAnalyze() {
+  if (state.busy) return;
   const info = refreshTarget();
   if (!info.ok) return;
   const mode = MODE_OF[state.sub];
+  if (!state.options) await loadOptions();
+  if (state.sub === "style" && !query().style) {
+    renderError(new Error("风格列表还没加载出来（分析服务未启动？），请先启动 ColorDoctor 再选风格。"));
+    return;
+  }
   setBusy(true, mode === "patch" ? "正在读取…" : "正在分析…");
+  // 在读像素之前记下历史状态：分析过程中如果有改动，会被正确判为“可能过期”
+  const historyBefore = ps.historyStateId(info.doc);
   try {
     let px;
     if (mode === "patch") {
@@ -120,7 +131,7 @@ async function runAnalyze() {
       docWidth: sb.right - sb.left, docHeight: sb.bottom - sb.top, layerKind: info.kind, layerName: info.label,
     });
     state.result = res;
-    state.analyzed = { docId: info.doc.id, layerId: info.layer ? info.layer.id : null, history: ps.historyStateId(info.doc), bounds: sb,
+    state.analyzed = { docId: info.doc.id, layerId: info.layer ? info.layer.id : null, history: historyBefore, bounds: sb,
       docWidth: info.doc.width, docHeight: info.doc.height };
     renderResult();
   } catch (e) {
@@ -141,7 +152,10 @@ async function readForeground() {
 }
 
 function setBusy(busy, text) {
+  state.busy = busy;
   $("analyze").disabled = busy;
+  $("generateAll").disabled = busy || !(state.result && state.result.plan && state.result.plan.layers.length);
+  document.querySelectorAll("[data-make],[data-sel]").forEach((b) => { b.disabled = busy; });
   if (busy) { $("status").className = "status"; $("status").textContent = text; }
 }
 
@@ -206,13 +220,39 @@ function renderPatch(r) {
 }
 
 // ---------------------------------------------------------------- 生成图层
+function statusError(e) {
+  // 生成失败时只在状态栏提示，保留分析结果（不必重新分析）
+  $("status").className = "status warn";
+  $("status").textContent = (e && e.message) || String(e);
+}
+
+function checkStillValid(a) {
+  const doc = app.activeDocument;
+  if (!doc || doc.id !== a.docId) return "当前文档不是刚才分析的那一个，请切回原文档或重新分析。";
+  if (doc.width !== a.docWidth || doc.height !== a.docHeight) return "文档尺寸在分析后改变了，请重新分析。";
+  if (a.history !== ps.historyStateId(doc)) {
+    return "分析之后图层又改动过，结果可能已过期。请先重新分析（如果确定要用旧结果，再点一次）。";
+  }
+  return null;
+}
+
 async function generate(ids) {
   const r = state.result;
   const a = state.analyzed;
-  if (!r || !a) return;
-  const doc = app.activeDocument;
-  if (!doc || doc.id !== a.docId) { renderError(new Error("当前文档不是刚才分析的那一个，请重新分析。")); return; }
+  if (!r || !a || state.busy) return;
+  const problem = checkStillValid(a);
+  if (problem) {
+    // 历史改动只提醒一次：用户再点一次就继续
+    if (problem.startsWith("分析之后") && state.staleAck === a.history) {
+      /* 已确认，继续 */
+    } else {
+      if (problem.startsWith("分析之后")) state.staleAck = a.history;
+      statusError(new Error(problem));
+      return;
+    }
+  }
   const specs = r.plan.layers.filter((l) => ids.includes(l.id));
+  setBusy(true, "正在生成调整图层…");
   try {
     // 先把所有蒙版取回来（整幅文档大小，分析范围外为 0）；取不到就什么都不建
     const masks = {};
@@ -220,9 +260,7 @@ async function generate(ids) {
       if (spec.has_mask) masks[spec.id] = await bridge.fetchMask(r.session, spec.id, a.bounds, a.docWidth, a.docHeight);
     }
     await ps.modal(ids.length > 1 ? "ColorDoctor 一键校正" : "ColorDoctor 校正", async (ctx, d) => {
-      if (a.layerId != null) {
-        await action.batchPlay([{ _obj: "select", _target: [{ _ref: "layer", _id: a.layerId }], makeVisible: false }], {});
-      }
+      if (a.layerId != null) await ps.selectLayer(a.layerId);
       const made = [];
       for (const spec of specs) {
         const id = await ps.makeAdjustmentLayer(spec);
@@ -231,24 +269,36 @@ async function generate(ids) {
         made.push(id);
       }
       if (made.length > 1) await ps.groupLayers(d, made, r.plan.group_name);
-    });
+    }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
+    setBusy(false);
     $("status").className = "status ok";
     $("status").textContent = `已生成 ${specs.length} 个调整图层（Ctrl+Z 可一次撤销）`;
+    a.history = ps.historyStateId(app.activeDocument);  // 新建图层不算“图层改动”
   } catch (e) {
-    renderError(e);
+    setBusy(false);
+    statusError(e);
   }
 }
 
 async function makeSelection(id) {
   const r = state.result;
   const a = state.analyzed;
-  if (!r || !a) return;
+  if (!r || !a || state.busy) return;
+  const problem = checkStillValid(a);
+  if (problem && !problem.startsWith("分析之后")) { statusError(new Error(problem)); return; }
+  setBusy(true, "正在生成选区…");
   try {
     const m = await bridge.fetchMask(r.session, id, a.bounds, a.docWidth, a.docHeight);
     await ps.modal("ColorDoctor 选区", async (ctx, d) => {
       await ps.putSelection(d.id, m.data, m.width, m.height, { left: 0, top: 0 });
-    });
-  } catch (e) { renderError(e); }
+    }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
+    setBusy(false);
+    $("status").className = "status ok";
+    $("status").textContent = "已生成选区";
+  } catch (e) {
+    setBusy(false);
+    statusError(e);
+  }
 }
 
 // ---------------------------------------------------------------- ACR
@@ -258,7 +308,8 @@ const ZONES = [["shadow", "阴影"], ["midtone", "中间调"], ["highlight", "�
 function renderAcr(p, calibrated) {
   const hsl = p.hsl || {};
   const g = p.grading || {};
-  const num = (path, v) => `<input type="number" data-acr="${path}" value="${v == null ? 0 : v}">`;
+  // data-set：分析给出过这个值，或用户改过它 —— 这时 0 也要导出（例如颜色分级色相 0 = 红）
+  const num = (path, v) => `<input type="number" data-acr="${path}" value="${v == null ? 0 : v}"${v == null ? "" : ' data-set="1"'}>`;
   $("acrTable").innerHTML = `
     <table><tr><td></td><td>色相</td><td>饱和度</td><td>明亮度</td></tr>
     ${HSL.map((c) => `<tr><td>${c}</td><td>${num(`hsl.${c}.hue`, (hsl[c] || {}).hue)}</td><td>${num(`hsl.${c}.sat`, (hsl[c] || {}).sat)}</td><td>${num(`hsl.${c}.lum`, (hsl[c] || {}).lum)}</td></tr>`).join("")}
@@ -266,6 +317,7 @@ function renderAcr(p, calibrated) {
     <table><tr><td>颜色分级</td><td>色相</td><td>饱和度</td></tr>
     ${ZONES.map(([k, n]) => `<tr><td>${n}</td><td>${num(`grading.${k}.hue`, (g[k] || {}).hue)}</td><td>${num(`grading.${k}.sat`, (g[k] || {}).sat)}</td></tr>`).join("")}
     </table>`;
+  $("acrTable").querySelectorAll("[data-acr]").forEach((inp) => inp.addEventListener("input", () => { inp.dataset.set = "1"; }));
   $("acrBadge").className = calibrated ? "chip ok" : "chip warn";
   $("acrBadge").textContent = calibrated ? "已校准" : "估计 · 未校准";
 }
@@ -277,7 +329,7 @@ function acrParamsFromTable() {
   for (const [k, v] of Object.entries(base)) if (k !== "hsl" && k !== "grading") out[k] = v;
   document.querySelectorAll("[data-acr]").forEach((inp) => {
     const v = Number(inp.value);
-    if (!v) return;
+    if (!Number.isFinite(v) || (!v && inp.dataset.set !== "1")) return;
     const [sec, key, field] = inp.dataset.acr.split(".");
     ((out[sec] = out[sec] || {})[key] = out[sec][key] || {})[field] = v;
   });
@@ -291,7 +343,8 @@ async function exportXmp() {
     if (!file) return;
     await file.write(xmp);
     $("status").className = "status ok";
-    $("status").textContent = "已导出 ACR 预设：放进 Camera Raw 的预设文件夹，或在 ACR「预设」面板里导入";
+    $("status").textContent = "已导出 ACR 预设：在 ACR「预设」面板里导入。注意：数值是按当前画面算的调整量，"
+      + "如果原来的混色器 / 颜色分级已经调过，请在原数值上加减，而不是直接套用覆盖";
   } catch (e) { renderError(e); }
 }
 
@@ -317,6 +370,7 @@ async function calibrate() {
     // 校准在新建的色卡文档里进行，不进当前文档的历史记录；完成后关闭色卡文档
     await ps.readModal(async () => {
       const { doc, layer } = await ps.createChartDocument(chart);
+      try {
       const info = { ok: true, doc, layer, bounds: { left: 0, top: 0, right: chart.width, bottom: chart.height } };
       await bridge.calibrationSample(await ps.readPixels(info), { slider: "base" });
       for (let i = 0; i < steps.length; i++) {
@@ -327,15 +381,32 @@ async function calibrate() {
         await bridge.calibrationSample(await ps.readPixels({ ...info, layer: dup }), st);
         await ps.deleteLayer(dup);
       }
-      await ps.closeDocument(doc);
+      } finally {
+        await ps.closeDocument(doc);  // 中途失败也关闭色卡文档
+      }
     });
-    const res = await bridge.calibrationFit(app.version);
+    // ACR 版本拿不到，记录 Photoshop 版本作参考（ACR 随 PS 更新）
+    const res = await bridge.calibrationFit(`Photoshop ${app.version}`);
     progress(`校准完成：${Object.keys(res.channels).length} 个通道，已保存到 ${res.saved}`);
     renderAcr((state.result && state.result.acr_params) || {}, true);
   } catch (e) { renderError(e); }
 }
 
 // ---------------------------------------------------------------- 启动
+// 服务可能在面板打开之后才启动：每次分析前没有选项就再试一次
+async function loadOptions() {
+  try {
+    await bridge.health();
+    state.options = await bridge.options();
+    $("svc").className = "chip ok";
+    $("svc").textContent = "本机分析 · 不上传";
+    renderControls();
+  } catch (e) {
+    $("svc").className = "chip bad";
+    $("svc").textContent = "分析服务未启动";
+  }
+}
+
 async function init() {
   document.querySelectorAll(".cat").forEach((b) => b.addEventListener("click", () => {
     state.cat = b.dataset.cat;
@@ -349,13 +420,7 @@ async function init() {
   $("acrExport").addEventListener("click", exportXmp);
   $("acrLayer").addEventListener("click", acrLayer);
   $("calibrate").addEventListener("click", calibrate);
-  try {
-    await bridge.health();
-    state.options = await bridge.options();
-  } catch (e) {
-    $("svc").className = "chip bad";
-    $("svc").textContent = "分析服务未启动";
-  }
+  await loadOptions();
   renderNav();
   renderAcr({}, false);
   refreshTarget();

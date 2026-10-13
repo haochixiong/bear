@@ -182,3 +182,43 @@ def test_pale_skin_not_flagged_grey_with_default_preset():
     lo, _ = rep.skin.expected_saturation
     assert lo <= 0.16
     assert not any("发灰" in f.problem for f in rep.findings), [f.problem for f in rep.findings]
+
+
+def test_skin_cast_advice_does_not_change_depth():
+    from colordoctor.core import analysis as an
+    from colordoctor.core.color_management import synthetic_context
+
+    img = skin_region(36, 7, 22, h=120, w=120)  # 深肤色、偏黄
+    rep = an.analyze_skin_region(img, synthetic_context(), auto_mask=False)
+    cast = [f for f in rep.findings if f.problem.startswith("肤色整体")]
+    assert cast
+    text = " ".join(a.instruction for f in cast for a in f.adjustments)
+    assert "明亮度" not in text, text
+
+
+def test_preset_fit_hue_ranges_across_zero():
+    import dataclasses
+
+    from colordoctor.core import portrait_analysis as pa
+    from colordoctor.core import skin_presets as sp
+
+    base = sp.get_preset("natural", sp.builtin_presets())
+
+    def fit(hue_range, h):
+        rep = type("R", (), {"mean_lab": (60.0, 10.0, 0.0), "mean_lch": (60.0, 10.0, h)})()
+        return pa.preset_fit(rep, dataclasses.replace(base, hue=hue_range))["色相角 h°"]
+
+    for rng in ((350.0, 20.0), (-10.0, 20.0)):
+        assert fit(rng, 5.7).startswith("在范围内")
+        assert fit(rng, 355.0).startswith("在范围内")
+        assert fit(rng, 30.0).startswith("偏高")
+        assert fit(rng, 330.0).startswith("偏低")
+
+
+def test_grey_selection_has_no_cast_and_very_bright_skin_floor_is_smooth():
+    from colordoctor.core import portrait_analysis as pa
+
+    assert pa.tendency_of(-0.1, -0.2) == ("正常", 0.0)
+    lo92 = pa._expected_saturation(None, 92.0)[0]
+    lo95 = pa._expected_saturation(None, 95.0)[0]
+    assert abs(lo92 - lo95) < 0.02

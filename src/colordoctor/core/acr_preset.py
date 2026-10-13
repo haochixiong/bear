@@ -66,7 +66,7 @@ def settings_from_params(params: dict) -> tuple[dict[str, str], dict[str, list[s
             if not z:
                 continue
             if "hue" in z:
-                attrs[hk] = str(_int(z["hue"], 0, 359) % 360)
+                attrs[hk] = str(int(round(float(z["hue"]))) % 360)  # 先取模：370 → 10，不是 359
             if "sat" in z:
                 attrs[sk] = str(_int(z["sat"], 0, 100))
             if "lum" in z:
@@ -103,13 +103,16 @@ def settings_from_params(params: dict) -> tuple[dict[str, str], dict[str, list[s
         for x, y in pts:  # 同一个输入值只能有一个点
             by_x.setdefault(_int(x, 0, 255), _int(y, 0, 255))
         clean = sorted(by_x.items())
+        if not clean:
+            continue  # 空曲线：不写
         if clean[0][0] != 0:
             clean.insert(0, (0, 0))
         if clean[-1][0] != 255:
             clean.append((255, 255))
         seqs[CURVE_KEYS[ch]] = [f"{x}, {y}" for x, y in clean]
-    if any(k.startswith(("HueAdj", "SaturationAdj", "LuminanceAdj")) for k in attrs) or seqs:
-        attrs.setdefault("ConvertToGrayscale", "False")
+    if seqs:
+        attrs["ToneCurveName2012"] = "Custom"
+    # 不写 ConvertToGrayscale：写 False 会把套用预设的黑白照片变回彩色
     return attrs, seqs
 
 
@@ -120,8 +123,7 @@ def build_xmp(name: str, params: dict, group: str = "ColorDoctor") -> str:
         "SupportsColor": "True", "SupportsMonochrome": "True", "SupportsHighDynamicRange": "True",
         "SupportsNormalDynamicRange": "True", "SupportsSceneReferred": "True", "SupportsOutputReferred": "True",
         "CameraModelRestriction": "", "Copyright": "", "ContactInfo": "", "Version": "15.0",
-        "ProcessVersion": "11.0",
-    }
+    }  # 不写 ProcessVersion：写死会把用新处理版本的照片切回旧版本
     lines = ['<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="ColorDoctor">',
              ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">',
              '  <rdf:Description rdf:about=""',
@@ -143,7 +145,10 @@ def params_from_adjustments(adjustments) -> dict:
 
     认得两类：tool == "Camera Raw 混色器"（instruction 以通道名开头，params 里有 色相/饱和度/明亮度），
     tool == "Camera Raw 颜色分级"（instruction 以 阴影/高光/中间调 开头，params 里有 色相/饱和度）。
-    其余（文字说明、“常用做法”）不导出。
+    规则：
+    - 同一个滑块只取第一条建议的值，不同来源的建议**不相加**（它们是对同一张图各自算的）；
+    - 只导出界面上显示出来的数值（低于提示门槛、为 0 的不写），避免套用预设时把用户原有的滑块归零；
+    - 其余（文字说明、“常用做法”）不导出。
     """
     out: dict = {"hsl": {}, "grading": {}}
     keymap = {"色相": "hue", "饱和度": "sat", "明亮度": "lum"}
@@ -157,16 +162,20 @@ def params_from_adjustments(adjustments) -> dict:
                 continue
             slot = out["hsl"].setdefault(ch, {})
             for k, v in a.params:
-                if k in keymap:
-                    slot[keymap[k]] = int(round(slot.get(keymap[k], 0) + v))
+                iv = int(round(v))
+                if k not in keymap or iv == 0 or f"{k} {iv:+d}" not in a.instruction:
+                    continue  # 没显示给用户的值不导出
+                slot.setdefault(keymap[k], iv)
+            if not slot:
+                del out["hsl"][ch]
         elif a.tool == "Camera Raw 颜色分级":
             zone = next((z for z in zones if a.instruction.startswith(z)), None)
             if zone is None:
                 continue
-            slot = out["grading"].setdefault(zones[zone], {})
-            for k, v in a.params:
-                if k in keymap:
-                    slot[keymap[k]] = int(round(v))
+            vals = {keymap[k]: int(round(v)) for k, v in a.params if k in keymap}
+            if vals.get("sat", 0) == 0:
+                continue  # 饱和度为 0 时色相没有意义
+            out["grading"].setdefault(zones[zone], vals)
     return {k: v for k, v in out.items() if v}
 
 

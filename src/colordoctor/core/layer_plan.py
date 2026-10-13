@@ -56,6 +56,13 @@ class LayerPlan:
         return {"group_name": self.group_name, "width": self.width, "height": self.height,
                 "layers": [ly.to_json() for ly in self.layers]}
 
+    def full_mask(self, layer_id: str) -> np.ndarray | None:
+        """该图层蒙版放大到分析图像尺寸（height × width）。大图的蒙版是在缩小的分辨率上算的。"""
+        m = self.get(layer_id).mask
+        if m is None or m.shape == (self.height, self.width):
+            return m
+        return resize_mask(m, self.width, self.height)
+
     def get(self, layer_id: str) -> LayerSpec:
         for ly in self.layers:
             if ly.id == layer_id:
@@ -102,6 +109,29 @@ def resize_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray:
         return mask
     img = Image.fromarray(np.ascontiguousarray(mask, dtype=np.uint8), mode="L")
     return np.asarray(img.resize((int(width), int(height)), Image.BILINEAR))
+
+
+MASK_WORK_PIXELS = 2_000_000  # 蒙版在不超过约 200 万像素的分辨率上计算和羽化，返回时再放大
+
+
+def _pool_max(mask: np.ndarray, k: int) -> np.ndarray:
+    """k×k 块内取“任一为真”：缩小时不丢掉零星的杂色点。"""
+    if k <= 1:
+        return mask.astype(bool)
+    h, w = mask.shape
+    H, W = -(-h // k), -(-w // k)
+    pad = np.zeros((H * k, W * k), bool)
+    pad[:h, :w] = mask
+    return pad.reshape(H, k, W, k).any(axis=(1, 3))
+
+
+def _soft_mask(mask: np.ndarray, rad: int, k: int, grow: bool = False) -> np.ndarray:
+    """全分辨率布尔蒙版 -> 工作分辨率上的羽化 uint8 蒙版（大图快很多）。"""
+    small = _pool_max(mask, k)
+    r = max(1, rad // k)
+    if grow:
+        small = dilate(small, max(1, r // 2))
+    return feather(small, r)
 
 
 def _feather_radius(shape) -> int:
@@ -173,6 +203,7 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     """shape：分析图像 (H, W[, C])；offset：分析区域在文档中的左上角（插件一般整图分析，为 (0, 0)）。"""
     h, w = shape[:2]
     rad = _feather_radius(shape)
+    k = max(1, int(np.ceil(np.sqrt(h * w / MASK_WORK_PIXELS))))  # 大图在缩小 k 倍的分辨率上做蒙版
     layers: list[LayerSpec] = []
     flags = _contamination_flags(report, shape)
     ct = report.contamination
@@ -188,7 +219,7 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
                 "opposite", f"{ct.base_hue_name}里的{ct.opposite_hue_name} · 色相/饱和度", "hueSaturation",
                 _huesat(idx, ramps, sat=sat),
                 f"{ct.base_hue_name}中混入{ct.opposite_hue_name}（占分析像素 {ct.opposite_fraction:.1%}）：{rname} 饱和度 {sat}",
-                feather(dilate(opp, max(1, rad // 2)), rad)))
+                _soft_mask(opp, rad, k, grow=True)))
     # 2) 局部发灰：自然饱和度，只作用于发灰位置
     if ct is not None and flags is not None and ct.graying_fraction > 0:
         gray = flags == ct_mod.MASK_GRAYING
@@ -198,7 +229,7 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
                 "graying", f"{ct.base_hue_name}发灰 · 自然饱和度", "vibrance",
                 {"vibrance": vib, "saturation": 0},
                 f"{ct.base_hue_name}局部发灰（{ct.graying_fraction:.0%}）：自然饱和度 +{vib}",
-                feather(dilate(gray, max(1, rad // 2)), rad)))
+                _soft_mask(gray, rad, k, grow=True)))
     # 3) 肤色不均匀：同一类问题合成一层（偏黄 / 偏红橙 是方向相反的两层）
     uni = report.uniformity
     if uni is not None and uni.patches:
@@ -209,7 +240,7 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
             area = sum(p.area_fraction for p in ps)
             dh = float(np.average([p.hue_shift for p in ps], weights=[p.area_fraction for p in ps]))
             ds = float(np.average([p.sat_shift for p in ps], weights=[p.area_fraction for p in ps]))
-            mask = feather(_bbox_mask(shape, [p.bbox for p in ps], offset, skin), rad)
+            mask = _soft_mask(_bbox_mask(shape, [p.bbox for p in ps], offset, skin), rad, k)
             lab = np.average([p.lab for p in ps], axis=0, weights=[p.area_fraction for p in ps])
             spec = _skin_layer(kind, dh, ds, tuple(float(v) for v in lab))
             if spec is None:
@@ -233,11 +264,12 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
             rname = PS_RANGES[idx - 1][1]
             layers.append(LayerSpec(f"unity_{i}", f"{u.family}统一 {i + 1} · 色相/饱和度", "hueSaturation",
                                     _huesat(idx, ramps, hue=hue), f"{p.note}：{rname}（范围已对准这一簇）色相 {hue:+d}",
-                                    feather(_bbox_mask(shape, [p.bbox], offset), rad)))
+                                    _soft_mask(_bbox_mask(shape, [p.bbox], offset), rad, k)))
     # 5) 仿色：把影调拉向参考的 RGB 复合曲线（全图，无蒙版）
     ref = getattr(report, "reference", None)
     if ref is not None and getattr(ref, "curve_points", None):
-        pts = [(0, 0), *[(int(a), int(b)) for a, b in ref.curve_points], (255, 255)]
+        # 端点放前面：参考点（例如 255 → 215）覆盖默认端点，而不是被它覆盖
+        pts = [(0, 0), (255, 255), *[(int(a), int(b)) for a, b in ref.curve_points]]
         pts = sorted({p[0]: p for p in pts}.values())
         layers.append(curves_layer("ref_curve", "仿色影调 · 曲线", {"composite": pts},
                                    "把影调拉向参考：" + "；".join(f"{a}→{b}" for a, b in ref.curve_points)))

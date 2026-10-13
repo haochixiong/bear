@@ -219,3 +219,24 @@ def test_film_look_flags_crushed_blacks_and_high_contrast():
 def test_high_contrast_style_asks_for_more_contrast():
     m = pl.style_match(_gradient(35, 65), pl.get_style("fuji_velvia"))
     assert any("对比度" in g and "提高" in g for g in m.gaps)
+
+
+def test_style_grading_not_suggested_when_tint_ok_or_neutral_spec():
+    import numpy as np
+
+    # 中性阴影 + 黑金（阴影色度 0–6，色相不限）：不应建议往阴影加任何色相
+    L = np.linspace(4, 85, 200)[None, :].repeat(120, 0)
+    lab = np.stack([L, np.zeros_like(L) + 0.8, np.zeros_like(L) - 0.6], -1)
+    img = cs.lab_to_srgb8(lab)
+    img[40:80, 120:180] = cs.lab_to_srgb8(np.array([70.0, 20.0, 60.0]))
+    m = pl.style_match(img, pl.get_style("black_gold"))
+    assert not [a for a in m.adjustments if a.tool == "Camera Raw 颜色分级" and a.instruction.startswith("阴影")]
+    # 阴影明显偏色时，只减弱，不换色相
+    lab2 = lab.copy()
+    lab2[..., 1] = np.where(L < 25, 12.0, 0.0)
+    m2 = pl.style_match(cs.lab_to_srgb8(lab2), pl.get_style("black_gold"))
+    g = [a for a in m2.adjustments if a.tool == "Camera Raw 颜色分级" and a.instruction.startswith("阴影")]
+    assert g
+    if g:
+        hue = dict(g[0].params)["色相"]
+        assert 120 <= hue <= 240, hue  # 往青（红的反方向）减弱红色调

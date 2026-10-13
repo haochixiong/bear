@@ -130,6 +130,18 @@ function dirtySky(w, h) {
   assert.strictEqual(doc.activeLayers[0].name, "背景");
   fakePs.action.batchPlay = realBp;
 
+  // 5c. 大图：PS 从金字塔第 1 级读取时 sourceBounds 是缩小一半的坐标，要换算回文档坐标
+  const bigDoc = { id: 3, width: 6000, height: 4000 };
+  fakePs.imaging.getPixels = async (o) => ({
+    level: 1,
+    sourceBounds: { left: o.sourceBounds.left / 2, top: o.sourceBounds.top / 2, right: o.sourceBounds.right / 2, bottom: o.sourceBounds.bottom / 2 },
+    imageData: { width: 2048, height: 1365, components: 4, getData: async () => new Uint8Array(2048 * 1365 * 4), dispose() {} },
+  });
+  const big = await ps.readPixels({ doc: bigDoc, layer: null, bounds: { left: 0, top: 0, right: 6000, bottom: 4000 } });
+  assert.deepStrictEqual(big.sourceBounds, { left: 0, top: 0, right: 6000, bottom: 4000 });
+  const part = await ps.readPixels({ doc: bigDoc, layer: { id: 9 }, bounds: { left: 1000, top: 600, right: 5000, bottom: 3800 } });
+  assert.deepStrictEqual(part.sourceBounds, { left: 1000, top: 600, right: 5000, bottom: 3800 });
+
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
   fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };

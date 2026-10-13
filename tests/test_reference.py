@@ -92,3 +92,41 @@ def test_grading_direction_uses_difference():
     assert g, [a.instruction for a in m.adjustments]
     hue = dict(g[0].params)["色相"]
     assert 180 <= hue <= 300, hue
+
+
+def test_no_neutral_pixels_gives_no_grading_advice():
+    """我的阴影很蓝（没有中性像素），参考阴影微冷：不能当成“我是中性的”再建议加蓝。"""
+    import numpy as np
+
+    from colordoctor.core import color_spaces as cs
+    from colordoctor.core import reference_match as rm
+
+    def scene(sa, sb):
+        L = np.linspace(8, 90, 160)[None, :].repeat(120, 0)
+        lab = np.stack([L, np.where(L < 30, sa, 0.0), np.where(L < 30, sb, 0.0)], -1)
+        return cs.lab_to_srgb8(lab)
+
+    m = rm.match_reference(scene(-12.0, -25.0), scene(-4.0, -6.0))
+    g = [a for a in m.adjustments if a.tool == "Camera Raw 颜色分级" and a.instruction.startswith("阴影")]
+    for a in g:
+        hue = dict(a.params)["色相"]
+        assert not (180 <= hue <= 280), a.instruction  # 不能继续往蓝加
+
+
+def test_reference_curve_layer_keeps_highlight_point():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from colordoctor.core import layer_plan as lp
+    from colordoctor.core.color_models import AnalysisReport
+
+    rep = AnalysisReport.__new__(AnalysisReport)
+    object.__setattr__(rep, "mode", "reference")
+    for f in ("contamination", "uniformity", "palette", "valid_mask"):
+        object.__setattr__(rep, f, None)
+    object.__setattr__(rep, "reference", SimpleNamespace(curve_points=((12, 39), (63, 78), (255, 215))))
+    plan = lp.plan_from_report(rep, (10, 10, 3))
+    pts = plan.get("ref_curve").params["channels"]["composite"]
+    assert [255, 215] in pts and [255, 255] not in pts
+    assert np.all(np.diff([p[0] for p in pts]) > 0)
