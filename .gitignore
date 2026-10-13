@@ -9,3 +9,6 @@ dist/
 packaging/models/
 ColorDoctor-*.zip
 ColorDoctor-model-*.zip
+
+# Claude Code 临时工作副本
+.claude/worktrees/
