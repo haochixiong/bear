@@ -33,7 +33,7 @@
 
 ## 接手时先做
 
-1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **363 passed, 1 skipped**（需要 Node 才会跑插件 JS 测试））。
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **366 passed, 1 skipped**（需要 Node 才会跑插件 JS 测试））。
 2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
 
 ## 校准流程（插件端待实现，见 UXP 部分）
@@ -63,16 +63,16 @@
 ## 还没做 / 建议下一步（按优先级）
 
 1. **在 Windows PS Beta 上跑通插件**：逐条完成上面的 P1–P10。这一步最重要，插件代码还没在真实 Photoshop 里运行过。
-2. **Camera Raw 描述符**（P9）：录到之后：
-   - 实现“生成 Camera Raw 图层”时直接写入参数；
-   - 实现 `main.js` 的 `calibrate()`，流程见上文“校准流程”。
-3. **桌面版接入 AI 抠皮肤**：`ui/session.py` 的肤色分析目前只用肤色规则。可加一个“AI 抠皮肤”勾选，调用 `segmentation.segment_skin(region).part(part)` 作为 `manual_mask` 传入；蒙版编辑器照常可用。
-4. **桌面版设置**：加“RAW 使用内嵌预览”（设置键 `raw/use_preview`）和“允许 PS 插件连接”（`bridge/enabled`）两个开关。
-5. **DirectML**：在 Windows 上确认 `onnxruntime-directml` 能选中 `DmlExecutionProvider`，状态信息里会显示 provider 名称。
-6. **仿色和风格的 ACR 参数**：
-   - 现在 `acr_params` 只从“混色器 / 颜色分级”建议里收集；
-   - 仿色的 `ChannelDiff` 滑块和风格模板的 recipe 也可以转成参数；
-   - 曲线的点（`reference_match` 的 RGB 复合曲线）可以写进 `curve`。
+2. **Camera Raw 描述符**（P9）：在 `ps.js` 里给 `ACR_DESCRIPTOR` 赋值（参数 → 描述符的函数）后：
+   - 「校准 ACR 滑块」整套流程即可运行，流程已写好：建色卡文档 → 逐步复制图层、应用 Camera Raw、读像素、上传 → 拟合并保存；
+   - 「生成 Camera Raw 图层」也可以改成直接写入参数。
+3. **DirectML**：在 Windows 上确认 `onnxruntime-directml` 能选中 `DmlExecutionProvider`。
+4. **风格模板的 recipe**：目前是文字区间，不能直接转成 ACR 参数。如果需要，可以给每个模板补一组“起点数值”。
+
+已完成（上一版列在这里的）：
+- 桌面版“AI 抠皮肤”勾选（没有模型时变灰并说明原因）；
+- 设置里的“RAW 使用内嵌预览”和“允许 PS 插件连接”；
+- 仿色的颜色分级参数和 RGB 复合曲线：进入 ACR 参数和图层方案（曲线图层）。
 
 ## 注意
 
