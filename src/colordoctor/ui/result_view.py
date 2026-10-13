@@ -18,6 +18,9 @@ def overlay_image(region: np.ndarray, report: AnalysisReport, dim_normal: bool =
     out = region[..., :3].astype(np.float32).copy()
     ct = report.contamination
     if ct is None or ct.mask is None:
+        if report.valid_mask is not None and report.valid_mask.shape == region.shape[:2]:
+            out[~report.valid_mask] *= 0.25
+            return np.clip(out, 0, 255).astype(np.uint8)
         return region
     m = ct.mask
     step = int(round(ct.mask_scale))
@@ -29,6 +32,11 @@ def overlay_image(region: np.ndarray, report: AnalysisReport, dim_normal: bool =
     full[:h, :w] = big[:h, :w]
     opp = full == ct_mod.MASK_OPPOSITE
     gray = full == ct_mod.MASK_GRAYING
+    outside = full == ct_mod.MASK_OUTSIDE
+    if report.valid_mask is not None and report.valid_mask.shape == region.shape[:2]:
+        outside = ~report.valid_mask  # 全分辨率的皮肤蒙版更准确
+    if outside.any():
+        out[outside] = out[outside] * 0.25  # 不计入分析的像素（非皮肤/套索外）
     if dim_normal and (opp.any() or gray.any()):
         dim = ~(opp | gray)
         a = theme.OVERLAY_DIM[3] / 255
@@ -85,17 +93,39 @@ class ResultView(QWidget):
         self.view.clear_marks()
         ct = self.report.contamination
         if ct is None:
-            self.legend.setText("此结果没有位置信息")
+            if self.report.palette is not None and self.report.palette.unity is not None and self.toggle.isChecked():
+                ox, oy = (self.report.region or (0, 0, 0, 0))[:2]
+                for i, p in enumerate(self.report.palette.unity.patches, 1):
+                    x, y, w, h = p.bbox
+                    self.view.add_mark((x - ox, y - oy, w, h), f"{i} {p.note}")
+                self.legend.setText("框出的是颜色不统一的位置。滚轮缩放，右键拖动平移，0 复位")
+            else:
+                self.legend.setText("此结果没有位置信息")
             return
         ox, oy = (self.report.region or (0, 0, 0, 0))[:2]
+        i = 0
         if self.toggle.isChecked():
-            for i, b in enumerate(ct.blobs, 1):
+            for b in ct.blobs:
+                i += 1
                 x, y, w, h = b.bbox
                 kind = f"“{b.contaminant_hue_name}”杂色" if b.kind == "opposite" else "发灰"
                 self.view.add_mark((x - ox, y - oy, w, h), f"{i} {kind}")
+            uni = self.report.uniformity
+            for p in (uni.patches if uni is not None else ()):
+                i += 1
+                x, y, w, h = p.bbox
+                self.view.add_mark((x - ox, y - oy, w, h), f"{i} 肤色{p.kind}")
+            pal = self.report.palette
+            if pal is not None and pal.unity is not None:
+                for p in pal.unity.patches:
+                    i += 1
+                    x, y, w, h = p.bbox
+                    self.view.add_mark((x - ox, y - oy, w, h), f"{i} {p.note}")
         n_o = sum(1 for b in ct.blobs if b.kind == "opposite")
         n_g = sum(1 for b in ct.blobs if b.kind == "graying")
+        n_u = len(self.report.uniformity.patches) if self.report.uniformity is not None else 0
+        extra = f"，肤色不均匀 {n_u} 处（编号框）；很暗的区域是未计入的非皮肤像素" if self.report.uniformity is not None else ""
         self.legend.setText(
-            f"杂色像素用对比色高亮，发灰处用白色覆盖，其余区域压暗。对立色 {n_o} 处，发灰 {n_g} 处。"
+            f"杂色像素用对比色高亮，发灰处用白色覆盖，其余区域压暗。对立色 {n_o} 处，发灰 {n_g} 处{extra}。"
             "滚轮缩放，右键拖动平移，0 复位"
         )

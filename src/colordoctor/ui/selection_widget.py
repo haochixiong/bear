@@ -20,6 +20,8 @@ DRAG_THRESHOLD = 4  # 逻辑像素
 class ImageSelectWidget(QWidget):
     point_selected = pyqtSignal(int, int)
     rect_selected = pyqtSignal(int, int, int, int)
+    polygon_selected = pyqtSignal(object)  # [(x, y), ...] 图像坐标（套索）
+    radius_changed = pyqtSignal(int)
     cancelled = pyqtSignal()
 
     def __init__(self, parent=None, magnifier: bool = True, allow_zoom: bool = False):
@@ -39,6 +41,9 @@ class ImageSelectWidget(QWidget):
         self._cur: QPointF | None = None
         self._panning: QPointF | None = None
         self.radius = 2
+        self.radius_choices = (0, 1, 2, 5, 15, 25, 50)
+        self.lasso_mode = False
+        self._path: list[QPointF] = []
 
     # ---------------------------------------------------------------- 数据
     def set_image(self, arr: np.ndarray):
@@ -80,6 +85,7 @@ class ImageSelectWidget(QWidget):
         if ev.button() == Qt.MouseButton.LeftButton:
             self._press = ev.position()
             self._cur = ev.position()
+            self._path = [ev.position()] if self.lasso_mode else []
         elif ev.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton) and self.allow_zoom:
             self._panning = ev.position()
         self.update()
@@ -89,6 +95,9 @@ class ImageSelectWidget(QWidget):
             self.pan += ev.position() - self._panning
             self._panning = ev.position()
         self._cur = ev.position()
+        if self.lasso_mode and self._press is not None:
+            if not self._path or (ev.position() - self._path[-1]).manhattanLength() >= 3:
+                self._path.append(ev.position())
         self.update()
 
     def mouseReleaseEvent(self, ev):
@@ -102,10 +111,15 @@ class ImageSelectWidget(QWidget):
         x0, y0 = self.to_image(a)
         x1, y1 = self.to_image(b)
         W, H = self.image.width(), self.image.height()
-        if abs(b.x() - a.x()) < DRAG_THRESHOLD and abs(b.y() - a.y()) < DRAG_THRESHOLD:
+        path, self._path = self._path, []
+        if abs(b.x() - a.x()) < DRAG_THRESHOLD and abs(b.y() - a.y()) < DRAG_THRESHOLD and len(path) < 4:
             xi, yi = int(x1), int(y1)
             if 0 <= xi < W and 0 <= yi < H:
                 self.point_selected.emit(xi, yi)
+        elif self.lasso_mode and len(path) >= 3:
+            pts = [self.to_image(p) for p in path]
+            pts = [(min(max(px, 0.0), W), min(max(py, 0.0), H)) for px, py in pts]
+            self.polygon_selected.emit(pts)
         else:
             lx, rx = sorted((x0, x1))
             ty, by = sorted((y0, y1))
@@ -128,6 +142,13 @@ class ImageSelectWidget(QWidget):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape:
             self.cancelled.emit()
+        elif ev.key() in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
+            ch = list(self.radius_choices)
+            i = min(range(len(ch)), key=lambda k: abs(ch[k] - self.radius))
+            i = max(0, i - 1) if ev.key() == Qt.Key.Key_BracketLeft else min(len(ch) - 1, i + 1)
+            self.radius = ch[i]
+            self.radius_changed.emit(self.radius)
+            self.update()
         elif ev.key() == Qt.Key.Key_0 and self.allow_zoom:
             self.zoom, self.pan = 1.0, QPointF(0, 0)
             self.update()
@@ -157,7 +178,14 @@ class ImageSelectWidget(QWidget):
             p.drawRect(r)
             self._label(p, r.topLeft() + QPointF(4, -6), label)
 
-        if self._press is not None and self._cur is not None:
+        if self.lasso_mode and len(self._path) >= 2:
+            pen = QPen(QColor(255, 255, 255), 1.5)
+            p.setPen(pen)
+            for a, b in zip(self._path, self._path[1:]):
+                p.drawLine(a, b)
+            p.setPen(QPen(QColor(0, 0, 0), 1, Qt.PenStyle.DashLine))
+            p.drawLine(self._path[-1], self._path[0])
+        elif self._press is not None and self._cur is not None:
             r = QRectF(self._press, self._cur).normalized()
             if r.width() >= DRAG_THRESHOLD or r.height() >= DRAG_THRESHOLD:
                 p.setPen(QPen(QColor(255, 255, 255), 1.5))
@@ -210,11 +238,12 @@ class ImageSelectWidget(QWidget):
                 if 0 <= px < W and 0 <= py < H:
                     r, g, b = (int(v) for v in self.arr[py, px])
                     p.fillRect(QRectF(mx + i * cell, my + j * cell, cell, cell), QColor(r, g, b))
-        # 取样框（半径）
-        rr = self.radius
+        # 取样框（半径）；大于放大镜范围时只画边框
+        rr = min(self.radius, half)
         p.setPen(QPen(QColor(255, 255, 255), 1.5))
         p.drawRect(QRectF(mx + (half - rr) * cell, my + (half - rr) * cell, (2 * rr + 1) * cell, (2 * rr + 1) * cell))
         p.setPen(QPen(QColor(0, 0, 0), 1))
         p.drawRect(QRectF(mx, my, size, size))
         r, g, b = (int(v) for v in self.arr[yi, xi])
-        self._label(p, QPointF(mx + 4, my + size + 16), f"x {xi}, y {yi}  RGB {r},{g},{b}")
+        n_s = 2 * self.radius + 1
+        self._label(p, QPointF(mx + 4, my + size + 16), f"x {xi}, y {yi}  RGB {r},{g},{b}  取样 {n_s}×{n_s}（[ ] 切换）")

@@ -19,7 +19,11 @@ MODES = {
     "dirty": "脏色检查",
     "skin": "人像肤色",
     "compare": "参考对比",
+    "palette": "整图色彩",
+    "reference": "仿色对比",
 }
+PARTS = ("脸部", "身体", "手臂/腿", "其他")
+FAMILIES = ("红", "橙", "黄", "绿", "青", "蓝", "紫/品红")
 # 与 Photoshop 吸管“取样大小”一致：取样点、3×3、5×5、11×11、31×31、51×51、101×101 平均（默认 5×5）
 RADIUS_CHOICES = [(0, "1×1"), (1, "3×3"), (2, "5×5"), (5, "11×11"), (15, "31×31"), (25, "51×51"), (50, "101×101")]
 
@@ -53,6 +57,12 @@ class Session:
         self.custom_preset: SkinPreset | None = None
         self.history: list[HistoryItem] = []
         self.reference: HistoryItem | None = None
+        self.part = PARTS[0]
+        self.auto_mask = True
+        self.style_key: str | None = None
+        self.family: str | None = None
+        self.family_target_lab = None
+        self.skin_by_part: dict[str, tuple[float, float, float]] = {}
         self._ids = itertools.count(1)
 
     # ---------------------------------------------------------------- 预设
@@ -76,13 +86,36 @@ class Session:
     def compute_point(source: np.ndarray, x: int, y: int, radius: int, ctx: ColorContext) -> PointSample:
         return an.analyze_point(source, x, y, radius, ctx)
 
-    def compute_rect(self, region: np.ndarray, ctx: ColorContext, rect, mode: str | None = None) -> AnalysisReport:
+    def other_part(self, part: str):
+        """“脸部 vs 身体”：返回另一个已分析部位的 (名称, 平均 Lab)。"""
+        pairs = {"脸部": ("身体", "手臂/腿"), "身体": ("脸部",), "手臂/腿": ("脸部", "身体")}
+        for other in pairs.get(part, ()) + tuple(k for k in self.skin_by_part if k != part):
+            if other in self.skin_by_part and other != part:
+                return (other, self.skin_by_part[other])
+        return None
+
+    def compute_rect(
+        self, region: np.ndarray, ctx: ColorContext, rect, mode: str | None = None, lasso=None, manual_mask=None
+    ) -> AnalysisReport:
         mode = mode or self.mode
         if mode == "skin":
-            return an.analyze_skin_region(region, ctx, preset=self.preset, rect=rect)
+            return an.analyze_skin_region(
+                region, ctx, preset=self.preset, rect=rect, auto_mask=self.auto_mask, lasso=lasso,
+                part=self.part, other_part=self.other_part(self.part), manual_mask=manual_mask,
+            )
+        if mode == "palette":
+            return an.analyze_palette_report(region, ctx, self.style_key, self.family, self.family_target_lab, rect=rect)
         if mode == "dirty" and self.scan_whole:
             return an.scan_image(region, ctx, rect=rect)
         return an.analyze_region(region, ctx, rect=rect)
+
+    @staticmethod
+    def compute_reference(ref: HistoryItem, mine_region: np.ndarray, ctx: ColorContext, rect, skin_mine=None):
+        skin_ref = None
+        if isinstance(ref.result, AnalysisReport) and ref.result.skin is not None:
+            skin_ref = ref.result.skin.mean_lab
+        return an.compare_reference(mine_region, ref.region, ctx, skin_mine=skin_mine if skin_ref else None,
+                                    skin_ref=skin_ref if skin_mine else None, rect=rect)
 
     @staticmethod
     def compute_compare(ref: HistoryItem, prob_region: np.ndarray, ctx: ColorContext, rect, skin: bool = True):
@@ -109,7 +142,11 @@ class Session:
 
     def add_rect(self, region: np.ndarray, rect, report: AnalysisReport, label: str, role: str | None = None) -> HistoryItem:
         mean = np.rint(region.reshape(-1, 3).astype(float).mean(axis=0)).astype(int)
-        title = {"general": "区域", "skin": "肤色", "compare": "对比", "scan": "整图"}.get(report.mode, "区域")
+        title = {"general": "区域", "skin": "肤色", "compare": "对比", "scan": "整图", "palette": "整图色彩",
+                 "reference": "仿色"}.get(report.mode, "区域")
+        if report.mode == "skin" and report.part:
+            title = f"肤色·{report.part}"
+            self.skin_by_part[report.part] = report.skin.mean_lab
         if role:
             title = role
         item = HistoryItem(

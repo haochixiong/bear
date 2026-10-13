@@ -99,11 +99,27 @@ def _finding_html(f: Finding) -> str:
 
 
 def report_html(r: AnalysisReport, details: bool = False) -> str:
-    mode_name = {"general": "脏色检查（区域）", "skin": "人像肤色", "compare": "参考对比", "scan": "脏色检查（整图扫描）"}.get(
-        r.mode, r.mode
-    )
-    head = (
-        f"<h2>{escape(mode_name)}：{_badge(r.overall_severity.value)} 脏色风险 {r.overall_risk:.0f}/100</h2>"
+    mode_name = {
+        "general": "脏色检查（区域）",
+        "skin": "人像肤色" + (f"·{r.part}" if r.part else ""),
+        "compare": "参考对比",
+        "scan": "脏色检查（整图扫描）",
+        "palette": "整图色彩",
+        "reference": "仿色对比",
+    }.get(r.mode, r.mode)
+    if r.mode == "palette" and r.palette is not None:
+        p = r.palette
+        parts = [f"6:3:1 {p.ratio.score:.0f}", f"丰富度 {p.colorfulness.value:.0f}（{p.colorfulness.label}）"]
+        if p.style is not None:
+            parts.insert(0, f"「{p.style.name}」匹配度 {p.style.score:.0f}/100")
+        if p.unity is not None:
+            parts.append(f"“{p.unity.family}”统一度 {p.unity.score:.0f}")
+        head = f"<h2>{escape(mode_name)}：{escape('；'.join(parts))}</h2>"
+    elif r.mode == "reference" and r.reference is not None:
+        head = f"<h2>{escape(mode_name)}：与参考相似度 {r.reference.similarity:.0f}/100</h2>"
+    else:
+        head = f"<h2>{escape(mode_name)}：{_badge(r.overall_severity.value)} 脏色风险 {r.overall_risk:.0f}/100</h2>"
+    head += (
         f"<p style='color:{TEXT_DIM}'>总分 = 最高分项 + 其余分项之和 × 0.2；结论是风险倾向而不是绝对事实。"
         f"整体置信度 {r.confidence:.2f}</p>"
     )
@@ -122,10 +138,55 @@ def report_html(r: AnalysisReport, details: bool = False) -> str:
             f"C* {s.mean_lch[1]:.1f}，h {s.mean_lch[2]:.1f}°，深浅：{escape(s.depth_label)}（ITA {s.ita:.0f}°），"
             f"总体倾向：{escape(s.tendency)}</p>"
         )
+    if r.mask_info:
+        mi = r.mask_info
+        body += (f"<p style='color:{TEXT_DIM}'>皮肤选区：{'手动修正' if mi.get('manual') else '自动抠出'}，"
+                 f"皮肤占选区 {mi.get('skin_share', 0):.0%}。{escape(mi.get('note') or '')} "
+                 "若多选或漏选，点“编辑皮肤蒙版”手动修正。</p>")
+    if r.palette is not None:
+        body += palette_html(r.palette)
+    if r.reference is not None:
+        body += reference_html(r.reference)
     body += "<h3>风险分项</h3>" + comps
     if details:
         body += details_html(r)
     return body
+
+
+def _bar(share: float, rgb, width: int = 220) -> str:
+    w = max(2, int(share * width))
+    r, g, b = rgb
+    return f"<span style='background:rgb({r},{g},{b});border:1px solid #777'>{'&nbsp;' * max(1, w // 6)}</span>"
+
+
+def palette_html(p) -> str:
+    rows = "".join(
+        f"<tr><td>{escape(role)}</td><td>{_bar(c.share, c.rgb)}</td><td>{escape(c.family)}</td><td align=right>{c.share:.0%}</td>"
+        f"<td>目标 {target}</td></tr>"
+        for role, c, target in zip(("主色", "辅色", "点缀色"), p.ratio.roles, ("60%", "30%", "10%"))
+    )
+    out = f"<h3>色彩比例 6:3:1（得分 {p.ratio.score:.0f}）</h3><table cellpadding=2>{rows}</table>"
+    out += f"<p>色彩丰富度 {p.colorfulness.value:.0f}（{escape(p.colorfulness.label)}）；影调 L* P5/P50/P95 = {p.tone[0]:.0f} / {p.tone[2]:.0f} / {p.tone[4]:.0f}</p>"
+    ch = "".join(
+        f"<tr><td>{escape(c.name)}</td><td align=right>{c.share:.0%}</td>"
+        f"<td>{'' if c.mean_hue is None else f'H {c.mean_hue:.0f}° S {c.mean_sat:.0f}% B {c.mean_bri:.0f}%'}</td></tr>"
+        for c in p.channels if c.share >= 0.01
+    )
+    out += f"<p><b>混色器 8 个通道在画面中的占比</b></p><table cellpadding=2>{ch}</table>"
+    return out
+
+
+def reference_html(m) -> str:
+    rows = "".join(
+        f"<tr><td>P{pc}</td><td align=right>{a:.0f}</td><td align=right>{b:.0f}</td></tr>"
+        for pc, a, b in zip((5, 25, 50, 75, 95), m.tone_ref, m.tone_mine)
+    )
+    out = f"<h3>仿色：相似度 {m.similarity:.0f}/100</h3>"
+    out += f"<table cellpadding=2><tr><th>明度分位</th><th>参考</th><th>我的</th></tr>{rows}</table>"
+    out += "<p><b>参考的主色</b>：" + "，".join(
+        f"{_bar(c.share, c.rgb, 80)} {escape(c.family)} {c.share:.0%}" for c in m.palette_ref
+    ) + "</p>"
+    return out
 
 
 def details_html(r: AnalysisReport) -> str:

@@ -23,9 +23,15 @@ class _Task(QRunnable):
             result = self.fn(*self.args, **self.kwargs)
         except Exception as e:  # 把错误交给界面显示，而不是让程序崩溃
             msg = str(e) or e.__class__.__name__
-            self.signals.failed.emit(f"{msg}\n\n{traceback.format_exc(limit=3)}")
+            self._emit("failed", f"{msg}\n\n{traceback.format_exc(limit=3)}")
         else:
-            self.signals.done.emit(result)
+            self._emit("done", result)
+
+    def _emit(self, name, value):
+        try:
+            getattr(self.signals, name).emit(value)
+        except RuntimeError:
+            pass  # 窗口在分析完成前已关闭：结果直接丢弃
 
 
 def run_in_background(fn, *args, on_done=None, on_failed=None, **kwargs) -> _Task:

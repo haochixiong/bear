@@ -70,3 +70,28 @@ def test_crop_selection_out_of_bounds():
     assert r == (0, 0, 3, 3) and region.shape == (3, 3, 3)
     with pytest.raises(SampleError):
         crop_selection(img, (50, 50, 5, 5))
+
+
+def test_face_body_parts_are_compared_automatically():
+    s = Session()
+    s.mode = "skin"
+    s.part = "身体"
+    body = skin_region(64, 12, 24)
+    s.add_rect(body, (0, 0, 120, 120), s.compute_rect(body, CTX, (0, 0, 120, 120)), "x")
+    s.part = "脸部"
+    face = skin_region(70, 13, 18)
+    rep = s.compute_rect(face, CTX, (0, 0, 120, 120))
+    assert any("脸部与身体" in f.problem for f in rep.findings)
+
+
+def test_palette_and_reference_modes():
+    s = Session()
+    s.mode = "palette"
+    s.style_key = "teal_orange"
+    s.family = "蓝"
+    img = noisy(flat(BLUE, 80, 100), 2)
+    rep = s.compute_rect(img, CTX, (0, 0, 100, 80))
+    assert rep.mode == "palette" and rep.palette.style is not None and rep.palette.unity is not None
+    item = s.add_rect(img, (0, 0, 100, 80), rep, "x", role="参考图")
+    out = s.compute_reference(item, noisy(flat(YELLOW, 80, 100), 2), CTX, (0, 0, 100, 80))
+    assert out.mode == "reference"

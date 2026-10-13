@@ -11,7 +11,10 @@ a = Analysis(
     [os.path.join(SPECPATH, "run_colordoctor.py")],
     pathex=[SRC],
     binaries=[],
-    datas=[(os.path.join(SRC, "colordoctor", "data", "skin_presets.json"), "colordoctor/data")],
+    datas=[
+        (os.path.join(SRC, "colordoctor", "data", "skin_presets.json"), "colordoctor/data"),
+        (os.path.join(SRC, "colordoctor", "data", "grading_styles.json"), "colordoctor/data"),
+    ],
     hiddenimports=["colordoctor.data"],
     excludes=[
         "tkinter",

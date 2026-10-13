@@ -13,7 +13,7 @@ pip install -e .
 python -m pytest -q
 ```
 
-预期：全部通过。Linux 上的基线为 **222 passed**。
+预期：全部通过。Linux 上的基线为 **301 passed**。
 
 如果在 Windows 上失败，请先确认失败的测试是不是只与平台相关，例如路径或字体。**不要为了让测试通过而放宽算法阈值。**
 
@@ -30,6 +30,17 @@ python -m pytest -q
 | 7 | 高 DPI 界面 | 全部 UI | 在 150% 和 200% 缩放下打开 | 文字没有被截断，色轮清晰 |
 | 8 | JPG | `core/color_management.py` | 分别用相机直出 JPG（带 EXIF 方向）、Photoshop 导出的 Adobe RGB JPG、sRGB JPG 打开、取样 | 方向与 Photoshop 一致；Adobe RGB 图提示“已转换到 sRGB”；读数与 Photoshop（文档转换到 sRGB 后）的信息面板一致 |
 
+### 1b. 第四版新增、需要在 Windows 上确认的项
+
+| # | 内容 | 代码位置 | 怎么验证 | 预期 |
+|---|---|---|---|---|
+| 9 | 本机 Claude Code 会话 | `ai/providers.py`：`_run_cli`，默认命令 `claude -p`，提示词通过 stdin 传入 | ⚙ 设置 → 启用 AI 点评 → 方式选 Claude Code；对任意分析点“AI 点评” | 弹出中文点评。如果 `claude -p` 不读取 stdin，就改为把提示词作为参数传入；Windows 上 npm 安装的是 `claude.cmd`，`shutil.which` 应能找到。勾选“发送缩略图”时会追加 `--allowedTools Read`，请确认它能读到临时图片 |
+| 10 | 本机 Codex 会话 | 同上，默认命令 `codex exec --skip-git-repo-check -`，图片用 `-i 路径` | 同上，方式选 Codex | 弹出点评。如果参数名在当前 Codex 版本中不同，请修改 `DEFAULT_COMMANDS` / `build_command`，并更新 `tests/test_ai.py` |
+| 11 | DeepSeek / Claude API | `ai/providers.py` | 填入真实 Key 后测试一次 | 正常返回；Key 错误时显示中文提示 |
+| 12 | 套索、`[` `]` 切换取样大小 | `ui/selection_widget.py`、`ui/capture_overlay.py` | 人像肤色模式勾选“套索”，在 PS 画面上圈皮肤；框选层中按 `[` `]` | 套索选区与圈出的范围一致；放大镜中的取样框随之变化 |
+| 13 | 皮肤蒙版编辑 | `ui/mask_editor.py` | 对一张真实人像分析后点“编辑皮肤蒙版”，用画笔擦掉头发、用魔棒补上漏掉的皮肤 | 编辑流畅（大图时画笔不卡顿）；“用这个蒙版重新分析”后结果更新 |
+| 14 | 真实人像的自动抠皮肤 | `core/skin_mask.py` | 分别用浅肤色、深肤色、强侧光、彩色环境光的人像测试 | 头发、眉眼、嘴唇、背景基本被排除；漏选或多选可以用蒙版编辑修正；把失败样例记录下来，用于调整 `HUE_TOL` / `SAT_RATIO` / `DARK_RATIO` |
+
 ## 2. 建议完成的校准（提高“调整参数”精度）
 
 `core/ps_models.py` 中，色彩平衡、色相/饱和度、可选颜色的模型是近似实现，与 Photoshop 有差异。校准方法：
@@ -44,6 +55,7 @@ python -m pytest -q
 
 - 检测 Windows HDR / 自动颜色管理是否开启（`DisplayConfigGetDeviceInfo`），开启时在界面上提示。
 - 应用图标（`packaging/colordoctor.spec` 中的 `icon=`）。
+- 混色器/颜色分级滑块换算常数（`core/acr_channels.py` 中的 `HUE_PER_UNIT`、`LUM_PER_UNIT`）：在 ACR 中对色块拉动滑块并测量，校准这两个常数。
 - 首次运行时的简短引导。
 
 ## 4. 不要做的事
@@ -64,3 +76,9 @@ python -m pytest -q
 | 6 |  |  |  |
 | 7 |  |  |  |
 | 8 |  |  |  |
+| 9 |  |  |  |
+| 10 |  |  |  |
+| 11 |  |  |  |
+| 12 |  |  |  |
+| 13 |  |  |  |
+| 14 |  |  |  |

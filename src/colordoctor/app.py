@@ -64,7 +64,10 @@ def _selftest_body() -> None:
     from colordoctor.core.color_management import synthetic_context
 
     presets = skin_presets.builtin_presets()
-    assert len(presets) >= 5, "内置风格预设缺失"
+    assert len(presets) >= 12, "内置肤色风格缺失"
+    from colordoctor.core import palette
+
+    assert len(palette.load_styles()) >= 7, "内置整图风格模板缺失"
     img = np.empty((120, 160, 3), np.uint8)
     img[:] = (40, 80, 200)
     img.reshape(-1, 3)[::20] = (230, 200, 40)
@@ -94,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     if "--selftest" in argv:
         return selftest()
+    if len(argv) > 1 and argv[1] in ("analyze", "presets", "styles"):
+        from colordoctor.cli import run
+
+        return run(argv[1:])
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("ColorDoctor")
     app.setOrganizationName("ColorDoctor")

@@ -13,7 +13,7 @@ import numpy as np
 
 from colordoctor.core import color_spaces as cs
 from colordoctor.core import contamination as ct
-from colordoctor.core.color_models import Comparison, SkinPreset, SkinReport
+from colordoctor.core.color_models import Comparison, QuickRuleResult, SkinPreset, SkinReport
 from colordoctor.core.region_statistics import weighted_circular_hue
 from colordoctor.core.sampling import SampleError, grid_downsample
 
@@ -132,9 +132,8 @@ def analyze_skin(
     )
 
 
-def quick_rule_check(lab_pixels: np.ndarray, rule: tuple) -> "QuickRuleResult":
+def quick_rule_check(lab_pixels: np.ndarray, rule: tuple) -> QuickRuleResult:
     """你的经验规则：a*、b* 都在区间内，且 |a* - b*| 不超过上限。"""
-    from colordoctor.core.color_models import QuickRuleResult
 
     (alo, ahi), (blo, bhi), md = rule
     px = np.asarray(lab_pixels, dtype=float).reshape(-1, 3)

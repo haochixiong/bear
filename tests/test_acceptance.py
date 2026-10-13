@@ -14,8 +14,11 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "colordoctor"
 FORBIDDEN = {"socket", "urllib", "http", "requests", "httpx", "aiohttp", "ftplib", "smtplib"}
 
 
-def test_no_network_modules_are_imported_anywhere():
+def test_no_network_modules_outside_optional_ai_package():
+    """联网代码只允许出现在可选的 colordoctor/ai 包里（默认关闭，用户点击“AI 点评”才会调用）。"""
     for py in SRC.rglob("*.py"):
+        if "ai" in py.relative_to(SRC).parts[:1]:
+            continue
         tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names = []
@@ -34,7 +37,10 @@ def test_core_does_not_depend_on_qt():
 
 
 def test_no_code_writes_image_files():
+    """唯一例外：ai/thumbnail.py 在系统临时目录写给 AI 用的缩略图（用户主动点击 AI 点评且勾选发送图片时）。"""
     for py in SRC.rglob("*.py"):
+        if py.relative_to(SRC).as_posix() == "ai/thumbnail.py":
+            continue
         text = py.read_text(encoding="utf-8")
         assert ".save(" not in text, f"{py.name} 不应保存图像"
 
@@ -57,3 +63,16 @@ def test_selftest_entry_point(qapp, tmp_path, monkeypatch):
     monkeypatch.setenv("COLORDOCTOR_SELFTEST_LOG", str(log))
     assert app.selftest() == 0
     assert "SELFTEST OK" in log.read_text(encoding="utf-8")
+
+
+def test_ai_package_is_not_imported_by_default():
+    import subprocess
+    import sys
+
+    code = (
+        "import os; os.environ['QT_QPA_PLATFORM']='offscreen'\n"
+        "import colordoctor.ui.main_window, colordoctor.cli, sys\n"
+        "print([m for m in sys.modules if m.startswith('colordoctor.ai') or m == 'anthropic'])"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
+    assert out.endswith("[]"), out

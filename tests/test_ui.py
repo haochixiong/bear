@@ -30,7 +30,9 @@ def win(qtbot, tmp_path):
 
 
 def test_window_starts_with_all_modes(win):
-    assert set(win.mode_buttons) == {"point", "dirty", "skin", "compare"}
+    assert set(win.mode_buttons) == {"point", "dirty", "skin", "compare", "palette", "reference"}
+    assert [win.radius_box.itemText(i) for i in range(win.radius_box.count())] == [
+        "1×1", "3×3", "5×5", "11×11", "31×31", "51×51", "101×101"]
     assert win.preset_box.count() >= 5
     assert win.radius_box.currentData() == 2  # 默认 5×5
 
@@ -180,3 +182,124 @@ def test_report_html_contains_structure():
     html = rh.report_html(rep, details=True)
     for word in ("证据", "可能原因", "调整方向", "置信度", "注意事项", "风险分项", "色彩管理"):
         assert word in html
+
+
+# ------------------------------------------------------------------ 新增功能
+def test_palette_mode_flow(win, qtbot):
+    win.set_mode("palette")
+    win.style_box.setCurrentIndex(win.style_box.findData("teal_orange"))
+    win.family_box.setCurrentIndex(win.family_box.findData("蓝"))
+    win._run_rect(noisy(flat(BLUE), 2), (0, 0, 160, 120), CTX, "t", 0)
+    qtbot.waitUntil(lambda: len(win.session.history) == 1, timeout=15000)
+    text = win.report_view.toPlainText()
+    assert "6:3:1" in text and "青橙" in text and "统一" in text
+
+
+def test_reference_mode_two_steps(win, qtbot):
+    win.set_mode("reference")
+    win._run_rect(noisy(flat(BLUE), 2), (0, 0, 160, 120), CTX, "t", 0)
+    win._run_rect(noisy(flat(YELLOW), 2), (0, 0, 160, 120), CTX, "t", 1)
+    qtbot.waitUntil(lambda: any(isinstance(h.result, AnalysisReport) and h.result.mode == "reference"
+                                for h in win.session.history), timeout=20000)
+    assert "相似度" in win.report_view.toPlainText()
+
+
+def test_skin_lasso_and_part_and_mask_editor(win, qtbot, monkeypatch):
+    from synth import face_scene
+    from colordoctor.ui import mask_editor
+
+    img, truth = face_scene()
+    win.set_mode("skin")
+    win.part_box.setCurrentText("身体")
+    rect, lasso = win._polygon_rect([(40, 60), (160, 60), (160, 190), (40, 190)], img.shape)
+    region = img[rect[1]:rect[1] + rect[3], rect[0]:rect[0] + rect[2]]
+    win._run_rect(region, rect, CTX, "t", 0, lasso=lasso)
+    qtbot.waitUntil(lambda: len(win.session.history) == 1, timeout=15000)
+    rep = win.session.history[0].result
+    assert rep.part == "身体" and rep.valid_mask is not None
+    assert "身体" in win.session.skin_by_part
+
+    # 蒙版编辑：直接修改蒙版后“确定”，应以手动蒙版重新分析
+    class FakeDlg:
+        def __init__(self, parent, region, mask, auto):
+            self.mask = mask.copy()
+            self.mask[:, : region.shape[1] // 2] = False
+
+        def exec(self):
+            return True
+
+    monkeypatch.setattr(mask_editor, "MaskEditorDialog", FakeDlg)
+    win.edit_skin_mask()
+    qtbot.waitUntil(lambda: win.session.history[0].result.mask_info.get("manual"), timeout=15000)
+    assert len([h for h in win.session.history if h.kind == "rect"]) == 1  # 替换而不是新增
+
+
+def test_mask_canvas_brush_and_undo(qtbot):
+    from synth import face_scene
+    from colordoctor.ui.mask_editor import MaskEditorDialog
+
+    img, truth = face_scene()
+    dlg = MaskEditorDialog(None, img, truth.copy(), truth.copy())
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    c = dlg.canvas
+    c.tool = "brush_erase"
+    c.brush = 20
+    before = c.mask.sum()
+    center = c.to_view(100, 120).toPoint()
+    qtbot.mousePress(c, Qt.MouseButton.LeftButton, pos=center)
+    qtbot.mouseRelease(c, Qt.MouseButton.LeftButton, pos=center)
+    assert c.mask.sum() < before
+    dlg._undo()
+    assert c.mask.sum() == before
+    c.tool = "wand_add"
+    qtbot.mousePress(c, Qt.MouseButton.LeftButton, pos=c.to_view(5, 5).toPoint())
+    assert c.mask[5, 5]
+
+
+def test_copy_export_and_ai_disabled(win, qtbot, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+
+    win.set_mode("dirty")
+    win._run_rect(noisy(flat(BLUE), 2), (0, 0, 160, 120), CTX, "t", 0)
+    qtbot.waitUntil(lambda: len(win.session.history) == 1, timeout=10000)
+    win.copy_for_agent()
+    assert "```json" in QApplication.clipboard().text()
+    out = tmp_path / "r.json"
+    monkeypatch.setattr("colordoctor.ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(out), ""))
+    win.export_json()
+    assert out.exists() and '"mode"' in out.read_text(encoding="utf-8")
+    shown = {}
+    monkeypatch.setattr("colordoctor.ui.main_window.QMessageBox.information", lambda *a: shown.setdefault("t", a[1]))
+    win.ask_ai()
+    assert "未启用" in shown["t"]
+
+
+def test_ai_flow_with_fake_command(win, qtbot, tmp_path):
+    import sys
+
+    script = tmp_path / "fake.py"
+    script.write_text("import sys; d=sys.stdin.read(); print('## 点评\\n收到 %d 字' % len(d))", encoding="utf-8")
+    win.settings.setValue("ai/enabled", "true")
+    win.settings.setValue("ai/provider", "claude_code")
+    win.settings.setValue("ai/command", f'"{sys.executable}" "{script}"')
+    img = flat((200, 150, 120), 20, 20)
+    win._handle_point(img[3:8, 3:8], 5, 5, CTX, "t")
+    win.ask_ai()
+    qtbot.waitUntil(lambda: getattr(win, "_ai_dialog", None) is not None, timeout=20000)
+    assert "收到" in win._ai_dialog.findChild(type(win.report_view)).toPlainText()
+
+
+def test_overlay_radius_keys(qtbot):
+    info = ScreenInfo("FAKE", 0, 0, 200, 150, 1.0)
+    s = CaptureSession([ScreenCapture(info=info, pixels=flat((1, 2, 3), 150, 200))], ["x"], radius=2)
+    got = []
+    s.radius_changed.connect(got.append)
+    s.show()
+    v = s.overlays[0].view
+    qtbot.keyClick(v, Qt.Key.Key_BracketRight)
+    qtbot.keyClick(v, Qt.Key.Key_BracketRight)
+    qtbot.keyClick(v, Qt.Key.Key_BracketLeft)
+    assert got == [5, 15, 5]
+    s.close()

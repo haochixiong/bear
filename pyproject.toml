@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-qt>=4.4", "hypothesis>=6.100"]
+ai = ["anthropic>=1.0"]  # 仅“Claude API”方式需要；Claude Code / Codex 会话和 DeepSeek 不需要
 
 [project.scripts]
 colordoctor = "colordoctor.app:main"

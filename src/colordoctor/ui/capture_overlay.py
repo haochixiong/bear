@@ -31,19 +31,27 @@ class CaptureSession(QObject):
     """
 
     selected = pyqtSignal(object, str, tuple, int)
+    radius_changed = pyqtSignal(int)
     finished = pyqtSignal()
     cancelled = pyqtSignal()
 
-    def __init__(self, captures: list[ScreenCapture], steps: list[str], radius: int = 2, allow_point: bool = True):
+    def __init__(
+        self, captures: list[ScreenCapture], steps: list[str], radius: int = 2, allow_point: bool = True,
+        lasso: bool = False, labels: list[str] | None = None,
+    ):
         super().__init__()
         self.captures = captures
         self.steps = steps
         self.step = 0
         self.allow_point = allow_point
+        self.labels = labels or (["参考区", "问题区"] if len(steps) > 1 else ["选区"])
         self.overlays: list[_ScreenOverlay] = []
         for i, cap in enumerate(captures):
             ov = _ScreenOverlay(cap, i)
             ov.view.radius = radius
+            ov.view.lasso_mode = lasso
+            ov.view.radius_changed.connect(self._sync_radius)
+            ov.view.polygon_selected.connect(lambda pts, i=i: self._on_polygon(i, pts))
             ov.view.point_selected.connect(lambda x, y, i=i: self._on_point(i, x, y))
             ov.view.rect_selected.connect(lambda x, y, w, h, i=i: self._on_rect(i, x, y, w, h))
             ov.view.cancelled.connect(self.cancel)
@@ -69,12 +77,24 @@ class CaptureSession(QObject):
         self.selected.emit(self.captures[i], "point", (x, y), self.step)
         self._advance(i, (x, y, 1, 1))
 
+    def _sync_radius(self, r):
+        for ov in self.overlays:
+            ov.view.radius = r
+            ov.view.update()
+        self.radius_changed.emit(r)
+
+    def _on_polygon(self, i, pts):
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        self.selected.emit(self.captures[i], "polygon", tuple(pts), self.step)
+        self._advance(i, (int(min(xs)), int(min(ys)), int(max(xs) - min(xs)) + 1, int(max(ys) - min(ys)) + 1))
+
     def _on_rect(self, i, x, y, w, h):
         self.selected.emit(self.captures[i], "rect", (x, y, w, h), self.step)
         self._advance(i, (x, y, w, h))
 
     def _advance(self, i, rect):
-        label = ["参考区", "问题区"][self.step] if len(self.steps) > 1 and self.step < 2 else "选区"
+        label = self.labels[self.step] if self.step < len(self.labels) else "选区"
         self.overlays[i].view.add_mark(rect, label)
         self.step += 1
         if self.step >= len(self.steps):
