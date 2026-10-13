@@ -41,6 +41,16 @@ MASK_NORMAL = 0
 MASK_IGNORED = 1
 MASK_OPPOSITE = 2
 MASK_GRAYING = 3
+MASK_OUTSIDE = 4  # 不在选区/皮肤蒙版内
+
+
+def downsample_mask(valid: np.ndarray | None, step: int, shape: tuple[int, int]) -> np.ndarray:
+    """把全分辨率布尔蒙版按 grid_downsample 的同一网格取样。"""
+    if valid is None:
+        return np.ones(shape, dtype=bool)
+    off = step // 2 if step > 1 else 0
+    v = np.asarray(valid, dtype=bool)[off::step, off::step]
+    return v[: shape[0], : shape[1]]
 
 
 def _smoothed_hist(h: np.ndarray, w: np.ndarray, bins: int = 72) -> np.ndarray:
@@ -222,22 +232,29 @@ def analyze(
     base_hue: float | None = None,
     max_samples: int = MAX_SAMPLES,
     offset: tuple[int, int] = (0, 0),
+    valid: np.ndarray | None = None,
 ) -> ContaminationResult:
-    """mode: "region"（用户框选的单一主体）、"skin"（肤色）、"scan"（整图扫描）。"""
+    """mode: "region"（用户框选的单一主体）、"skin"（肤色）、"scan"（整图扫描）。
+
+    valid：与 region 同尺寸的布尔数组（例如精准抠出的皮肤或套索选区），
+    只有 True 的像素参与判断，其余标记为“忽略”。
+    """
     if region is None or region.ndim != 3 or region.shape[0] == 0 or region.shape[1] == 0:
         raise ValueError("选区为空，无法分析")
     sub, step = grid_downsample(region, max_samples)
     hh, ww = sub.shape[:2]
+    vsub = downsample_mask(valid, step, (hh, ww))
     lab = cs.srgb8_to_lab(sub)
     lch = cs.lab_to_lch(lab)
     L, C, h = lch[..., 0], lch[..., 1], lch[..., 2]
-    chromatic = C >= C_MIN
-    n_total = hh * ww
-    chrom_frac = float(chromatic.mean())
+    chromatic = (C >= C_MIN) & vsub
+    n_total = max(1, int(vsub.sum()))
+    chrom_frac = float(chromatic.sum() / n_total)
     gy, gx = np.gradient(L)
     edge = np.hypot(gx, gy) > EDGE_GRAD
 
     mask = np.where(chromatic, MASK_NORMAL, MASK_IGNORED).astype(np.uint8)
+    mask[~vsub] = MASK_OUTSIDE
 
     if mode == "scan":
         return _scan(sub, step, offset, L, C, h, chromatic, edge, mask, chrom_frac)

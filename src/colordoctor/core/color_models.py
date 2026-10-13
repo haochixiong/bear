@@ -214,6 +214,7 @@ class SkinPreset:
     hue: tuple[float, float]
     chroma: tuple[float, float]
     notes: tuple[str, ...] = ()
+    quick_rule: tuple | None = None  # ((a 下限, a 上限), (b 下限, b 上限), |a-b| 上限)；None 用全局规则
 
     @property
     def target_lab(self) -> tuple[float, float, float]:
@@ -222,6 +223,27 @@ class SkinPreset:
             (self.a[0] + self.a[1]) / 2,
             (self.b[0] + self.b[1]) / 2,
         )
+
+
+@dataclass(frozen=True)
+class QuickRuleResult:
+    """经验快速判定：a*、b* 是否都在区间内且差值不超过上限。"""
+
+    a: float
+    b: float
+    a_range: tuple[float, float]
+    b_range: tuple[float, float]
+    max_diff: float
+    a_ok: bool
+    b_ok: bool
+    diff_ok: bool
+    pixel_pass_share: float  # 皮肤像素中满足规则的比例
+    verdict: str
+    tips: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return self.a_ok and self.b_ok and self.diff_ok
 
 
 @dataclass(frozen=True)
@@ -273,3 +295,10 @@ class AnalysisReport:
     findings: tuple[Finding, ...] = ()
     adjustments: tuple[Adjustment, ...] = ()
     region: tuple[int, int, int, int] | None = None
+    part: str | None = None  # 肤色部位：脸部 / 身体 / 手臂腿 / 其他
+    quick_rule: object = None  # QuickRuleResult
+    uniformity: object = None  # skin_uniformity.UniformityResult
+    valid_mask: object = field(default=None, repr=False)  # 参与分析的像素（皮肤蒙版/套索），与选区同尺寸
+    mask_info: dict = field(default_factory=dict)
+    palette: object = None  # palette.PaletteReport（整图色彩）
+    reference: object = None  # reference_match.MatchReport（仿色）

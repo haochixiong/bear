@@ -61,3 +61,27 @@ def skin_region(L=68.0, a=15.0, b=20.0, h=120, w=120, sigma_L=6.0, sigma_ab=1.2,
     lab = np.stack([Lmap, amap, bmap], axis=-1)
     lab[..., 1:] += rng.normal(0, sigma_ab, lab[..., 1:].shape)
     return cs.lab_to_srgb8(lab)
+
+
+def face_scene(h=200, w=200, skin_lab=(68.0, 14.0, 19.0), seed=0) -> tuple[np.ndarray, np.ndarray]:
+    """合成“人脸”场景：青色背景 + 皮肤椭圆 + 深色头发 + 红色嘴唇 + 深色眼睛。
+
+    返回 (图像, 真实皮肤蒙版)。
+    """
+    img = flat(lch_color(45, 28, 205), h, w)
+    yy, xx = np.mgrid[0:h, 0:w]
+    face = ((xx - w / 2) / (w * 0.32)) ** 2 + ((yy - h * 0.55) / (h * 0.40)) ** 2 <= 1
+    skin = skin_region(*skin_lab, h=h, w=w, seed=seed)
+    img[face] = skin[face]
+    truth = face.copy()
+    hair = (yy < h * 0.25) & face
+    img[hair] = lch_color(18, 6, 60)
+    truth &= ~hair
+    lips = (((xx - w / 2) / (w * 0.09)) ** 2 + ((yy - h * 0.78) / (h * 0.03)) ** 2) <= 1
+    img[lips] = lch_color(48, 42, 28)
+    truth &= ~lips
+    for ex in (w * 0.40, w * 0.60):
+        eye = (((xx - ex) / (w * 0.04)) ** 2 + ((yy - h * 0.48) / (h * 0.02)) ** 2) <= 1
+        img[eye] = lch_color(15, 3, 60)
+        truth &= ~eye
+    return img, truth

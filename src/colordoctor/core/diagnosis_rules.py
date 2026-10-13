@@ -40,6 +40,7 @@ NAMES = {
     "lightness_compression": "明度压缩风险",
     "outlier": "异常色比例",
     "skin_cast": "肤色整体偏色",
+    "uniformity": "肤色色相/饱和度不均匀",
 }
 
 
@@ -235,6 +236,20 @@ def skin_cast_component(skin: SkinReport) -> RiskComponent:
             f"总体{skin.tendency}，超出自然肤色色相区间约 {skin.tendency_amount:.1f}°",
         ],
         note="倾向是相对“自然肤色”而言；如果是刻意的风格（例如粉白、暖金），请对照风格预设判断",
+    )
+
+
+def uniformity_component(uni) -> RiskComponent:
+    if uni is None or uni.skin_pixels < 20:
+        return _rc("uniformity", 0, ["皮肤像素太少，无法评估均匀度"], applicable=False)
+    score = 100.0 - uni.score
+    return _rc(
+        "uniformity",
+        score,
+        [
+            f"均匀度 {uni.score:.0f}/100；各小块色相标准差 {uni.hue_spread:.1f}°，饱和度变异 {uni.sat_cv:.0%}",
+            f"色相偏离 ≥6° 的皮肤 {uni.uneven_hue_share:.0%}，饱和度偏离 ≥22% 的皮肤 {uni.uneven_sat_share:.0%}",
+        ],
     )
 
 

@@ -66,11 +66,16 @@ def _band_mean(lab, sel):
     return lab[sel].mean(axis=0) if sel.any() else None
 
 
-def analyze_skin(region: np.ndarray, preset: SkinPreset | None = None, max_samples: int = 262_144) -> SkinReport:
+def analyze_skin(
+    region: np.ndarray, preset: SkinPreset | None = None, max_samples: int = 262_144, valid: np.ndarray | None = None
+) -> SkinReport:
     if region is None or region.ndim != 3 or region.shape[0] == 0 or region.shape[1] == 0:
         raise SampleError("选区为空")
-    sub, _ = grid_downsample(region, max_samples)
-    lab = cs.srgb8_to_lab(sub).reshape(-1, 3)
+    sub, step = grid_downsample(region, max_samples)
+    vsub = ct.downsample_mask(valid, step, sub.shape[:2]).reshape(-1)
+    lab = cs.srgb8_to_lab(sub).reshape(-1, 3)[vsub]
+    if lab.shape[0] == 0:
+        raise SampleError("蒙版内没有皮肤像素")
     lch = cs.lab_to_lch(lab)
     L, C, h = lch[:, 0], lch[:, 1], lch[:, 2]
     skin = (C >= 3.0) & (h >= SKIN_HUE_RANGE[0]) & (h <= SKIN_HUE_RANGE[1]) & (L >= 10) & (L <= 98)
@@ -108,7 +113,7 @@ def analyze_skin(region: np.ndarray, preset: SkinPreset | None = None, max_sampl
     sh_shift, sh_hue = shift(lo)
 
     exp_sat = (preset.chroma[0] / preset.L[1], preset.chroma[1] / preset.L[0]) if preset else NATURAL_SATURATION
-    contam = ct.analyze(region, mode="skin", max_samples=max_samples)
+    contam = ct.analyze(region, mode="skin", max_samples=max_samples, valid=valid)
     return SkinReport(
         mean_lab=tuple(round(float(v), 3) for v in mean),
         mean_lch=tuple(round(float(v), 3) for v in mean_lch),
@@ -124,6 +129,34 @@ def analyze_skin(region: np.ndarray, preset: SkinPreset | None = None, max_sampl
         expected_saturation=(round(exp_sat[0], 4), round(exp_sat[1], 4)),
         mixed_region=bool(mixed),
         anomaly_fractions=dict(contam.anomaly_fractions),
+    )
+
+
+def quick_rule_check(lab_pixels: np.ndarray, rule: tuple) -> "QuickRuleResult":
+    """你的经验规则：a*、b* 都在区间内，且 |a* - b*| 不超过上限。"""
+    from colordoctor.core.color_models import QuickRuleResult
+
+    (alo, ahi), (blo, bhi), md = rule
+    px = np.asarray(lab_pixels, dtype=float).reshape(-1, 3)
+    a, b = float(px[:, 1].mean()), float(px[:, 2].mean())
+    a_ok, b_ok, d_ok = alo <= a <= ahi, blo <= b <= bhi, abs(a - b) <= md
+    ok = (px[:, 1] >= alo) & (px[:, 1] <= ahi) & (px[:, 2] >= blo) & (px[:, 2] <= bhi) & (np.abs(px[:, 1] - px[:, 2]) <= md)
+    tips = []
+    if a < alo:
+        tips.append(f"a* {a:.1f} 偏低（缺红、没血色或偏绿）：色调往洋红、红色饱和度略加")
+    if a > ahi:
+        tips.append(f"a* {a:.1f} 偏高（太红）：色调往绿、红色/橙色色相往黄")
+    if b < blo:
+        tips.append(f"b* {b:.1f} 偏低（缺黄、偏冷发青）：色温往黄、橙色色相往黄")
+    if b > bhi:
+        tips.append(f"b* {b:.1f} 偏高（太黄）：色温往蓝、黄色/橙色饱和度降低或色相往红")
+    if not d_ok:
+        tips.append(f"a* 与 b* 相差 {abs(a - b):.1f}（上限 {md:g}）：{'偏黄' if b > a else '偏红/偏粉'}")
+    verdict = "正常肤色" if (a_ok and b_ok and d_ok) else "不符合经验范围"
+    return QuickRuleResult(
+        a=round(a, 2), b=round(b, 2), a_range=(alo, ahi), b_range=(blo, bhi), max_diff=md,
+        a_ok=a_ok, b_ok=b_ok, diff_ok=d_ok, pixel_pass_share=round(float(ok.mean()), 4),
+        verdict=verdict, tips=tuple(tips),
     )
 
 

@@ -26,6 +26,15 @@ def user_config_dir() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "colordoctor"
 
 
+DEFAULT_QUICK_RULE = ((10.0, 20.0), (10.0, 20.0), 5.0)
+
+
+def _rule(d) -> tuple | None:
+    if not d:
+        return None
+    return (tuple(float(v) for v in d["a"]), tuple(float(v) for v in d["b"]), float(d["max_diff"]))
+
+
 def _parse(data: dict) -> list[SkinPreset]:
     out = []
     for p in data.get("presets", []):
@@ -40,9 +49,25 @@ def _parse(data: dict) -> list[SkinPreset]:
                 hue=tuple(float(v) for v in p["hue"]),
                 chroma=tuple(float(v) for v in p["chroma"]),
                 notes=tuple(p.get("notes", ())),
+                quick_rule=_rule(p.get("quick_rule")),
             )
         )
     return out
+
+
+def global_quick_rule(user_file: Path | None = None) -> tuple:
+    """经验快速判定规则：用户文件 > 内置文件 > 默认 (a 10–20, b 10–20, 差值 ≤ 5)。"""
+    for loader in (
+        lambda: json.loads((user_file or user_config_dir() / "skin_presets.json").read_text(encoding="utf-8")),
+        lambda: json.loads(resources.files("colordoctor.data").joinpath("skin_presets.json").read_text(encoding="utf-8")),
+    ):
+        try:
+            r = _rule(loader().get("quick_rule"))
+            if r:
+                return r
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return DEFAULT_QUICK_RULE
 
 
 def builtin_presets() -> list[SkinPreset]:

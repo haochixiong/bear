@@ -36,12 +36,23 @@ def _t(a, nd=4):
     return tuple(round(float(v), nd) for v in np.ravel(a))
 
 
-def compute_stats(region: np.ndarray, max_samples: int = MAX_SAMPLES, with_clusters: bool = True) -> RegionStats:
+def compute_stats(
+    region: np.ndarray, max_samples: int = MAX_SAMPLES, with_clusters: bool = True, valid: np.ndarray | None = None
+) -> RegionStats:
     if region is None or region.ndim != 3 or region.shape[0] == 0 or region.shape[1] == 0:
         raise SampleError("选区为空")
-    total = int(region.shape[0] * region.shape[1])
-    sub, _ = grid_downsample(region, max_samples)
-    rgb = sub.reshape(-1, 3)
+    sub, step = grid_downsample(region, max_samples)
+    if valid is not None:
+        from colordoctor.core.contamination import downsample_mask
+
+        vsub = downsample_mask(valid, step, sub.shape[:2])
+        if not vsub.any():
+            raise SampleError("蒙版内没有像素")
+        rgb = sub[vsub].reshape(-1, 3)
+        total = int(np.asarray(valid, dtype=bool).sum())
+    else:
+        rgb = sub.reshape(-1, 3)
+        total = int(region.shape[0] * region.shape[1])
     n = rgb.shape[0]
     lab = cs.srgb8_to_lab(rgb)
     lch = cs.lab_to_lch(lab)

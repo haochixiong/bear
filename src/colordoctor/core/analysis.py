@@ -14,8 +14,11 @@ from colordoctor.core import diagnosis_rules as dr
 from colordoctor.core import portrait_analysis as pa
 from colordoctor.core import recommendations as rec
 from colordoctor.core import region_statistics as rs
+from colordoctor.core import skin_mask as skin_mask_mod
 from colordoctor.core import skin_presets as sp
+from colordoctor.core import skin_uniformity as su
 from colordoctor.core.color_models import (
+    Adjustment,
     AnalysisReport,
     ColorContext,
     Finding,
@@ -265,13 +268,48 @@ def analyze_region(region: np.ndarray, context: ColorContext, rect=None) -> Anal
 
 # ------------------------------------------------------------------ 人像肤色
 def analyze_skin_region(
-    region: np.ndarray, context: ColorContext, preset_key: str | None = None, presets=None, rect=None, preset=None
+    region: np.ndarray,
+    context: ColorContext,
+    preset_key: str | None = None,
+    presets=None,
+    rect=None,
+    preset=None,
+    auto_mask: bool = True,
+    lasso: np.ndarray | None = None,
+    part: str | None = None,
+    other_part: tuple[str, tuple[float, float, float]] | None = None,
+    quick_rule: tuple | None = None,
+    manual_mask: np.ndarray | None = None,
 ) -> AnalysisReport:
-    stats = rs.compute_stats(region)
+    """人像肤色分析。
+
+    manual_mask：用户手动修正后的皮肤蒙版（优先于自动抠皮肤）。
+
+    auto_mask：在选区内自动只保留皮肤像素（去掉头发、眼睛、嘴唇、背景）。
+    lasso：可选的套索蒙版（与 region 同尺寸）。
+    part / other_part：部位名称，以及另一个部位的 (名称, 平均 Lab)，用于“脸部 vs 身体”对比。
+    """
+    valid = lasso
+    mask_info: dict = {}
+    if manual_mask is not None:
+        valid = manual_mask & lasso if lasso is not None else manual_mask
+        mask_info = {"skin_share": float(valid.mean()), "note": "使用手动修正后的皮肤蒙版", "manual": True}
+        auto_mask = False
+    if auto_mask:
+        m, mask_info = skin_mask_mod.skin_mask(region, within=lasso)
+        if m.sum() >= 30:
+            valid = m
+        else:
+            mask_info["note"] = (mask_info.get("note") or "") + " 自动抠皮肤失败，改用整个选区"
     if preset is None and preset_key:
         preset = sp.get_preset(preset_key, presets)
-    skin = pa.analyze_skin(region, preset)
-    ct = ct_mod.analyze(region, mode="skin", offset=_offset(rect))
+    stats = rs.compute_stats(region, valid=valid)
+    skin = pa.analyze_skin(region, preset, valid=valid)
+    ct = ct_mod.analyze(region, mode="skin", offset=_offset(rect), valid=valid)
+    uni = su.analyze_uniformity(region, mask=valid, offset=_offset(rect))
+    rule = quick_rule or (preset.quick_rule if preset is not None and preset.quick_rule else sp.global_quick_rule())
+    skin_px = _skin_pixels(region, valid)
+    qr = pa.quick_rule_check(cs.srgb8_to_lab(skin_px), rule)
     conf, reasons = dr.confidence(stats, context, ct, skin)
     chroma = dr.chroma_component_skin(ct, skin)
     components = [
@@ -282,8 +320,11 @@ def analyze_skin_region(
         dr.lightness_component(stats, chroma.score),
         dr.outlier_component(stats, ct),
         dr.skin_cast_component(skin),
+        dr.uniformity_component(uni),
     ]
     findings = _component_findings(components, ct, conf, reasons, skin=True, skin_report=skin)
+    findings.append(_quick_rule_finding(qr, part, conf))
+    findings += _uniformity_findings(uni, conf, reasons)
     sc = {c.key: c for c in components}["skin_cast"]
     if sc.severity != Severity.NORMAL:
         target = (sp.get_preset("natural", presets) if preset is None else preset).target_lab
@@ -293,12 +334,12 @@ def analyze_skin_region(
                 severity=sc.severity,
                 evidence=sc.evidence,
                 causes=("白平衡（色温/色调）偏移", "HSL 橙色/红色的色相被移动"),
-                adjustments=tuple(a for a in rec.skin_adjustments(_skin_pixels(region), target) if a.tool == "Camera Raw"),
+                adjustments=tuple(a for a in rec.skin_adjustments(skin_px, target) if a.tool == "Camera Raw"),
                 confidence=conf,
                 notes=(sc.note,) + tuple(reasons),
             )
         )
-    if skin.mixed_region:
+    if skin.mixed_region and valid is None:
         findings.append(
             Finding(
                 problem="选区不够纯净，建议重新框选皮肤",
@@ -307,14 +348,16 @@ def analyze_skin_region(
                 causes=("框进了头发、眼睛、眉毛、背景或衣服",),
                 adjustments=(),
                 confidence=conf,
-                notes=("请重新选择脸颊、额头等较平整、无妆容遮盖的皮肤区域",),
+                notes=("请重新选择脸颊、额头等较平整的皮肤区域，或开启“自动抠皮肤”/使用套索",),
             )
         )
+    if other_part is not None:
+        findings.append(_part_compare_finding(part or "当前部位", skin.mean_lab, other_part, skin_px, conf))
     adjustments = ()
     if preset is not None:
         cmp = pa.compare_to_preset(skin, preset)
         fit = pa.preset_fit(skin, preset)
-        adjustments = tuple(rec.skin_adjustments(_skin_pixels(region), preset.target_lab))
+        adjustments = tuple(rec.skin_adjustments(skin_px, preset.target_lab))
         if cmp.delta_e00 >= 2:
             findings.append(
                 Finding(
@@ -329,13 +372,112 @@ def analyze_skin_region(
                 )
             )
     return _finalize(
-        "skin", context, stats, components, findings, reasons, conf, contamination=ct, skin=skin, adjustments=adjustments, region=rect
+        "skin",
+        context,
+        stats,
+        components,
+        findings,
+        reasons,
+        conf,
+        contamination=ct,
+        skin=skin,
+        adjustments=adjustments,
+        region=rect,
+        part=part,
+        quick_rule=qr,
+        uniformity=uni,
+        valid_mask=valid,
+        mask_info=mask_info,
     )
 
 
-def _skin_pixels(region: np.ndarray) -> np.ndarray:
-    sub, _ = grid_downsample(region, 20_000)
+def _quick_rule_finding(qr, part, conf) -> Finding:
+    (alo, ahi), (blo, bhi) = qr.a_range, qr.b_range
+    ok = "✓" if qr.passed else "✗"
+    return Finding(
+        problem=f"{ok} 经验快速判定（{part or '肤色'}）：{qr.verdict}",
+        severity=Severity.NORMAL if qr.passed else Severity.MILD,
+        evidence=(
+            f"平均 a* {qr.a:.1f}（{alo:g}–{ahi:g}）{'✓' if qr.a_ok else '✗'}，"
+            f"b* {qr.b:.1f}（{blo:g}–{bhi:g}）{'✓' if qr.b_ok else '✗'}，"
+            f"|a*−b*| {abs(qr.a - qr.b):.1f}（≤{qr.max_diff:g}）{'✓' if qr.diff_ok else '✗'}",
+            f"皮肤像素中满足该规则的比例：{qr.pixel_pass_share:.0%}",
+        ),
+        causes=(),
+        adjustments=tuple(Adjustment("提示", t, None, True) for t in qr.tips),
+        confidence=conf,
+        notes=("规则可在 skin_presets.json 的 quick_rule 中修改；部分风格（如法式、小麦、深肤色）有自己的区间",),
+    )
+
+
+def _uniformity_findings(uni, conf, reasons) -> list[Finding]:
+    out = []
+    if uni is None or not uni.patches:
+        return out
+    words = {
+        "偏黄": ("比其他皮肤更黄", "局部画笔：色温往蓝一点，或在该处 HSL 黄色/橙色色相往红、饱和度略降"),
+        "偏红橙": ("比其他皮肤更红/更橙", "局部画笔：色调往绿一点，或 HSL 红色/橙色色相往黄、饱和度略降"),
+        "偏洋红": ("偏洋红/偏紫", "局部画笔：色调往绿；或 色相/饱和度 选洋红降饱和"),
+        "偏青绿": ("偏青、偏绿", "局部画笔：色调往洋红、色温往黄；或 可选颜色 青色 减青"),
+        "缺色发灰": ("色度明显低于同明度的皮肤（缺色、发灰）", "局部画笔：饱和度/自然饱和度加一点，或 HSL 橙色饱和度提高（配合蒙版）"),
+        "饱和度偏高": ("比其他皮肤更艳", "局部画笔：饱和度降一点，或 HSL 橙色/红色饱和度降低（配合蒙版）"),
+    }
+    for kind in dict.fromkeys(p.kind for p in uni.patches):
+        ps = [p for p in uni.patches if p.kind == kind]
+        area = sum(p.area_fraction for p in ps)
+        sev = Severity.NOTABLE if any(p.severity == "明显" for p in ps) else Severity.MILD
+        desc, fix = words[kind]
+        out.append(
+            Finding(
+                problem=f"肤色不均匀：{len(ps)} 处{kind}（占皮肤 {area:.0%}）",
+                severity=sev,
+                evidence=tuple(
+                    f"位置 x {p.bbox[0]}, y {p.bbox[1]}，{p.bbox[2]}×{p.bbox[3]}：{desc}，"
+                    f"色相 {p.hue_shift:+.1f}°，饱和度 {p.sat_shift:+.0%}，Lab ({p.lab[0]:.0f}, {p.lab[1]:.1f}, {p.lab[2]:.1f})"
+                    for p in ps[:4]
+                )
+                + (f"整体色相中位 h {uni.median_hue:.1f}°，均匀度 {uni.score:.0f}/100",),
+                causes=("光线不均（窗光/反光/不同光源）", "局部调整（画笔、蒙版）边缘没过渡好", "皮肤本身的红血丝、晒痕或妆容"),
+                adjustments=(Adjustment("Camera Raw / PS 局部", fix, "轻微"),),
+                confidence=conf,
+                notes=("“问题位置”页会标出这些区域",) + tuple(reasons[:1]),
+            )
+        )
+    return out
+
+
+def _part_compare_finding(part, lab, other, skin_px, conf) -> Finding:
+    other_name, other_lab = other
+    c = pa.compare_lab(other_lab, lab)
+    parts = []
+    if abs(c.dL) >= 3:
+        parts.append(f"{'更暗' if c.dL < 0 else '更亮'} {abs(c.dL):.1f}")
+    if abs(c.dh) >= 4 and np.hypot(c.da, c.db) >= 2:
+        parts.append("更黄" if c.dh > 0 else "更红")
+    if abs(c.dC) >= 3:
+        parts.append(f"{'更灰' if c.dC < 0 else '更艳'} {abs(c.dC):.1f}")
+    sev = severity_from_score(dr._interp(c.delta_e00, ([0, 3, 5, 8, 12], [0, 20, 45, 65, 80])))
+    return Finding(
+        problem=f"{part}与{other_name}的肤色差异：ΔE00 {c.delta_e00:.1f}" + (f"（{part}{'、'.join(parts)}）" if parts else "（基本一致）"),
+        severity=sev,
+        evidence=(
+            f"{other_name} Lab ({other_lab[0]:.1f}, {other_lab[1]:.1f}, {other_lab[2]:.1f})，{part} Lab ({lab[0]:.1f}, {lab[1]:.1f}, {lab[2]:.1f})",
+            f"ΔL* {c.dL:+.1f}，Δa* {c.da:+.1f}，Δb* {c.db:+.1f}，ΔC* {c.dC:+.1f}，Δh {c.dh:+.1f}°",
+        ),
+        causes=("脸部和身体受光不同", "只对脸部做了局部调整", "化妆（粉底色号）与身体肤色不同"),
+        adjustments=tuple(rec.skin_adjustments(skin_px, other_lab)),
+        confidence=conf,
+        notes=(f"调整方向是把{part}拉向{other_name}；如果想反过来，请在另一部位上分析",),
+    )
+
+
+def _skin_pixels(region: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray:
+    sub, step = grid_downsample(region, 20_000)
     px = sub.reshape(-1, 3)
+    if valid is not None:
+        v = ct_mod.downsample_mask(valid, step, sub.shape[:2]).reshape(-1)
+        if v.sum() >= 10:
+            return px[v]
     lch = cs.lab_to_lch(cs.srgb8_to_lab(px))
     sel = (lch[:, 1] >= 3) & (lch[:, 2] <= 110) & (lch[:, 0] >= 10) & (lch[:, 0] <= 98)
     return px[sel] if sel.sum() >= 10 else px
@@ -447,3 +589,111 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None) -> AnalysisR
             )
         )
     return _finalize("scan", context, stats, components, findings, reasons, conf, contamination=ct, region=rect)
+
+
+# ------------------------------------------------------------------ 整图色彩
+def analyze_palette_report(
+    image: np.ndarray, context: ColorContext, style_key: str | None = None, family: str | None = None,
+    family_target_lab=None, rect=None,
+) -> AnalysisReport:
+    """整图色彩：缺色/丰富度、6:3:1、颜色统一、与风格模板的差距。"""
+    from colordoctor.core import palette as pl
+
+    stats = rs.compute_stats(image, with_clusters=False)
+    pr = pl.analyze_palette(image, style_key, family, family_target_lab, offset=_offset(rect))
+    conf, reasons = dr.confidence(stats, context)
+    findings: list[Finding] = []
+    cf = pr.colorfulness
+    style = pr.style
+    lo, hi = style.colorfulness_range if style else (15.0, 200.0)
+    if cf.value < lo:
+        sev = Severity.NOTABLE if cf.value < lo * 0.6 else Severity.MILD
+        findings.append(Finding(
+            problem=f"整体缺色/发灰：色彩丰富度 {cf.value:.0f}（{cf.label}）" + (f"，低于「{style.name}」的 {lo:g}" if style else ""),
+            severity=sev,
+            evidence=(f"有彩像素平均色度 C* {cf.mean_chroma:.1f}，P90 色度 {cf.p90_chroma:.1f}", f"有彩像素占 {cf.chromatic_share:.0%}"),
+            causes=("整体降饱和过多、去朦胧为负", "曝光/对比偏低导致发闷", "白平衡把颜色中和掉了"),
+            adjustments=(
+                Adjustment("Camera Raw", "自然饱和度 +10 ~ +25（比饱和度更保护肤色）", "小幅"),
+                Adjustment("曲线", "RGB 曲线加一点 S 形对比", "轻微"),
+                Adjustment("Camera Raw 混色器", "只提高主色所在通道的饱和度，其他颜色保持", "小幅"),
+            ),
+            confidence=conf,
+            notes=("低饱和风格（莫兰迪、日系）本身不是错误；请选择对应风格再判断",),
+        ))
+    elif style and cf.value > hi:
+        findings.append(Finding(
+            problem=f"颜色过艳：色彩丰富度 {cf.value:.0f}，高于「{style.name}」的 {hi:g}",
+            severity=Severity.MILD, evidence=(f"P90 色度 {cf.p90_chroma:.1f}",), causes=("饱和度/自然饱和度过高",),
+            adjustments=(Adjustment("Camera Raw", "饱和度或自然饱和度降低 10 ~ 20", "小幅"),), confidence=conf,
+        ))
+    r = pr.ratio
+    findings.append(Finding(
+        problem=f"色彩比例（6:3:1）：{r.verdict}，得分 {r.score:.0f}",
+        severity=Severity.NORMAL if r.score >= 75 else (Severity.MILD if r.score >= 55 else Severity.NOTABLE),
+        evidence=tuple(f"{role}：{p.family} {p.share:.0%}（Lab {p.lab[0]:.0f}, {p.lab[1]:.0f}, {p.lab[2]:.0f}）"
+                       for role, p in zip(("主色", "辅色", "点缀色"), r.roles)) + (f"其余颜色 {r.other_share:.0%}",),
+        causes=(),
+        adjustments=tuple(Adjustment("构图/调色", t, None, True) for t in r.tips),
+        confidence=conf,
+        notes=("6:3:1 是设计和电影常用的经验比例，不是硬性规则；中性色（黑白灰）也算一种颜色",),
+    ))
+    if pr.unity is not None:
+        u = pr.unity
+        findings.append(Finding(
+            problem=f"“{u.family}”统一度 {u.score:.0f}/100" + ("（不统一）" if u.score < 70 else "（基本统一）"),
+            severity=Severity.NORMAL if u.score >= 80 else (Severity.MILD if u.score >= 60 else Severity.NOTABLE),
+            evidence=(f"{u.family}占画面 {u.share:.0%}，色相标准差 {u.hue_spread:.1f}°，饱和度变异 {u.sat_cv:.0%}，明度标准差 {u.lightness_std:.1f}",)
+            + ((f"与目标相差 ΔE00 {u.delta_e_to_target:.1f}",) if u.delta_e_to_target is not None else ())
+            + tuple(f"位置 x {p.bbox[0]}, y {p.bbox[1]}，{p.bbox[2]}×{p.bbox[3]}：{p.note}" for p in u.patches[:4]),
+            causes=("不同光源/阴影里的同一种颜色偏向不同", "混色器只调了部分通道"),
+            adjustments=u.adjustments,
+            confidence=conf,
+        ))
+    if style is not None:
+        findings.append(Finding(
+            problem=f"与「{style.name}」风格的差距：匹配度 {style.score:.0f}/100",
+            severity=Severity.NORMAL if style.score >= 80 else (Severity.MILD if style.score >= 60 else Severity.NOTABLE),
+            evidence=style.gaps,
+            causes=(),
+            adjustments=style.adjustments,
+            confidence=conf,
+            notes=("滑块数值为估算（Adobe 未公开算法），先按方向调整，再重新分析看差距",) + style.notes,
+        ))
+    comps = [
+        dr._rc("chroma_compression", dr._interp(max(0.0, lo - cf.value), ([0, 5, 15, 30], [0, 25, 50, 75])),
+               [f"色彩丰富度 {cf.value:.0f}（{cf.label}）"]),
+    ]
+    return _finalize("palette", context, stats, comps, findings, reasons, conf, palette=pr, region=rect)
+
+
+def compare_reference(mine: np.ndarray, ref: np.ndarray, context: ColorContext, skin_mine=None, skin_ref=None, rect=None) -> AnalysisReport:
+    """仿色：参考是什么色彩，我的图差多少，适不适合照着调。"""
+    from colordoctor.core import reference_match as rm
+
+    stats = rs.compute_stats(mine, with_clusters=False)
+    m = rm.match_reference(mine, ref, skin_mine, skin_ref)
+    conf, reasons = dr.confidence(stats, context)
+    sev = Severity.NORMAL if m.similarity >= 80 else (Severity.MILD if m.similarity >= 60 else Severity.NOTABLE)
+    findings = [
+        Finding(
+            problem=f"与参考的相似度 {m.similarity:.0f}/100",
+            severity=sev,
+            evidence=m.gaps + tuple(f"参考主色 {f}（{s:.0%}）↔ 我的 {mf}，ΔE00 {de:.0f}" for f, s, mf, de in m.palette_match),
+            causes=(),
+            adjustments=m.adjustments,
+            confidence=conf,
+            notes=("曲线点对影调分位数是精确的；颜色分级和混色器数值为估算",),
+        ),
+        Finding(
+            problem="合不合适照着调：" + ("比较合适" if len(m.fit) == 1 and "适合" in m.fit[0] else "有需要注意的地方"),
+            severity=Severity.NORMAL if (len(m.fit) == 1 and "适合" in m.fit[0]) else Severity.MILD,
+            evidence=m.fit,
+            causes=(),
+            adjustments=(),
+            confidence=conf * 0.8,
+            notes=("这是基于数值的规则判断；需要审美层面的意见可以用“AI 点评”",),
+        ),
+    ]
+    comps = [dr._rc("chroma_compression", 0.0, [f"色彩丰富度 参考 {m.colorfulness_ref:.0f} / 我的 {m.colorfulness_mine:.0f}"])]
+    return _finalize("reference", context, stats, comps, findings, reasons, conf, reference=m, region=rect)

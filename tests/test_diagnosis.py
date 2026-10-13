@@ -1,5 +1,6 @@
 """诊断规则、置信度、建议映射与总体流程（含误报专项）。"""
 
+import numpy as np
 import pytest
 
 from colordoctor.core import analysis as an
@@ -148,12 +149,39 @@ def test_skin_preset_target_gives_ps_parameters():
     assert any("色温" in a.instruction for a in acr)
 
 
-def test_skin_mixed_region_warns_reselect():
+def test_skin_mixed_region_warns_reselect_without_auto_mask():
+    img = skin_region()
+    img[:, :50] = lch_color(40, 30, 250)
+    r = an.analyze_skin_region(img, CTX, auto_mask=False)
+    assert any("重新" in n for f in r.findings for n in f.notes) or any("重新" in f.problem for f in r.findings)
+    assert r.confidence < 0.75
+
+
+def test_skin_auto_mask_excludes_background():
     img = skin_region()
     img[:, :50] = lch_color(40, 30, 250)
     r = an.analyze_skin_region(img, CTX)
-    assert any("重新" in n for f in r.findings for n in f.notes) or any("重新" in f.problem for f in r.findings)
-    assert r.confidence < 0.75
+    assert r.valid_mask is not None
+    assert not r.valid_mask[:, :50].any()
+    assert r.mask_info["skin_share"] == pytest.approx(70 / 120, abs=0.05)
+    assert r.skin.tendency == "正常"
+
+
+def test_skin_report_has_quick_rule_and_uniformity():
+    r = an.analyze_skin_region(skin_region(68, 14, 18), CTX)
+    assert r.quick_rule.passed
+    assert any("经验快速判定" in f.problem for f in r.findings)
+    assert r.uniformity.score > 80
+
+
+def test_face_vs_body_comparison():
+    face = skin_region(70, 13, 18)
+    body = skin_region(64, 12, 24)  # 身体更暗更黄
+    rb = an.analyze_skin_region(body, CTX, part="身体")
+    rf = an.analyze_skin_region(face, CTX, part="脸部", other_part=("身体", rb.skin.mean_lab))
+    f = [x for x in rf.findings if "脸部与身体" in x.problem][0]
+    assert "更亮" in f.problem
+    assert f.adjustments
 
 
 # ------------------------------------------------------------------ 参考对比
@@ -226,3 +254,11 @@ def test_scan_teal_orange_clean():
     img[30:110, 50:110] = orange
     r = an.scan_image(noisy(img, 2), CTX)
     assert sev_rank(r.overall_severity) <= 1
+
+
+def test_manual_mask_overrides_auto():
+    img = skin_region()
+    m = np.zeros(img.shape[:2], bool)
+    m[:, 60:] = True
+    r = an.analyze_skin_region(img, CTX, manual_mask=m)
+    assert r.mask_info.get("manual") and not r.valid_mask[:, :60].any()
