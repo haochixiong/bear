@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colordoctor"
+version = "0.1.0"
+description = "人像色彩诊断取色器：屏幕/Photoshop 取色、脏色定位、肤色风格对比与调整建议（离线）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.7,<7",
+    "numpy>=1.26",
+    "Pillow>=10.3,<13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.4", "hypothesis>=6.100"]
+
+[project.scripts]
+colordoctor = "colordoctor.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+colordoctor = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+qt_api = "pyqt6"
