@@ -220,7 +220,51 @@ async function cameraRawLayer(name) {
   await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {});
 }
 
+// Camera Raw 滤镜的参数描述符：录制前为 null。
+// TODO(Windows)：用 Alchemist 录“滤镜 → Camera Raw 滤镜”（改一个混色器滑块后确定），
+// 把录到的描述符改写成 params -> descriptor 的函数赋给 ACR_DESCRIPTOR，校准和“直接写入参数”就能用了。
+let ACR_DESCRIPTOR = null;
+
+function acrDescriptorReady() {
+  return typeof ACR_DESCRIPTOR === "function";
+}
+
+async function applyCameraRaw(layer, params) {
+  if (!acrDescriptorReady()) throw new Error("Camera Raw 滤镜的命令格式还没有录制（见 docs/STAGE6_HANDOFF.md P9）");
+  await action.batchPlay([
+    { _obj: "select", _target: [{ _ref: "layer", _id: layer.id }], makeVisible: false },
+    { ...ACR_DESCRIPTOR(params), _options: { dialogOptions: "dontDisplay" } },
+  ], {});
+}
+
+// 新建 sRGB 文档，把色卡像素放进一个像素图层。必须在 executeAsModal 里调用。
+async function createChartDocument(px) {
+  const doc = await app.createDocument({
+    width: px.width, height: px.height, resolution: 72, mode: "RGBColorMode", fill: "white",
+    name: "ColorDoctor 校准色卡",
+  });
+  const layer = await doc.createPixelLayer({ name: "色卡" });
+  const img = await imaging.createImageDataFromBuffer(px.data, {
+    width: px.width, height: px.height, components: 3, chunky: true, colorSpace: "RGB", colorProfile: "sRGB IEC61966-2.1",
+  });
+  try {
+    await imaging.putPixels({ documentID: doc.id, layerID: layer.id, imageData: img, replace: true });
+  } finally {
+    img.dispose();
+  }
+  return { doc, layer };
+}
+
+async function duplicateLayer(layer) {
+  return layer.duplicate();
+}
+
+async function deleteLayer(layer) {
+  await layer.delete();
+}
+
 module.exports = {
+  acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer,
   constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor },

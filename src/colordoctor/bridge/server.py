@@ -133,7 +133,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "findings": to_jsonable(list(report.findings)),
         "adjustments": to_jsonable(list(report.adjustments)),
         "plan": plan.to_json(),
-        "acr_params": acr_preset.params_from_adjustments(report.adjustments),
+        "acr_params": acr_preset.params_for_report(report),
         "acr_calibrated": acr_channels.is_calibrated(),
     }
 

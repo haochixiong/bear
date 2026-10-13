@@ -122,6 +122,15 @@ function dirtySky(w, h) {
   assert.ok(Math.abs(patch.values.lab[0] - 68.3) < 1.5, JSON.stringify(patch.values.lab));
   const xmp = await bridge.acrPreset("测试", { hsl: { 绿色: { hue: 60 } } });
   assert.ok(xmp.includes('crs:HueAdjustmentGreen="+60"'));
+  // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
+  fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
+  fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };
+  const chart = await bridge.calibrationChart();
+  const made = await ps.createChartDocument(chart);
+  assert.strictEqual(made.layer.id, 55);
+  assert.strictEqual(calls.putPixels.imageData.width, chart.width);
+  assert.ok(!ps.acrDescriptorReady());
+  await assert.rejects(ps.applyCameraRaw(made.layer, {}), /录制/);
   console.log("PLUGIN JS OK");
 })().catch((e) => {
   console.error(e);

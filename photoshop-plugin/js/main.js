@@ -272,7 +272,10 @@ function renderAcr(p, calibrated) {
 }
 
 function acrParamsFromTable() {
+  // 表格里只有混色器和颜色分级；曲线等其他参数沿用分析结果
+  const base = (state.result && state.result.acr_params) || {};
   const out = {};
+  for (const [k, v] of Object.entries(base)) if (k !== "hsl" && k !== "grading") out[k] = v;
   document.querySelectorAll("[data-acr]").forEach((inp) => {
     const v = Number(inp.value);
     if (!v) return;
@@ -303,7 +306,31 @@ async function acrLayer() {
 
 // ---------------------------------------------------------------- ACR 滑块校准（需要 Camera Raw 描述符，见 ps.js 的 TODO）
 async function calibrate() {
-  $("results").innerHTML = `<div class="blocked">ACR 滑块校准需要先在 Windows 上确认 Camera Raw 滤镜的 batchPlay 描述符（见 docs/STAGE6_HANDOFF.md），这一步还没完成。</div>`;
+  if (!ps.acrDescriptorReady()) {
+    $("results").innerHTML = `<div class="blocked">ACR 滑块校准需要 Camera Raw 滤镜的 batchPlay 命令格式。这一步要在 Windows 上用 Alchemist 录制一次（见 docs/STAGE6_HANDOFF.md 的 P9），录好之前无法自动校准。</div>`;
+    return;
+  }
+  const progress = (t) => { $("status").className = "status"; $("status").textContent = t; };
+  try {
+    const chart = await bridge.calibrationChart();
+    const steps = await bridge.calibrationPlan();
+    await ps.modal("ColorDoctor 校准", async () => {
+      const { doc, layer } = await ps.createChartDocument(chart);
+      const info = { ok: true, doc, layer, bounds: { left: 0, top: 0, right: chart.width, bottom: chart.height } };
+      await bridge.calibrationSample(await ps.readPixels(info), { slider: "base" });
+      for (let i = 0; i < steps.length; i++) {
+        const st = steps[i];
+        progress(`正在校准 ${i + 1}/${steps.length}：${st.channel} ${st.slider} ${st.value}`);
+        const dup = await ps.duplicateLayer(layer);
+        await ps.applyCameraRaw(dup, { hsl: { [st.channel]: { [st.slider]: st.value } } });
+        await bridge.calibrationSample(await ps.readPixels({ ...info, layer: dup }), st);
+        await ps.deleteLayer(dup);
+      }
+    });
+    const res = await bridge.calibrationFit(app.version);
+    progress(`校准完成：${Object.keys(res.channels).length} 个通道，已保存到 ${res.saved}`);
+    renderAcr((state.result && state.result.acr_params) || {}, true);
+  } catch (e) { renderError(e); }
 }
 
 // ---------------------------------------------------------------- 启动

@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from colordoctor.core.color_management import synthetic_context
@@ -95,3 +96,48 @@ def test_palette_and_reference_modes():
     item = s.add_rect(img, (0, 0, 100, 80), rep, "x", role="参考图")
     out = s.compute_reference(item, noisy(flat(YELLOW, 80, 100), 2), CTX, (0, 0, 100, 80))
     assert out.mode == "reference"
+
+
+def test_ai_skin_mask_used_when_enabled(monkeypatch):
+    from synth import face_scene
+
+    from colordoctor.core import segmentation as sg
+    from colordoctor.core.color_management import synthetic_context
+    from colordoctor.ui import session as ss
+
+    img, truth = face_scene(160, 160)
+    calls = []
+
+    def fake(region, refine_with_color=True, session=None):
+        calls.append(region.shape)
+        return sg.SkinSegmentation(truth.copy(), np.zeros_like(truth), truth.astype(np.uint8), "Fake")
+
+    monkeypatch.setattr(sg, "segment_skin", fake)
+    s = ss.Session()
+    s.mode, s.part, s.ai_seg = "skin", "脸部", True
+    rep = s.compute_rect(img, synthetic_context(), (0, 0, 160, 160))
+    assert calls and rep.valid_mask is not None
+    assert (rep.valid_mask & ~truth).sum() == 0
+
+    # 身体部分为空 -> 退回肤色规则，并提示
+    s.part = "身体"
+    rep = s.compute_rect(img, synthetic_context(), (0, 0, 160, 160))
+    assert any("肤色规则" in w for w in rep.context.warnings)
+
+
+def test_ai_skin_mask_unavailable_falls_back(monkeypatch):
+    from synth import face_scene
+
+    from colordoctor.core import segmentation as sg
+    from colordoctor.core.color_management import synthetic_context
+    from colordoctor.ui import session as ss
+
+    def boom(*a, **k):
+        raise sg.SegmentationUnavailable("找不到模型文件")
+
+    monkeypatch.setattr(sg, "segment_skin", boom)
+    img, _ = face_scene(120, 120)
+    s = ss.Session()
+    s.mode, s.ai_seg = "skin", True
+    rep = s.compute_rect(img, synthetic_context(), (0, 0, 120, 120))
+    assert any("找不到模型" in w for w in rep.context.warnings)

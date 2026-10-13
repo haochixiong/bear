@@ -219,12 +219,19 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
             layers.append(LayerSpec(f"unity_{i}", f"{u.family}统一 {i + 1} · 色相/饱和度", "hueSaturation",
                                     _huesat(idx, ramps, hue=hue), f"{p.note}：{rname} 色相 {hue:+d}",
                                     feather(_bbox_mask(shape, [p.bbox], offset), rad)))
+    # 5) 仿色：把影调拉向参考的 RGB 复合曲线（全图，无蒙版）
+    ref = getattr(report, "reference", None)
+    if ref is not None and getattr(ref, "curve_points", None):
+        pts = [(0, 0), *[(int(a), int(b)) for a, b in ref.curve_points], (255, 255)]
+        pts = sorted({p[0]: p for p in pts}.values())
+        layers.append(curves_layer("ref_curve", "仿色影调 · 曲线", {"composite": pts},
+                                   "把影调拉向参考：" + "；".join(f"{a}→{b}" for a, b in ref.curve_points)))
     name = group_name or f"ColorDoctor · {_MODE_NAME.get(report.mode, report.mode)}"
     return LayerPlan(name, w, h, layers)
 
 
 _KIND_NAME = {"hueSaturation": "色相/饱和度", "colorBalance": "色彩平衡", "vibrance": "自然饱和度", "curves": "曲线"}
-_MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色"}
+_MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色", "reference": "仿色"}
 
 
 def _skin_layer(kind: str, dh: float, ds: float):

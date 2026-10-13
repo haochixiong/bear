@@ -245,3 +245,21 @@ def test_http_options(bridge):
     code, _, body = _req(bridge + "/options")
     res = json.loads(body)
     assert code == 200 and len(res["styles"]) >= 28 and res["presets"] and "绿" in res["families"]
+
+
+def test_reference_plan_has_curve_and_acr_params():
+    from synth import lch_color as lc
+
+    mine = noisy(flat(lc(60, 30, 250), 120, 160), 2)
+    mine[:, :60] = lc(70, 25, 60)
+    ref = noisy(flat(lc(35, 30, 205), 120, 160), 2)
+    ref[:, :60] = lc(55, 35, 55)
+    refs = bs.Store()
+    rid = refs.put(ref)
+    res = bs.analyze_request(mine, "reference", {"ref": rid}, bs.Store(), refs, layer_kind="pixel")
+    kinds = {ly["id"]: ly["kind"] for ly in res["plan"]["layers"]}
+    assert kinds.get("ref_curve") == "curves", kinds
+    assert "curve" in res["acr_params"] and res["acr_params"]["curve"]["composite"]
+    from colordoctor.core import acr_preset as ap
+
+    assert "ToneCurvePV2012" in ap.build_xmp("t", res["acr_params"])

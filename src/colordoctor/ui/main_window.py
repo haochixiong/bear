@@ -105,10 +105,11 @@ class JpgSelectDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent, hotkeys: dict[str, str], ai: dict | None = None):
+    def __init__(self, parent, hotkeys: dict[str, str], ai: dict | None = None, other: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("设置")
         ai = ai or {}
+        other = other or {}
         form = QFormLayout(self)
         self.lock = QLineEdit(hotkeys["lock_sample"])
         self.cap = QLineEdit(hotkeys["capture"])
@@ -123,6 +124,13 @@ class SettingsDialog(QDialog):
         btn = QPushButton("打开风格预设文件夹（可放置 skin_presets.json 覆盖/新增风格）")
         btn.clicked.connect(self._open_presets)
         form.addRow(btn)
+        # ---- RAW 与 PS 插件
+        self.raw_preview = QCheckBox("打开 RAW 时使用内嵌的 JPG 预览（相机直出的颜色；否则用 LibRaw 解码）")
+        self.raw_preview.setChecked(bool(other.get("raw_preview")))
+        form.addRow(self.raw_preview)
+        self.bridge = QCheckBox("允许 Photoshop 插件连接（本机服务，只监听 127.0.0.1；重启后生效）")
+        self.bridge.setChecked(bool(other.get("bridge", True)))
+        form.addRow(self.bridge)
         # ---- AI 点评（可选，默认关闭）
         form.addRow(QLabel("<b>AI 点评（可选）</b>"))
         self.ai_enabled = QCheckBox("启用 AI 点评（会把分析数值发送给你选择的 AI）")
@@ -160,6 +168,9 @@ class SettingsDialog(QDialog):
 
     def values(self) -> dict[str, str]:
         return {"lock_sample": self.lock.text().strip(), "capture": self.cap.text().strip()}
+
+    def other_values(self) -> dict:
+        return {"raw_preview": self.raw_preview.isChecked(), "bridge": self.bridge.isChecked()}
 
     def ai_values(self) -> dict:
         return {
@@ -294,12 +305,21 @@ class MainWindow(QMainWindow):
         self.auto_mask_check.setChecked(True)
         self.auto_mask_check.setToolTip("只统计选区里的皮肤像素（自动去掉头发、眼睛、嘴唇、背景）")
         self.auto_mask_check.toggled.connect(lambda v: setattr(self.session, "auto_mask", v))
+        from colordoctor.core import segmentation as sg
+
+        seg_ok, seg_why = sg.available()
+        self.ai_seg_check = QCheckBox("AI 抠皮肤")
+        self.ai_seg_check.setEnabled(seg_ok)
+        self.ai_seg_check.setToolTip(f"用 AI 人像分割区分脸部 / 身体皮肤（本机运行：{seg_why}）" if seg_ok else seg_why)
+        self.ai_seg_check.setChecked(seg_ok and self.settings.value("seg/ai", True, type=bool))
+        self.session.ai_seg = self.ai_seg_check.isChecked()
+        self.ai_seg_check.toggled.connect(self._toggle_ai_seg)
         self.lasso_check = QCheckBox("套索")
         self.lasso_check.setToolTip("框选屏幕/JPG 时用自由套索圈出皮肤，而不是矩形")
         self.edit_mask_btn = QPushButton("编辑皮肤蒙版")
         self.edit_mask_btn.setToolTip("自动抠出的皮肤多了或少了：用画笔/魔棒手动添加或删除")
         self.edit_mask_btn.clicked.connect(self.edit_skin_mask)
-        for wdg in (QLabel("部位"), self.part_box, self.auto_mask_check, self.lasso_check, self.edit_mask_btn):
+        for wdg in (QLabel("部位"), self.part_box, self.auto_mask_check, self.ai_seg_check, self.lasso_check, self.edit_mask_btn):
             r.addWidget(wdg)
         lay.addWidget(self.skin_row)
         # 整图色彩选项
@@ -442,10 +462,19 @@ class MainWindow(QMainWindow):
             "model": str(g("ai/model", "")),
         }
 
+    def _toggle_ai_seg(self, v: bool):
+        self.session.ai_seg = v
+        self.settings.setValue("seg/ai", "true" if v else "false")
+
     def open_settings(self):
         old_ai = self._ai_settings()
-        dlg = SettingsDialog(self, self._hotkey_texts(), old_ai)
+        other = {"raw_preview": self.settings.value("raw/use_preview", False, type=bool),
+                 "bridge": self.settings.value("bridge/enabled", True, type=bool)}
+        dlg = SettingsDialog(self, self._hotkey_texts(), old_ai, other)
         if dlg.exec():
+            o = dlg.other_values()
+            self.settings.setValue("raw/use_preview", "true" if o["raw_preview"] else "false")
+            self.settings.setValue("bridge/enabled", "true" if o["bridge"] else "false")
             ai = dlg.ai_values()
             if ai["enabled"] and not old_ai["enabled"]:
                 ok = QMessageBox.question(

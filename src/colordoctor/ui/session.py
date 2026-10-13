@@ -47,6 +47,21 @@ class HistoryItem:
         return time.strftime("%H:%M:%S", time.localtime(self.created))
 
 
+def ai_skin_mask(region: np.ndarray, ctx: ColorContext, part: str | None):
+    """AI 抠皮肤；不可用或没找到皮肤时返回 (None, 带提示的 ctx)，交给肤色规则处理。"""
+    import dataclasses
+
+    from colordoctor.core import segmentation as sg
+
+    try:
+        mask = sg.segment_skin(region[..., :3]).part(part)
+    except sg.SegmentationUnavailable as e:
+        return None, dataclasses.replace(ctx, warnings=(*ctx.warnings, f"{e}；已改用肤色规则抠皮肤"))
+    if not mask.any():
+        return None, dataclasses.replace(ctx, warnings=(*ctx.warnings, f"AI 没有在选区里找到{part or ''}皮肤，已改用肤色规则"))
+    return mask, ctx
+
+
 class Session:
     def __init__(self, presets: list[SkinPreset] | None = None):
         self.mode = "point"
@@ -59,6 +74,7 @@ class Session:
         self.reference: HistoryItem | None = None
         self.part = PARTS[0]
         self.auto_mask = True
+        self.ai_seg = False  # 用 AI 人像分割抠皮肤（需要 onnxruntime + 模型）
         self.style_key: str | None = None
         self.family: str | None = None
         self.family_target_lab = None
@@ -99,6 +115,8 @@ class Session:
     ) -> AnalysisReport:
         mode = mode or self.mode
         if mode == "skin":
+            if self.ai_seg and self.auto_mask and manual_mask is None:
+                manual_mask, ctx = ai_skin_mask(region, ctx, self.part)
             return an.analyze_skin_region(
                 region, ctx, preset=self.preset, rect=rect, auto_mask=self.auto_mask, lasso=lasso,
                 part=self.part, other_part=self.other_part(self.part), manual_mask=manual_mask,

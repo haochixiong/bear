@@ -165,3 +165,12 @@ def params_from_adjustments(adjustments) -> dict:
                 if k in keymap:
                     slot[keymap[k]] = int(round(v))
     return {k: v for k, v in out.items() if v}
+
+
+def params_for_report(report) -> dict:
+    """一份分析结果能直接写进 ACR 的全部数值：混色器、颜色分级，以及仿色的 RGB 复合曲线。"""
+    out = params_from_adjustments(getattr(report, "adjustments", ()) or ())
+    ref = getattr(report, "reference", None)
+    if ref is not None and getattr(ref, "curve_points", None):
+        out["curve"] = {"composite": [[int(a), int(b)] for a, b in ref.curve_points]}
+    return out
