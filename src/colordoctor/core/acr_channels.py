@@ -60,7 +60,9 @@ def memberships(hue_deg: np.ndarray) -> np.ndarray:
     return w
 
 
-def channel_stats(rgb_pixels: np.ndarray, min_sat: float = 8.0) -> list[ChannelStat]:
+def channel_stats(rgb_pixels: np.ndarray, min_sat: float = 8.0, primary: bool = False) -> list[ChannelStat]:
+    """primary=True：平均色相/饱和度/亮度只统计“主要属于”该通道的像素（隶属度最大），
+    否则相邻颜色（例如偏黄的绿）会把平均色相拉偏，算出方向相反的滑块。占比 share 不受影响。"""
     px = np.asarray(rgb_pixels).reshape(-1, 3)
     hsb = cs.srgb8_to_hsb(px)
     sel = hsb[:, 1] >= min_sat
@@ -70,20 +72,24 @@ def channel_stats(rgb_pixels: np.ndarray, min_sat: float = 8.0) -> list[ChannelS
     lab = cs.srgb8_to_lab(px[sel])
     m = memberships(hsb[:, 0]) * (hsb[:, 1:2] / 100.0)
     total = m.sum()
+    top = m.argmax(axis=1)
     out = []
     for i, (name, center) in enumerate(CHANNELS):
         w = m[:, i]
         tw = w.sum()
-        if tw <= 1e-9:
-            out.append(ChannelStat(name, center, 0.0, None, 0.0, 0.0, None))
+        if primary:
+            w = np.where(top == i, w, 0.0)
+        if tw <= 1e-9 or w.sum() <= 1e-9:
+            out.append(ChannelStat(name, center, round(float(tw / total), 4), None, 0.0, 0.0, None))
             continue
+        share, tw = tw / total, w.sum()
         hr = np.radians(hsb[:, 0])
         mh = float(np.degrees(np.arctan2((w * np.sin(hr)).sum(), (w * np.cos(hr)).sum())) % 360)
         out.append(
             ChannelStat(
                 name=name,
                 center=center,
-                share=round(float(tw / total), 4),
+                share=round(float(share), 4),
                 mean_hue=round(mh, 2),
                 mean_sat=round(float((w * hsb[:, 1]).sum() / tw), 2),
                 mean_bri=round(float((w * hsb[:, 2]).sum() / tw), 2),
@@ -157,6 +163,28 @@ def sat_slider(from_sat: float, to_sat: float, channel: str | None = None) -> in
 
 def lum_slider(dL: float, channel: str | None = None) -> int:
     return _slider(dL, channel, "lum_per_unit", LUM_PER_UNIT)
+
+
+SLIDER_CAP = 40  # 单条建议的上限：更大的数多半是模型外推，先调到这里、重新分析再看
+
+
+def cap_slider(v: int) -> tuple[int, str]:
+    """把滑块建议限制在 ±SLIDER_CAP 内；超出时返回说明文字。"""
+    v = int(v)
+    if abs(v) <= SLIDER_CAP:
+        return v, ""
+    c = int(np.sign(v)) * SLIDER_CAP
+    return c, f"（估算需要 {v:+d}，先调到 {c:+d}，重新分析后再看）"
+
+
+def slider_strength(v: float) -> str:
+    """强度标签由滑块数值决定，避免“小幅”配上 ±100。"""
+    m = abs(float(v))
+    return "轻微" if m < 15 else ("小幅" if m < 30 else "中等")
+
+
+def lab_hue_of(lab) -> float:
+    return float(np.degrees(np.arctan2(lab[2], lab[1])) % 360)
 
 
 def lab_hue_to_hsb_hue(lab_hue: float, L: float = 62.0, C: float = 35.0) -> float:

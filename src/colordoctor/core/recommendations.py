@@ -68,7 +68,7 @@ def acr_directions(dL: float, da: float, db: float, dC: float, dh: float, channe
     s = strength_label(dL)
     if s:
         out.append(Adjustment("Camera Raw", f"混色器 → 明亮度 → {channel}{'提高' if dL > 0 else '降低'}"
-                              + ("（只影响肤色亮度）" if skin else ""), s))
+                              + ("（会影响画面里所有橙色，不只是皮肤；需要时配合蒙版）" if skin else ""), s))
     if out:
         out.append(
             Adjustment(
@@ -82,6 +82,23 @@ def acr_directions(dL: float, da: float, db: float, dC: float, dh: float, channe
 
 def _fmt(params) -> str:
     return "，".join(f"{n} {int(v):+d}" for n, v in params if int(v) != 0) or "无需调整"
+
+
+def _cb_fmt(params) -> str:
+    """色彩平衡参数带上方向词：“中间调 黄-蓝 +14（往蓝）”。"""
+    out = []
+    for n, v in params:
+        if int(v) != 0:
+            left, right = n.split(" ")[-1].split("-")
+            out.append(f"{n} {int(v):+d}（往{right if v > 0 else left}）")
+    return "，".join(out) or "无需调整"
+
+
+NEAR_DE = 2.0  # ΔE00 低于此值视为“基本一致”：卡片写“正常/基本一致”时不给调整
+
+
+def near_hint(de: float, skin: bool = True) -> Adjustment:
+    return Adjustment("提示", f"当前{'肤色' if skin else '颜色'}与目标已经很接近（ΔE00 {de:.1f}），无需调整", None, False)
 
 
 def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool = False, skin: bool = True) -> list[Adjustment]:
@@ -101,8 +118,8 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
         tgt[0] = cur_lab[0]
     de = float(cs.delta_e_2000(cur_lab, tgt))
     out: list[Adjustment] = []
-    if de < 1.0:
-        return [Adjustment("提示", f"当前肤色与目标已经非常接近（ΔE00 {de:.1f}），无需调整", None, False)]
+    if de < NEAR_DE:
+        return [near_hint(de, skin)]
 
     # 曲线：对取样平均色精确。明度差较大时，通道曲线只改颜色（保持当前明度），
     # 明度另用下面的 RGB 复合曲线处理，避免两步叠加把明度调两次。
@@ -145,7 +162,7 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
     out.append(
         Adjustment(
             "色彩平衡",
-            f"色调：中间调，勾选“保留明度”：{_fmt(sol.params)}（模型估算，只改颜色，预计剩余色差 ΔE00 {sol.residual_de:.1f}）",
+            f"色调：{pm.CB_TONES[sol.extra['tone']]}，勾选“保留明度”：{_cb_fmt(sol.params)}（模型估算，只改颜色，预计剩余色差 ΔE00 {sol.residual_de:.1f}）",
             strength_label(float(cs.delta_e_2000(cur_lab, color_tgt))),
             estimated=True,
             params=sol.params,
@@ -153,10 +170,12 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
     )
     sol = pm.solve(x, color_tgt, "hue_saturation", ranges=ranges)
     rng_name = pm.RANGE_NAMES.get(sol.extra.get("range"), "全图")
+    light = dict(sol.params).get("明度", 0)
+    why = f"明度 {int(light):+d} 只用来抵消色相/饱和度改动带来的明暗变化" if int(light) else "只改颜色"
     out.append(
         Adjustment(
             "色相/饱和度",
-            f"编辑范围选“{rng_name}”：{_fmt(sol.params)}（模型估算，只改颜色，预计剩余色差 ΔE00 {sol.residual_de:.1f}）",
+            f"编辑范围选“{rng_name}”：{_fmt(sol.params)}（模型估算，{why}，预计剩余色差 ΔE00 {sol.residual_de:.1f}）",
             strength_label(float(cs.delta_e_2000(cur_lab, color_tgt))),
             estimated=True,
             params=sol.params,
@@ -220,8 +239,14 @@ def _acr_channel(lch) -> str:
     return ac.channel_of_lab_hue(float(lch[2])) if lch[1] >= 4 else "橙色"
 
 
-def contamination_adjustments(contaminant: str, base: str, skin: bool) -> list[Adjustment]:
+def contamination_saturation(chroma: float | None) -> int:
+    """杂色范围的降饱和量：卡片和生成的调整图层用同一个数（杂色越艳降得越多）。"""
+    return -int(np.clip(round(20 + (chroma or 0.0)), 20, 60))
+
+
+def contamination_adjustments(contaminant: str, base: str, skin: bool, chroma: float | None = None) -> list[Adjustment]:
     acr, ps = CHANNELS.get(contaminant, (contaminant, contaminant))
+    sat = contamination_saturation(chroma)
     out = [
         Adjustment(
             "Camera Raw 混色器",
@@ -229,7 +254,8 @@ def contamination_adjustments(contaminant: str, base: str, skin: bool) -> list[A
             "用画笔/蒙版只作用于问题区域",
             "小幅",
         ),
-        Adjustment("色相/饱和度", f"编辑范围选“{ps}”，饱和度降低（起步 -20），用吸管确认范围只覆盖杂色", "小幅"),
+        Adjustment("色相/饱和度", f"编辑范围选“{ps}”，饱和度 {sat}（与生成的调整图层相同，只作用于杂色位置），用吸管确认范围只覆盖杂色",
+                   "小幅" if sat > -40 else "中等", params=(("饱和度", float(sat)),)),
         Adjustment("可选颜色", f"颜色选“{ps}”，减少该颜色自身的成分（方法“相对”，起步 10%）", "轻微"),
     ]
     if skin:
@@ -246,11 +272,11 @@ def contamination_adjustments(contaminant: str, base: str, skin: bool) -> list[A
 
 
 def graying_adjustments(base: str) -> list[Adjustment]:
-    acr, ps = CHANNELS.get(base, (base, base))
+    acr, ps = (f"“{n}”" for n in CHANNELS[base]) if base in CHANNELS else ("这种颜色所在通道", "这种颜色所在范围")
     return [
-        Adjustment("Camera Raw 混色器", f"局部提高“{acr}”的饱和度（只在发灰处用蒙版）", "小幅"),
+        Adjustment("Camera Raw 混色器", f"局部提高{acr}的饱和度（只在发灰处用蒙版）", "小幅"),
         Adjustment("曲线", "发灰处的局部对比偏低：用曲线小幅加对比，或检查去朦胧/清晰度/降噪是否过度", "轻微"),
-        Adjustment("色相/饱和度", f"编辑范围选“{ps}”，饱和度小幅提高（起步 +10），配合蒙版", "轻微"),
+        Adjustment("色相/饱和度", f"编辑范围选{ps}，饱和度小幅提高（起步 +10），配合蒙版", "轻微"),
     ]
 
 
@@ -275,4 +301,4 @@ def cast_adjustments(where: str, shift_name: str) -> list[Adjustment]:
 
 
 def _toward_base(contaminant: str, base: str) -> str:
-    return f"“{base}”" if base else "相邻色"
+    return f"“{base}”" if base else "周围主色"

@@ -262,6 +262,9 @@ class SkinReport:
     expected_saturation: tuple[float, float]
     mixed_region: bool
     anomaly_fractions: dict = field(default_factory=dict)  # {"紫/品红": 0.03, "青": 0.01 ...}
+    hue_range: tuple[float, float] = (40.0, 68.0)  # 判断整体偏色用的色相区间（选了风格时用风格的区间）
+    hue_ref: str = "自然肤色"  # 上面区间的名字
+    target_hue: float | None = None  # 整体偏色要拉回的目标色相（风格中心或自然肤色中心）
 
 
 @dataclass(frozen=True)

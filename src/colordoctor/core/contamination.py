@@ -175,6 +175,7 @@ def _shift_valid(th: int, tw: int, dy: int, dx: int) -> np.ndarray:
 
 
 def _blobs(mask, kind_value, kind, L, C, h, step, offset, base_name, min_count, min_density, max_blobs=12):
+    """base_name 为 None 时（整图扫描）按每一处自己的主色命名。"""
     hh, ww = mask.shape
     bt = int(max(4, round(min(hh, ww) / 16)))
     th, tw = (hh + bt - 1) // bt, (ww + bt - 1) // bt
@@ -203,6 +204,11 @@ def _blobs(mask, kind_value, kind, L, C, h, step, offset, base_name, min_count, 
         c_mean = float(C[sel].mean()) if n else 0.0
         hue, _, _ = weighted_circular_hue(h[sel], C[sel])
         cname = cs.hue_name(hue, c_mean) if (hue is not None and kind == "opposite") else None
+        bname = base_name
+        if bname is None:
+            own = region & ((mask == MASK_NORMAL) | (mask == MASK_GRAYING))
+            bh, _, _ = weighted_circular_hue(h[own], C[own]) if own.any() else (None, 0, None)
+            bname = cs.hue_name(bh, float(np.median(C[own]))) if bh is not None else "局部主色"
         ev = [f"该处 {share:.1%} 的像素为{('“' + cname + '”') if cname else '发灰'}像素，平均色度 C* {c_mean:.1f}"]
         if kind == "graying":
             ev = [f"该处 {share:.1%} 的像素色度明显低于同明度的同色区域（平均 C* {c_mean:.1f}）"]
@@ -216,7 +222,7 @@ def _blobs(mask, kind_value, kind, L, C, h, step, offset, base_name, min_count, 
                     int((y1 - y0) * step),
                 ),
                 area_fraction=round(int(region.sum()) / total, 5),
-                base_hue_name=base_name,
+                base_hue_name=bname,
                 contaminant_hue_name=cname,
                 score=round(share * min(1.0, c_mean / 15.0 if kind == "opposite" else 1.0), 5),
                 evidence=tuple(ev),
@@ -417,9 +423,9 @@ def _scan(sub, step, offset, L, C, h, chromatic, edge, mask, chrom_frac) -> Cont
     base_hue, _, _ = weighted_circular_hue(h[chromatic], C[chromatic])
     blobs = []
     if n_opp:
-        blobs += _blobs(mask, MASK_OPPOSITE, "opposite", L, C, h, step, offset, "局部主色", 2, 0.004)
+        blobs += _blobs(mask, MASK_OPPOSITE, "opposite", L, C, h, step, offset, None, 2, 0.004)
     if gray.any():
-        blobs += _blobs(mask, MASK_GRAYING, "graying", L, C, h, step, offset, "同色区域", 4, 0.4)
+        blobs += _blobs(mask, MASK_GRAYING, "graying", L, C, h, step, offset, None, 4, 0.4)
     return ContaminationResult(
         base_hue=None if base_hue is None else round(base_hue, 3),
         base_hue_name="多种颜色（整图）",

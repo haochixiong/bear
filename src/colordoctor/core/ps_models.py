@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 
 import numpy as np
 
@@ -49,12 +50,18 @@ def _hsl_to_rgb(h, s, light):
 
 
 # ------------------------------------------------------------------ 色彩平衡
+def _cb_weights(lightness):
+    """GIMP 色彩平衡：阴影 / 中间调 / 高光 三个色调对某个 HSL 明度的作用权重。"""
+    a, b = 0.25, 0.333
+    sh = np.clip((lightness - b) / -a + 0.5, 0, 1)
+    md = np.clip((lightness - b) / a + 0.5, 0, 1) * np.clip((lightness + b - 1) / -a + 0.5, 0, 1)
+    hl = np.clip((lightness + b - 1) / a + 0.5, 0, 1)
+    return sh, md, hl
+
+
 def _cb_map(value, lightness, shadows, midtones, highlights):
-    a, b, scale = 0.25, 0.333, 0.7
-    sh = shadows * np.clip((lightness - b) / -a + 0.5, 0, 1) * scale
-    md = midtones * np.clip((lightness - b) / a + 0.5, 0, 1) * np.clip((lightness + b - 1) / -a + 0.5, 0, 1) * scale
-    hl = highlights * np.clip((lightness + b - 1) / a + 0.5, 0, 1) * scale
-    return np.clip(value + sh + md + hl, 0, 1)
+    sh, md, hl = _cb_weights(lightness)
+    return np.clip(value + (shadows * sh + midtones * md + highlights * hl) * 0.7, 0, 1)
 
 
 def color_balance(
@@ -201,10 +208,28 @@ class Solution:
 
 TOOL_SPECS = {
     # 名称: (参数名列表, 每个参数范围, 正则化权重)
-    "color_balance": (("中间调 青-红", "中间调 洋红-绿", "中间调 黄-蓝"), (-60, 60), 0.004),
+    # 色彩平衡的代价面很平：三个滑块互相抵消也能凑出差不多的结果，正则化要足够强
+    "color_balance": (("青-红", "洋红-绿", "黄-蓝"), (-60, 60), 0.02),
     "hue_saturation": (("色相", "饱和度", "明度"), (-40, 40), 0.006),  # 明度另限 ±15
     "selective_color": (("青色", "洋红", "黄色", "黑色"), (-50, 50), 0.01),
 }
+CB_TONES = {"shadows": "阴影", "midtones": "中间调", "highlights": "高光"}
+CB_SPARSE_TOL = 0.4  # 少用一个滑块、剩余色差只多这么多（ΔE00）时，用更简单的组合
+
+
+def cb_tone(x: np.ndarray) -> str:
+    """色彩平衡选哪个色调：按 GIMP 模型里三个色调对这些像素的平均权重取最大（浅肤色多半是高光）。"""
+    _, _, light = _rgb_to_hsl(np.asarray(x, dtype=float))
+    w = [float(v.mean()) for v in _cb_weights(light)]
+    return list(CB_TONES)[int(np.argmax(w))]
+
+
+def _cb_signs(cur_lab: np.ndarray, target: np.ndarray) -> tuple[int, int, int]:
+    """色彩平衡三个滑块允许的方向（0 = 不限）：任何一个滑块都不能和需要的 Δa*/Δb* 方向相反。"""
+    da, db = float(target[1] - cur_lab[1]), float(target[2] - cur_lab[2])
+    sa = int(np.sign(da)) if abs(da) >= 1 else 0
+    sb = int(np.sign(db)) if abs(db) >= 1 else 0
+    return sa, -sa, -sb  # 青-红：+红 = a* 增；洋红-绿：+绿 = a* 减；黄-蓝：+蓝 = b* 减
 
 
 def _mean_lab(x: np.ndarray) -> np.ndarray:
@@ -219,8 +244,8 @@ def _range_for(x: np.ndarray, candidates=SKIN_RANGES) -> str:
 
 
 def _apply(tool: str, x: np.ndarray, p: np.ndarray, rng: str) -> np.ndarray:
-    if tool == "color_balance":
-        return color_balance(x, midtones=tuple(p), preserve_luminosity=True)
+    if tool == "color_balance":  # rng = 色调（阴影 / 中间调 / 高光）
+        return color_balance(x, **{rng: tuple(p)}, preserve_luminosity=True)
     if tool == "hue_saturation":
         return hue_saturation(x, hue=p[0], saturation=p[1], lightness=p[2], color_range=rng)
     if tool == "selective_color":
@@ -229,42 +254,63 @@ def _apply(tool: str, x: np.ndarray, p: np.ndarray, rng: str) -> np.ndarray:
 
 
 def solve(pixels: np.ndarray, target_lab, tool: str, max_pixels: int = 3000, ranges=SKIN_RANGES) -> Solution:
-    """在模型下用确定性坐标搜索寻找整数参数，使平均色尽量接近 target_lab（ΔE00）。"""
+    """在模型下用确定性坐标搜索寻找整数参数，使平均色尽量接近 target_lab（ΔE00）。
+
+    色彩平衡：自动选作用最强的色调；滑块方向不与需要的 Δa*/Δb* 相反；
+    一两个滑块就能达到差不多效果时不用三个（三个滑块互相抵消的组合在 PS 里不可信）。
+    """
     x = np.asarray(pixels, dtype=float).reshape(-1, 3)
     if x.shape[0] > max_pixels:
         step = int(np.ceil(x.shape[0] / max_pixels))
         x = x[step // 2 :: step]
     target = np.asarray(target_lab, dtype=float)
     names, (lo, hi), reg = TOOL_SPECS[tool]
-    rng = _range_for(x, ranges) if tool != "color_balance" else "master"
+    cb = tool == "color_balance"
+    rng = cb_tone(x) if cb else _range_for(x, ranges)
+    start_lab = _mean_lab(x)
+    signs = _cb_signs(start_lab, target) if cb else (0,) * len(names)
 
     def cost(p):
         lab = _mean_lab(_apply(tool, x, p, rng))
         return float(cs.delta_e_2000(lab, target)) + reg * float(np.abs(p).sum()), lab
 
-    p = np.zeros(len(names))
-    start = float(cs.delta_e_2000(_mean_lab(x), target))
-    best, best_lab = cost(p)
-    for step in (16, 8, 4, 2, 1):
-        improved = True
-        while improved:
-            improved = False
-            for i in range(len(p)):
-                for sgn in (1, -1):
-                    q = p.copy()
-                    q[i] = np.clip(q[i] + sgn * step, lo, hi)
-                    if tool == "hue_saturation" and i == 2:
-                        q[i] = np.clip(q[i], -15, 15)
-                    c, lab = cost(q)
-                    if c < best - 1e-9:
-                        p, best, best_lab = q, c, lab
-                        improved = True
+    def search(active):
+        p = np.zeros(len(names))
+        best, best_lab = cost(p)
+        for step in (16, 8, 4, 2, 1):
+            improved = True
+            while improved:
+                improved = False
+                for i in active:
+                    for sgn in (1, -1):
+                        q = p.copy()
+                        q[i] = np.clip(q[i] + sgn * step, lo, hi)
+                        if tool == "hue_saturation" and i == 2:
+                            q[i] = np.clip(q[i], -15, 15)
+                        if signs[i] and q[i] * signs[i] < 0:
+                            continue
+                        c, lab = cost(q)
+                        if c < best - 1e-9:
+                            p, best, best_lab = q, c, lab
+                            improved = True
+        return p, best, best_lab
+
+    p, best, best_lab = search(range(len(names)))
+    if cb:
+        full = float(cs.delta_e_2000(best_lab, target))
+        for k in (1, 2):
+            ok = [r for r in (search(s) for s in combinations(range(len(names)), k))
+                  if float(cs.delta_e_2000(r[2], target)) <= full + CB_SPARSE_TOL]
+            if ok:
+                p, best, best_lab = min(ok, key=lambda r: r[1])
+                break
     residual = float(cs.delta_e_2000(best_lab, target))
+    prefix = f"{CB_TONES[rng]} " if cb else ""
     return Solution(
         tool=tool,
-        params=tuple((n, float(v)) for n, v in zip(names, p)),
-        start_de=round(start, 3),
+        params=tuple((prefix + n, float(v)) for n, v in zip(names, p)),
+        start_de=round(float(cs.delta_e_2000(start_lab, target)), 3),
         residual_de=round(residual, 3),
         result_lab=tuple(round(float(v), 3) for v in best_lab),
-        extra={"range": rng},
+        extra={"range": "master", "tone": rng} if cb else {"range": rng},
     )

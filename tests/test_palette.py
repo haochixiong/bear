@@ -240,3 +240,119 @@ def test_style_grading_not_suggested_when_tint_ok_or_neutral_spec():
     if g:
         hue = dict(g[0].params)["色相"]
         assert 120 <= hue <= 240, hue  # 往青（红的反方向）减弱红色调
+
+
+# ------------------------------------------------------------------ 建议的数值与方向（审计回归）
+def _lchlab(L, C, h):
+    return (L, C * np.cos(np.radians(h)), C * np.sin(np.radians(h)))
+
+
+def _outdoor_portrait(H=200, W=240):
+    """草地 + 淡蓝天空（C* ≈ 22）+ 椭圆肤色。"""
+    rng = np.random.default_rng(0)
+    lab = np.zeros((H, W, 3))
+    yy, xx = np.linspace(0, 1, H)[:, None], np.linspace(0, 1, W)[None, :]
+    lab[:] = _lchlab(50, 30, 125)
+    lab[: int(H * 0.35)] = _lchlab(72, 22, 255)
+    lab[((xx - 0.5) / 0.18) ** 2 + ((yy - 0.55) / 0.3) ** 2 <= 1] = (68, 14, 19)
+    lab[..., 0] += (0.5 - yy) * 25 + (0.5 - xx) * 10
+    lab[..., 1:] += rng.normal(0, 0.8, lab[..., 1:].shape)
+    return cs.lab_to_srgb8(lab)
+
+
+def _mixer(adjs):
+    return [a for a in adjs if a.tool == "Camera Raw 混色器"]
+
+
+def test_blue_sky_is_not_a_highlight_tint():
+    m = pl.style_match(_outdoor_portrait(), pl.get_style("teal_orange"))
+    assert not [a for a in m.adjustments if a.tool == "Camera Raw 颜色分级" and a.instruction.startswith("高光")]
+    assert m.highlight_tint is None or m.highlight_tint[1] < pl.TINT_MAX_C
+
+
+def test_grading_saturation_capped():
+    L = np.linspace(5, 95, 240)[None, :].repeat(120, 0)
+    lab = np.stack([L, np.where(L > 80, -4.0, 0.0), np.where(L > 80, -6.0, 0.0)], -1)  # 高光偏蓝，青橙要暖高光
+    m = pl.style_match(cs.lab_to_srgb8(lab), pl.get_style("teal_orange"))
+    g = [a for a in m.adjustments if a.tool == "Camera Raw 颜色分级"]
+    assert g and all(dict(a.params)["饱和度"] <= pl.GRADING_SAT_MAX for a in g)
+
+
+def test_low_saturation_style_does_not_desaturate_an_already_matching_image():
+    H, W = 200, 240
+    lab = np.zeros((H, W, 3))
+    lab[: H // 2] = (70, 4, 6)
+    lab[H // 2 :] = (60, -3, 4)
+    lab[:, : W // 3] = (65, 6, -4)
+    lab[..., 0] += np.linspace(-15, 15, H)[:, None]
+    m = pl.style_match(cs.lab_to_srgb8(lab), pl.get_style("morandi"))
+    assert m.colorfulness_ok
+    assert not _mixer(m.adjustments), [a.instruction for a in m.adjustments]
+
+
+def test_style_mixer_sliders_capped_and_labelled_by_value():
+    for key in ("teal_orange", "japanese_fresh", "morandi", "film_warm"):
+        m = pl.style_match(_outdoor_portrait(), pl.get_style(key))
+        for a in _mixer(m.adjustments):
+            vals = [abs(v) for _, v in a.params]
+            assert max(vals) <= ac.SLIDER_CAP, a.instruction
+            assert a.strength == ac.slider_strength(max(vals)), a.instruction
+
+
+def test_japanese_fresh_green_moves_toward_aqua_as_its_recipe_says():
+    st = pl.get_style("japanese_fresh")
+    assert st["channel_targets"]["绿色"] == "toward:浅绿"
+    m = pl.style_match(_outdoor_portrait(), st)
+    g = [a for a in _mixer(m.adjustments) if a.instruction.startswith("绿色")]
+    assert g and dict(g[0].params)["色相"] > 0 and "浅绿" in g[0].instruction
+
+
+def test_channel_already_inside_target_sector_is_left_alone():
+    img = noisy(flat(lch_color(60, 30, 200), 120, 160), 1)  # 青色，本来就在青橙的“青”里
+    m = pl.style_match(img, pl.get_style("teal_orange"))
+    assert not [a for a in _mixer(m.adjustments) if "色相" in a.instruction]
+
+
+def _three_greens(target=None):
+    H, W = 200, 240
+    lab = np.zeros((H, W, 3))
+    lab[:] = _lchlab(55, 35, 135)
+    lab[40:100, 30:100] = _lchlab(55, 35, 105)
+    lab[120:180, 150:220] = _lchlab(55, 35, 165)
+    lab[..., 1:] += np.random.default_rng(0).normal(0, 0.7, lab[..., 1:].shape)
+    return pl.family_unity(cs.lab_to_srgb8(lab), "绿", target)
+
+
+def test_unity_mixer_hue_moves_each_channel_toward_target():
+    """目标绿色相 120：偏黄的绿（105，黄色通道）只能往右（+），主体绿（135，绿色通道）只能往左（−）。
+    以前黄色通道的平均色相被相邻的绿拉偏，算出了反方向的滑块。"""
+    u = _three_greens(_lchlab(55, 30, 120))
+    hue = {a.instruction.split("（")[0]: dict(a.params).get("色相", 0) for a in _mixer(u.adjustments)}
+    assert hue.get("黄色", 0) > 0, hue
+    assert hue.get("绿色", 0) <= 0, hue
+
+
+def test_unity_patch_notes_use_relative_direction_words():
+    u = _three_greens()
+    notes = [p.note for p in u.patches]
+    assert notes and not any("绿偏绿" in n for n in notes)
+    assert any("偏黄" in n for n in notes) and any("偏青" in n for n in notes)
+
+
+def test_neutral_tint_gap_does_not_show_meaningless_hue():
+    L = np.linspace(5, 95, 240)[None, :].repeat(120, 0)
+    img = cs.lab_to_srgb8(np.stack([L, np.zeros_like(L), np.zeros_like(L)], -1))
+    m = pl.style_match(img, pl.get_style("teal_orange"))
+    hl = [g for g in m.gaps if g.startswith("高光色调")]
+    assert hl and "接近中性" in hl[0] and "°" not in hl[0].split("，目标")[0]
+
+
+def test_accent_tip_considers_lightness_and_skips_black_and_white():
+    g = np.repeat(np.linspace(10, 245, 240)[None, :], 200, 0)
+    mono = np.clip(np.stack([g, g, g], -1), 0, 255).astype(np.uint8)
+    _, r = pl.ratio_631(cs.srgb8_to_lab(mono))
+    assert not any("点缀色不够" in t for t in r.tips)
+    # 点缀色饱和度不高但明度对比很大（暗绿 + 中灰绿 + 亮米白），也算“跳”
+    img = blocks([(lch_color(35, 30, 135), 0.6), (lch_color(50, 25, 120), 0.3), (lch_color(92, 12, 80), 0.1)])
+    _, r = pl.ratio_631(cs.srgb8_to_lab(img))
+    assert not any("点缀色不够" in t for t in r.tips), r.tips

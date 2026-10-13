@@ -94,3 +94,31 @@ def test_solver_for_hue_sat_and_selective_color_reduce_error():
         sol = pm.solve(px, target, tool)
         assert sol.residual_de < sol.start_de, tool
         assert all(-100 <= v <= 100 for _, v in sol.params)
+
+
+def _skin_px(L, a, b):
+    from synth import skin_region
+
+    return skin_region(L, a, b, seed=3).reshape(-1, 3) / 255.0
+
+
+def test_color_balance_never_contradicts_target_direction():
+    """蜡黄肤色拉向自然肤色：要往蓝（黄-蓝 ≥ 0）、往红/洋红；也不要三个滑块互相抵消。"""
+    for src, tgt in (((66, 9, 28), (14, 19)), ((65, 22, 15), (14, 19)), ((68, 10, 28), (14, 19))):
+        px = _skin_px(*src)
+        cur = cs.srgb8_to_lab(px * 255).mean(axis=0)
+        target = np.array([cur[0], *tgt])
+        sol = pm.solve(px, target, "color_balance")
+        cr, mg, yb = (v for _, v in sol.params)
+        da, db = target[1] - cur[1], target[2] - cur[2]
+        assert yb * db <= 0, (src, sol.params)  # 正值 = 往蓝 = b* 降
+        assert cr * da >= 0 and mg * da <= 0, (src, sol.params)
+        assert sum(1 for v in (cr, mg, yb) if v) <= 2, sol.params
+        assert sol.residual_de < sol.start_de
+
+
+def test_color_balance_uses_tone_where_the_pixels_are():
+    assert pm.cb_tone(_skin_px(82, 8, 10)) == "highlights"
+    assert pm.cb_tone(_skin_px(35, 11, 14)) == "shadows"
+    sol = pm.solve(_skin_px(82, 8, 10), (82.0, 10.0, 14.0), "color_balance")
+    assert sol.extra["tone"] == "highlights" and sol.params[0][0].startswith("高光")

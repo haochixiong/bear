@@ -87,18 +87,21 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         pts.append((x, y))
     curve = tuple(pts)
     cast_m, cast_r = _neutral_cast(lm), _neutral_cast(lr)
-    cf_m, cf_r = pl.colorfulness(s_m, lch_m).value, pl.colorfulness(s_r, lch_r).value
+    cfo_m, cfo_r = pl.colorfulness(s_m, lch_m), pl.colorfulness(s_r, lch_r)
+    cf_m, cf_r = cfo_m.value, cfo_r.value
+    # 参考是黑白作品、我的明显是彩色：不按通道逐个降饱和，直接建议转黑白（色调/颜色分级仍照常比较，适用于棕调等单色调）
+    ref_bw = pl.is_monochrome(cfo_r) and not pl.is_monochrome(cfo_m) and cf_m >= pl.COLORFULNESS_LEVELS[0][0]
 
     # 通道
     ch_m = {c.name: c for c in ac.channel_stats(s_m)}
     ch_r = {c.name: c for c in ac.channel_stats(s_r)}
     diffs = []
-    for name in ac.NAMES:
+    for name in () if ref_bw else ac.NAMES:
         a, b = ch_m[name], ch_r[name]
         if b.share < 0.03 and a.share < 0.03:
             continue
-        if b.share < 0.01 <= a.share:  # 参考里几乎没有这种颜色 -> 降饱和
-            diffs.append(ChannelDiff(name, b.share, a.share, 0, -int(np.clip(40 + 150 * a.share, 40, 90)), 0))
+        if b.share < 0.01 <= a.share:  # 参考里几乎没有这种颜色 -> 降饱和（单条建议上限，先降到这里再对比）
+            diffs.append(ChannelDiff(name, b.share, a.share, 0, -ac.SLIDER_CAP, 0))
             continue
         if a.mean_hue is None or b.mean_hue is None:
             continue
@@ -146,7 +149,9 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     if abs(tr[2] - tm[2]) > 20:
         fit.append(f"影调差异很大（中位明度相差 {abs(tr[2] - tm[2]):.0f}）：参考是{'高调' if tr[2] > tm[2] else '低调'}，"
                    "只靠调色很难还原，需要从曝光/光线入手，否则容易发灰或死黑")
-    for fam, share, mine_fam, de in matches:
+    if ref_bw:
+        fit.append("参考是黑白作品：把你的图转成黑白后，主要比较影调（曲线）即可")
+    for fam, share, mine_fam, de in () if ref_bw else matches:
         if share >= 0.15 and de > 20:
             fit.append(f"参考的主色“{fam}”（占 {share:.0%}）在你的画面里没有接近的颜色（最近的是“{mine_fam}”，ΔE00 {de:.0f}）："
                        "只能靠大幅偏色制造，效果可能不自然")
@@ -161,6 +166,9 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     if curve:
         adjs.append(Adjustment("曲线", "RGB 复合曲线（把影调拉向参考）：" + "；".join(f"输入 {a} → 输出 {b}" for a, b in curve), "小幅", False,
                                tuple((f"输入 {a}", float(b)) for a, b in curve)))
+    if ref_bw:
+        adjs.insert(0, Adjustment("Camera Raw", "参考是黑白作品：先把你的图转黑白（Camera Raw 处理方式选「黑白」，或饱和度 -100），"
+                                  "再用曲线对齐影调；各颜色转成多亮的灰用「黑白混合」调", None, False))
     da, db = (cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]) if both_cast else (0.0, 0.0)
     if abs(db) >= 1.5:
         adjs.append(Adjustment("Camera Raw", f"色温往{'黄' if db > 0 else '蓝'}（中性区域 b* 需要 {db:+.1f}）", "小幅"))
@@ -179,15 +187,17 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
                                    True, (("色相", gh), ("饱和度", gs))))
     for d in diffs:
         parts = []
-        if abs(d.hue_slider) >= 8:
-            parts.append(f"色相 {d.hue_slider:+d}")
-        if abs(d.sat_slider) >= 10:
-            parts.append(f"饱和度 {d.sat_slider:+d}")
-        if abs(d.lum_slider) >= 10:
-            parts.append(f"明亮度 {d.lum_slider:+d}")
+        (hs, hn), (ss, sn), (ls, ln) = (ac.cap_slider(v) for v in (d.hue_slider, d.sat_slider, d.lum_slider))
+        if abs(hs) >= 8:
+            parts.append(f"色相 {hs:+d}{hn}")
+        if abs(ss) >= 10:
+            parts.append(f"饱和度 {ss:+d}{sn}")
+        if abs(ls) >= 10:
+            parts.append(f"明亮度 {ls:+d}{ln}")
         if parts:
-            adjs.append(Adjustment("Camera Raw 混色器", f"{d.name}（参考占 {d.ref_share:.0%}，我的占 {d.my_share:.0%}）：" + "，".join(parts), "小幅", True,
-                                   (("色相", d.hue_slider), ("饱和度", d.sat_slider), ("明亮度", d.lum_slider))))
+            adjs.append(Adjustment("Camera Raw 混色器", f"{d.name}（参考占 {d.ref_share:.0%}，我的占 {d.my_share:.0%}）：" + "，".join(parts),
+                                   ac.slider_strength(max(abs(hs), abs(ss), abs(ls))), True,
+                                   (("色相", hs), ("饱和度", ss), ("明亮度", ls))))
     adjs.append(Adjustment("提示", "建议顺序：先曲线定影调 → 再色温/色调 → 混色器 → 颜色分级；每一步后重新对比", None, False))
     return MatchReport(
         similarity=round(sim, 1),

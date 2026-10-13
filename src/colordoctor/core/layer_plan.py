@@ -13,7 +13,8 @@ import numpy as np
 
 from colordoctor.core import acr_channels as ac
 from colordoctor.core import contamination as ct_mod
-from colordoctor.core.color_models import AnalysisReport
+from colordoctor.core import recommendations as rec
+from colordoctor.core.color_models import AnalysisReport, Severity
 
 # PS 色相/饱和度的六个颜色范围：(localRange 编号, 名称, HSB 中心色相, 默认渐变 beginRamp..endRamp)
 PS_RANGES = (
@@ -208,28 +209,43 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     flags = _contamination_flags(report, shape)
     ct = report.contamination
     skin = report.valid_mask if report.valid_mask is not None and report.valid_mask.shape == (h, w) else None
+    scan = ct is not None and report.mode == "scan"
+    base = "画面" if scan else (ct.base_hue_name if ct is not None else "")
 
     # 1) 对立色混入：在杂色所在颜色范围降饱和，只作用于杂色位置
     if ct is not None and flags is not None and ct.opposite_hue is not None and not ct.bicolor:
         opp = flags == ct_mod.MASK_OPPOSITE
         if opp.mean() > 0.0005:
             idx, rname, ramps = ps_range_for_lab_hue(ct.opposite_hue)
-            sat = -_clip(20 + ct.opposite_chroma, 20, 60)
+            sat = rec.contamination_saturation(ct.opposite_chroma)
+            what = f"{base}里的{ct.opposite_hue_name}" + ("散点" if scan else "")
             layers.append(LayerSpec(
-                "opposite", f"{ct.base_hue_name}里的{ct.opposite_hue_name} · 色相/饱和度", "hueSaturation",
+                "opposite", f"{what} · 色相/饱和度", "hueSaturation",
                 _huesat(idx, ramps, sat=sat),
-                f"{ct.base_hue_name}中混入{ct.opposite_hue_name}（占分析像素 {ct.opposite_fraction:.1%}）：{rname} 饱和度 {sat}",
+                f"{what}（占分析像素 {ct.opposite_fraction:.1%}）：{rname} 饱和度 {sat}（只作用于杂色位置）",
                 _soft_mask(opp, rad, k, grow=True)))
     # 2) 局部发灰：自然饱和度，只作用于发灰位置
     if ct is not None and flags is not None and ct.graying_fraction > 0:
         gray = flags == ct_mod.MASK_GRAYING
         if gray.mean() > 0.0005:
             vib = _clip(12 + 60 * ct.graying_depth, 10, 40)
+            what = "局部" if scan else base
             layers.append(LayerSpec(
-                "graying", f"{ct.base_hue_name}发灰 · 自然饱和度", "vibrance",
+                "graying", f"{what}发灰 · 自然饱和度", "vibrance",
                 {"vibrance": vib, "saturation": 0},
-                f"{ct.base_hue_name}局部发灰（{ct.graying_fraction:.0%}）：自然饱和度 +{vib}",
+                f"{what}发灰（{ct.graying_fraction:.0%}）：自然饱和度 +{vib}（只作用于发灰位置）",
                 _soft_mask(gray, rad, k, grow=True)))
+    # 2b) 肤色整体偏色：皮肤蒙版内的色相/饱和度，数值与卡片上的相同
+    sk = report.skin
+    sc = next((c for c in report.components if c.key == "skin_cast"), None)
+    if sk is not None and sk.target_hue is not None and sc is not None and sc.severity != Severity.NORMAL:
+        spec = skin_cast_huesat(sk.mean_lab, sk.target_hue)
+        if spec is not None:
+            idx, ramps, rname, hue = spec
+            layers.append(LayerSpec(
+                "skin_cast", f"肤色整体{sk.tendency} · 色相/饱和度", "hueSaturation", _huesat(idx, ramps, hue=hue),
+                f"肤色整体{sk.tendency}：{rname}（范围已对准肤色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）",
+                None if skin is None else _soft_mask(skin, rad, k)))
     # 3) 肤色不均匀：同一类问题合成一层（偏黄 / 偏红橙 是方向相反的两层）
     uni = report.uniformity
     if uni is not None and uni.patches:
@@ -277,6 +293,18 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     return LayerPlan(name, w, h, layers)
 
 
+def skin_cast_huesat(mean_lab, target_hue: float):
+    """肤色整体偏色 -> (范围编号, 范围渐变, 范围名, 色相)：只转色相，把肤色拉到目标色相。卡片和图层共用。"""
+    L, a, b = (float(v) for v in mean_lab)
+    hp = float(np.degrees(np.arctan2(b, a))) % 360
+    C = float(np.hypot(a, b))
+    hue = _clip(hsb_shift(hp, target_hue, L, C), -30, 30)
+    if hue == 0:
+        return None
+    idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(hp, L=L, C=max(C, 8.0)))
+    return idx, ramps, PS_RANGES[idx - 1][1], hue
+
+
 _KIND_NAME = {"hueSaturation": "色相/饱和度", "colorBalance": "色彩平衡", "vibrance": "自然饱和度", "curves": "曲线"}
 _MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色", "reference": "仿色"}
 
@@ -292,18 +320,20 @@ def _skin_layer(kind: str, dh: float, ds: float, lab=(68.0, 14.0, 19.0)):
         idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(hp, L=L, C=max(C, 8.0)))
         rname = PS_RANGES[idx - 1][1]
         if kind == "偏黄":
-            sat = -_clip(abs(ds) * 60, 0, 20) if ds > 0 else 0
-            return "hueSaturation", _huesat(idx, ramps, hue=hue, sat=sat), f"{rname}（范围已对准问题色）色相 {hue:+d}，饱和度 {sat}"
-        return "hueSaturation", _huesat(idx, ramps, hue=hue), f"{rname}（范围已对准问题色）色相 {hue:+d}（往黄）"
+            sat = patch_sat(ds)
+            return ("hueSaturation", _huesat(idx, ramps, hue=hue, sat=sat),
+                    f"{rname}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）" + (f"，饱和度 {sat:+d}" if sat else ""))
+        return "hueSaturation", _huesat(idx, ramps, hue=hue), f"{rname}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）"
     if kind == "偏红橙":
         cr = -_clip(abs(dh) / 2, 2, 15)
         yb = -_clip(abs(dh) / 3, 1, 10)  # 负值 = 往黄
         return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, 0, yb], "highlights": [0, 0, 0], "preserveLuminosity": True},
-                f"中间调 青-红 {cr}，黄-蓝 {yb}")
+                f"中间调 青-红 {cr}（往青），黄-蓝 {yb}（往黄）")
     if kind == "偏青绿":
         cr = _clip(abs(dh) / 2, 3, 15)
-        return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, -_clip(cr / 2, 1, 8), 0], "highlights": [0, 0, 0],
-                                 "preserveLuminosity": True}, f"中间调 青-红 +{cr}，洋红-绿 {-_clip(cr / 2, 1, 8)}")
+        mg = -_clip(cr / 2, 1, 8)
+        return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, mg, 0], "highlights": [0, 0, 0],
+                                 "preserveLuminosity": True}, f"中间调 青-红 +{cr}（往红），洋红-绿 {mg}（往洋红）")
     if kind == "缺色发灰":
         vib = _clip(abs(ds) * 60, 8, 30)
         return "vibrance", {"vibrance": vib, "saturation": 0}, f"自然饱和度 +{vib}"
@@ -311,6 +341,11 @@ def _skin_layer(kind: str, dh: float, ds: float, lab=(68.0, 14.0, 19.0)):
         sat = -_clip(abs(ds) * 60, 5, 25)
         return "hueSaturation", _huesat(0, None, sat=sat, master=True), f"全图 饱和度 {sat}"
     return None
+
+
+def patch_sat(ds: float) -> int:
+    """偏色小块的饱和度修正：比周围更艳就降、更灰就加（与卡片文字一致），变化很小时不动。"""
+    return _clip(-ds * 60, -20, 20) if abs(ds) >= 0.05 else 0
 
 
 def curves_layer(lid: str, name: str, points: dict[str, list[tuple[int, int]]], reason: str) -> LayerSpec:

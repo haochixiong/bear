@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 from colordoctor.core import color_spaces as cs
 from colordoctor.core import contamination as ct_mod
 from colordoctor.core import diagnosis_rules as dr
+from colordoctor.core import layer_plan as lp
 from colordoctor.core import portrait_analysis as pa
 from colordoctor.core import recommendations as rec
 from colordoctor.core import region_statistics as rs
@@ -30,6 +33,7 @@ from colordoctor.core.color_models import (
 from colordoctor.core.sampling import grid_downsample, sample_point
 
 MAX_SAMPLES = rs.MAX_SAMPLES
+SEVERITY_FLOOR = {Severity.MILD: 20.0, Severity.NOTABLE: 45.0, Severity.STRONG: 70.0}  # 与 severity_from_score 的分档一致
 
 CAUSES_OPPOSITE = (
     "环境反光或色溢（绿植、蓝天、彩色墙面、衣服反射到皮肤）",
@@ -82,6 +86,11 @@ def _bands(region: np.ndarray, mask: np.ndarray | None) -> dict:
 def _finalize(mode, context, stats, components, findings, extra_conf_reasons, conf, **kw) -> AnalysisReport:
     risk = dr.overall(components)
     sev = severity_from_score(risk)
+    order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
+    shown = max((order.index(f.severity) for f in findings), default=0)
+    if shown > order.index(sev):  # 总体程度不低于任何一张卡片，风险分随之抬到该档的下限
+        sev = order[shown]
+        risk = max(risk, SEVERITY_FLOOR[sev])
     if not [f for f in findings if f.severity != Severity.NORMAL]:
         findings = [
             Finding(
@@ -94,7 +103,6 @@ def _finalize(mode, context, stats, components, findings, extra_conf_reasons, co
                 notes=tuple(extra_conf_reasons) or ("结论基于当前选区；换一个区域可能得到不同结果",),
             )
         ] + list(findings)
-    order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
     # 真实问题优先；“与目标风格的差距”不是错误，排在问题之后
     findings = sorted(findings, key=lambda f: (f.problem.startswith("与目标风格"), -order.index(f.severity)))
     return AnalysisReport(
@@ -131,19 +139,23 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence + tuple(_blob_text([b for b in ct.blobs if b.kind == "opposite"])),
                 causes=CAUSES_OPPOSITE,
-                adjustments=tuple(rec.contamination_adjustments(main, ct.base_hue_name if not skin else "橙", skin)),
+                adjustments=tuple(rec.contamination_adjustments(main, ct.base_hue_name if not skin else "橙", skin, ct.opposite_chroma)),
                 confidence=conf,
                 notes=tuple(notes),
             )
         )
     c = comp.get("chroma_compression")
-    if c and c.severity != Severity.NORMAL:
+    lc = comp.get("lightness_compression")
+    graying_card = bool(c and c.severity != Severity.NORMAL)
+    if graying_card:
         problem = "肤色发灰、不够透亮（色度偏低）" if skin else f"“{ct.base_hue_name}”区域局部发灰（比同色干净处更灰）"
+        # 明度也被压缩时并进这一条（建议相同，不再单独出一张卡）
+        flat = lc.evidence if lc and lc.severity != Severity.NORMAL else ()
         findings.append(
             Finding(
                 problem=problem,
                 severity=c.severity,
-                evidence=c.evidence + tuple(_blob_text([b for b in ct.blobs if b.kind == "graying"])),
+                evidence=c.evidence + tuple(flat) + tuple(_blob_text([b for b in ct.blobs if b.kind == "graying"])),
                 causes=CAUSES_GRAY,
                 adjustments=tuple(rec.graying_adjustments("橙" if skin else ct.base_hue_name)),
                 confidence=conf,
@@ -179,8 +191,8 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                     notes=("胶片风格常刻意让高光、阴影偏色；如果是风格选择可以忽略",) + tuple(base_notes),
                 )
             )
-    c = comp.get("lightness_compression")
-    if c and c.severity != Severity.NORMAL:
+    c = lc
+    if c and c.severity != Severity.NORMAL and not graying_card:
         findings.append(
             Finding(
                 problem="明度和色度同时被压缩，显得发闷",
@@ -325,21 +337,37 @@ def analyze_skin_region(
     findings = _component_findings(components, ct, conf, reasons, skin=True, skin_report=skin)
     findings.append(_quick_rule_finding(qr, part, conf))
     findings += _uniformity_findings(uni, conf, reasons)
+    preset_lab = (sp.get_preset("natural", presets) if preset is None else preset).target_lab
+    tgt_h = float(cs.lab_to_lch(np.asarray(preset_lab, dtype=float))[2])
+    skin = dataclasses.replace(skin, target_hue=round(tgt_h, 3))
+    cmp = pa.compare_to_preset(skin, preset) if preset is not None else None
+    style_card = cmp is not None and cmp.delta_e00 >= rec.NEAR_DE
     sc = {c.key: c for c in components}["skin_cast"]
     if sc.severity != Severity.NORMAL:
-        preset_lab = (sp.get_preset("natural", presets) if preset is None else preset).target_lab
         # 这条只管“偏色”（色相）：保留当前的明度和色度，只把色相拉向目标。
         # 否则会按“自然肤色”的明度要求深肤色提亮、浅肤色压暗，违背“不按深浅判断肤色”的原则。
         cur_lch = cs.lab_to_lch(np.asarray(skin.mean_lab, dtype=float))
-        tgt_h = float(cs.lab_to_lch(np.asarray(preset_lab, dtype=float))[2])
         target = cs.lch_to_lab(np.array([cur_lch[0], cur_lch[1], tgt_h]))
+        adjs = []
+        hs = lp.skin_cast_huesat(skin.mean_lab, tgt_h)
+        if hs is not None:
+            _, _, rname, hue = hs
+            adjs.append(Adjustment(
+                "色相/饱和度",
+                f"编辑范围选“{rname}”并把范围滑块对准肤色：色相 {hue:+d}（往{'黄' if hue > 0 else '红'}），饱和度、明度不动；"
+                "用皮肤蒙版只作用于皮肤（生成的调整图层就是这一层）",
+                rec.strength_label(float(cs.hue_diff(cur_lch[2], tgt_h)) / 2.0), params=(("色相", float(hue)),)))
+        if style_card:  # 同一个目标，完整参数只在风格那一条给，避免两张卡强度标签对不上
+            adjs.append(Adjustment("提示", f"色温/色调、曲线等其余参数见“与目标风格「{preset.name}」”那一条（同一个目标）", None, False))
+        else:
+            adjs += [a for a in rec.skin_adjustments(skin_px, target, keep_lightness=True) if a.tool == "Camera Raw"]
         findings.append(
             Finding(
                 problem=f"肤色整体{skin.tendency}",
                 severity=sc.severity,
                 evidence=sc.evidence,
                 causes=("白平衡（色温/色调）偏移", "HSL 橙色/红色的色相被移动"),
-                adjustments=tuple(a for a in rec.skin_adjustments(skin_px, target, keep_lightness=True) if a.tool == "Camera Raw"),
+                adjustments=tuple(adjs),
                 confidence=conf,
                 notes=(sc.note,) + tuple(reasons),
             )
@@ -360,10 +388,10 @@ def analyze_skin_region(
         findings.append(_part_compare_finding(part or "当前部位", skin.mean_lab, other_part, skin_px, conf))
     adjustments = ()
     if preset is not None:
-        cmp = pa.compare_to_preset(skin, preset)
         fit = pa.preset_fit(skin, preset)
-        adjustments = tuple(rec.skin_adjustments(skin_px, preset.target_lab))
-        if cmp.delta_e00 >= 2:
+        # 卡片说“基本一致”（ΔE00 < 2）时不给调整
+        adjustments = tuple(rec.skin_adjustments(skin_px, preset.target_lab)) if style_card else (rec.near_hint(cmp.delta_e00),)
+        if style_card:
             findings.append(
                 Finding(
                     problem=f"与目标风格「{preset.name}」相差 ΔE00 {cmp.delta_e00:.1f}",
@@ -420,8 +448,8 @@ def _uniformity_findings(uni, conf, reasons) -> list[Finding]:
     if uni is None or not uni.patches:
         return out
     words = {
-        "偏黄": ("比其他皮肤更黄", "局部画笔：色温往蓝一点，或在该处 HSL 黄色/橙色色相往红、饱和度略降"),
-        "偏红橙": ("比其他皮肤更红/更橙", "局部画笔：色调往绿一点，或 HSL 红色/橙色色相往黄、饱和度略降"),
+        "偏黄": ("比其他皮肤更黄", "局部画笔：色温往蓝一点，或在该处 HSL 黄色/橙色色相往红{sat}"),
+        "偏红橙": ("比其他皮肤更红/更橙", "局部画笔：色调往绿一点，或 HSL 红色/橙色色相往黄{sat}"),
         "偏洋红": ("偏洋红/偏紫", "局部画笔：色调往绿；或 色相/饱和度 选洋红降饱和"),
         "偏青绿": ("偏青、偏绿", "局部画笔：色调往洋红、色温往黄；或 可选颜色 青色 减青"),
         "缺色发灰": ("色度明显低于同明度的皮肤（缺色、发灰）", "局部画笔：饱和度/自然饱和度加一点，或 HSL 橙色饱和度提高（配合蒙版）"),
@@ -432,6 +460,10 @@ def _uniformity_findings(uni, conf, reasons) -> list[Finding]:
         area = sum(p.area_fraction for p in ps)
         sev = Severity.NOTABLE if any(p.severity == "明显" for p in ps) else Severity.MILD
         desc, fix = words[kind]
+        # 饱和度方向跟着小块实际的饱和度走（与生成的图层同一个数）：更艳才降，更灰就加
+        ds = float(np.average([p.sat_shift for p in ps], weights=[p.area_fraction for p in ps]))
+        sat = lp.patch_sat(ds)
+        fix = fix.format(sat="" if not sat else f"、饱和度略{'降' if sat < 0 else '加'}（约 {sat:+d}）")
         out.append(
             Finding(
                 problem=f"肤色不均匀：{len(ps)} 处{kind}（占皮肤 {area:.0%}）",
@@ -470,7 +502,7 @@ def _part_compare_finding(part, lab, other, skin_px, conf) -> Finding:
             f"ΔL* {c.dL:+.1f}，Δa* {c.da:+.1f}，Δb* {c.db:+.1f}，ΔC* {c.dC:+.1f}，Δh {c.dh:+.1f}°",
         ),
         causes=("脸部和身体受光不同", "只对脸部做了局部调整", "化妆（粉底色号）与身体肤色不同"),
-        adjustments=tuple(rec.skin_adjustments(skin_px, other_lab)),
+        adjustments=tuple(rec.skin_adjustments(skin_px, other_lab)) if parts else (rec.near_hint(c.delta_e00),),
         confidence=conf,
         notes=(f"调整方向是把{part}拉向{other_name}；如果想反过来，请在另一部位上分析",),
     )
@@ -523,13 +555,20 @@ def compare_regions(
     if abs(c.across_ref_hue) >= 2.5 and abs(c.dh) >= 3:
         ref_h = cs.lab_to_lch(ref_lab)[2]
         if skin or 0 <= ref_h <= 110:
-            word = ("偏黄" if c.dh > 0 and c.da > -3 else "偏绿/偏青") if c.dh > 0 else ("偏红" if c.db > -3 else "偏洋红/偏紫")
+            # 按问题区本身的颜色命名：a* 仍为正就是“更黄 / 更红”，只有 a* < 0 才算偏绿、b* < 0 才算偏青/偏紫
+            pa_, pb_ = float(prob_lab[1]), float(prob_lab[2])
+            if c.dh > 0:
+                word = "偏黄" if pa_ >= 0 else ("偏绿" if pb_ >= 0 else "偏青")
+            else:
+                word = "偏红" if pb_ >= 0 else "偏洋红/偏紫"
         else:
             word = f"色相偏向{cs.hue_name(cs.lab_to_lch(prob_lab)[2])}"
         parts.append(f"{word}（Δh {c.dh:+.1f}°，Δa* {c.da:+.1f}，Δb* {c.db:+.1f}）")
     if not parts:
         parts.append(f"两个区域非常接近（ΔE00 {c.delta_e00:.1f}）")
-    adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin))
+        adjustments = (rec.near_hint(c.delta_e00, skin),)
+    else:
+        adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin))
     main = Finding(
         problem="问题区相对参考区：" + "；".join(parts),
         severity=severity_from_score(sev_score),
@@ -572,15 +611,23 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
         dr.chroma_component_region(ct),
     ]
     findings = []
+    # 每类里最主要的一处用该分项的程度（与总体程度一致），其余按该处自身的浓度，但不超过分项
+    comp_sev = {"opposite": components[0].severity, "graying": components[1].severity}
+    order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
+    seen: set[str] = set()
     for b in ct.blobs[:8]:
-        sev = Severity.MILD if b.score < 0.08 else Severity.NOTABLE
+        own = Severity.MILD if b.score < 0.08 else Severity.NOTABLE
+        top = comp_sev[b.kind]
+        sev = top if b.kind not in seen else min(own, top, key=order.index)
+        sev = max(sev, Severity.MILD, key=order.index)
+        seen.add(b.kind)
         if b.kind == "opposite":
-            problem = f"可疑脏色：局部主色中夹杂“{b.contaminant_hue_name}”散点"
-            adj = rec.contamination_adjustments(b.contaminant_hue_name or "", "", skin=False)
+            problem = f"可疑脏色：“{b.base_hue_name}”中夹杂“{b.contaminant_hue_name}”散点"
+            adj = rec.contamination_adjustments(b.contaminant_hue_name or "", b.base_hue_name, False, ct.opposite_chroma)
             causes = CAUSES_OPPOSITE
         else:
-            problem = "可疑发灰：比同色区域更灰"
-            adj = rec.graying_adjustments("")
+            problem = f"可疑发灰：这块“{b.base_hue_name}”比同色区域更灰"
+            adj = rec.graying_adjustments(b.base_hue_name)
             causes = CAUSES_GRAY
         x, y, w, h = b.bbox
         findings.append(
@@ -612,7 +659,19 @@ def analyze_palette_report(
     cf = pr.colorfulness
     style = pr.style
     lo, hi = style.colorfulness_range if style else (15.0, 200.0)
-    if cf.value < lo:
+    mono = pl.is_monochrome(cf)
+    if mono:  # 黑白作品：没有颜色可缺，不按“缺色/发灰”评估
+        findings.append(Finding(
+            problem="黑白作品，不评估缺色",
+            severity=Severity.NORMAL,
+            evidence=(f"有彩像素（C* ≥ {pl.CHROMA_MIN:g}）只占 {cf.chromatic_share:.1%}，P90 色度 {cf.p90_chroma:.1f}",),
+            causes=(),
+            adjustments=(),
+            confidence=conf,
+            notes=("如果这是想要彩色的照片，检查是否误开了黑白/去色",),
+        ))
+        lo = min(lo, cf.value)
+    elif cf.value < lo:
         sev = Severity.NOTABLE if cf.value < lo * 0.6 else Severity.MILD
         findings.append(Finding(
             problem=f"整体缺色/发灰：色彩丰富度 {cf.value:.0f}（{cf.label}）" + (f"，低于「{style.name}」的 {lo:g}" if style else ""),

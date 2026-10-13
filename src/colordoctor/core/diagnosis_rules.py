@@ -227,15 +227,15 @@ def outlier_component(stats: RegionStats, ct: ContaminationResult) -> RiskCompon
 
 def skin_cast_component(skin: SkinReport) -> RiskComponent:
     if skin.tendency == "正常":
-        return _rc("skin_cast", 0, [f"肤色色相角 h {skin.mean_lch[2]:.1f}°，在自然肤色区间内"])
+        return _rc("skin_cast", 0, [f"肤色色相角 h {skin.mean_lch[2]:.1f}°，在{skin.hue_ref}区间内"])
     return _rc(
         "skin_cast",
         _interp(skin.tendency_amount, SKIN_CAST_CURVE),
         [
             f"肤色平均 Lab = ({skin.mean_lab[0]:.1f}, {skin.mean_lab[1]:.1f}, {skin.mean_lab[2]:.1f})，h {skin.mean_lch[2]:.1f}°",
-            f"总体{skin.tendency}，超出自然肤色色相区间约 {skin.tendency_amount:.1f}°",
+            f"总体{skin.tendency}，超出{skin.hue_ref}色相区间（{skin.hue_range[0]:g}–{skin.hue_range[1]:g}°）约 {skin.tendency_amount:.1f}°",
         ],
-        note="倾向是相对“自然肤色”而言；如果是刻意的风格（例如粉白、暖金），请对照风格预设判断",
+        note=f"倾向是相对{skin.hue_ref}而言；如果是刻意的风格（例如粉白、暖金），请选择对应的风格预设再判断",
     )
 
 

@@ -18,6 +18,7 @@ from colordoctor.core.sampling import SampleError, grid_downsample
 
 MAX_SAMPLES = 200_000
 CHROMA_MIN = 8.0
+ACCENT_L_GAP = 20.0  # 点缀色与主色、辅色的明度差至少这么大，才算“靠明度跳出来”
 
 # Hasler & Süsstrunk (2003) 色彩丰富度分级
 COLORFULNESS_LEVELS = (
@@ -152,6 +153,13 @@ def colorfulness(rgb: np.ndarray, lch: np.ndarray | None = None) -> Colorfulness
     )
 
 
+MONO_CHROMATIC_SHARE = 0.01  # 有彩像素不到 1%：黑白（或几乎无色的单色调）作品
+
+
+def is_monochrome(cf: Colorfulness) -> bool:
+    return cf.chromatic_share < MONO_CHROMATIC_SHARE and cf.p90_chroma < CHROMA_MIN
+
+
 def family_of(L: float, C: float, h: float) -> str:
     if C < CHROMA_MIN:
         if L < 30:
@@ -196,8 +204,12 @@ def ratio_631(lab: np.ndarray) -> tuple[tuple[PaletteColor, ...], RatioResult]:
         tips.append(f"主色占 {shares[0]:.0%}：画面偏单调，可增加一个辅色（约 30%）")
     if len(roles) >= 3 and shares[2] > 0.2:
         tips.append(f"点缀色占 {shares[2]:.0%}（目标约 10%）：点缀色太多，会抢主体")
-    if len(roles) >= 3 and roles[2].chroma <= max(roles[0].chroma, roles[1].chroma):
-        tips.append("点缀色不够“跳”：点缀色的饱和度或明度对比应高于主色和辅色")
+    if len(roles) >= 3 and any(p.chroma >= CHROMA_MIN for p in roles):
+        acc = roles[2]
+        l_gap = min(abs(acc.lab[0] - roles[0].lab[0]), abs(acc.lab[0] - roles[1].lab[0]))
+        if acc.chroma <= max(roles[0].chroma, roles[1].chroma) and l_gap < ACCENT_L_GAP:
+            tips.append(f"点缀色不够“跳”：点缀色的饱和度不高于主色/辅色，明度差也只有 {l_gap:.0f}；"
+                        "点缀色的饱和度或明度对比应高于主色和辅色")
     if other > 0.1:
         rest = "、".join(p.family for p in palette[3:6])
         tips.append(f"其余颜色合计 {other:.0%}（{rest}）：颜色偏杂，可在混色器中把它们降饱和或色相并入主色/辅色")
@@ -253,50 +265,52 @@ def family_unity(
         ys = [c[0] for c in comp]
         xs = [c[1] for c in comp]
         d = float(np.median([shifts[c] for c in comp]))
-        ref = cs.lab_to_lch(cs.lch_to_lab(np.array([60, 40, hm + d])))
         patches.append(
             UnityPatch(
                 bbox=(int(offset[0] + min(xs) * ts * step), int(offset[1] + min(ys) * ts * step),
                       int((max(xs) - min(xs) + 1) * ts * step), int((max(ys) - min(ys) + 1) * ts * step)),
                 hue_shift=round(d, 1),
-                note=f"这里的{family}偏{cs.hue_name(ref[2])}（色相 {d:+.0f}°）",
+                note=f"这里的{family}偏{_toward_name(hm, d)}（色相 {d:+.0f}°）",
             )
         )
 
     # 混色器建议：涉及的通道往统一的目标色相收拢
     px = sub[sel]
-    stats = [c for c in ac.channel_stats(px) if c.share >= 0.08 and c.mean_hue is not None]
+    stats = [c for c in ac.channel_stats(px, primary=True) if c.share >= 0.08 and c.mean_hue is not None]
     goal_lab_h = float(cs.lab_to_lch(target)[2]) if target is not None else float(hm)
     goal = ac.lab_hue_to_hsb_hue(goal_lab_h)
     sat_goal = float(np.median([c.mean_sat for c in stats])) if stats else 0
     adjs = []
     for c in stats:
-        hs = ac.hue_slider(c.mean_hue, goal, channel=c.name)
-        ss = ac.sat_slider(c.mean_sat, sat_goal, channel=c.name) if len(stats) > 1 else 0
+        hs, h_note = ac.cap_slider(ac.hue_slider(c.mean_hue, goal, channel=c.name))
+        if hs * cs.hue_diff(ac.lab_hue_of(c.mean_lab), goal_lab_h) <= 0:
+            hs, h_note = 0, ""  # 这一通道的颜色要往相反方向走（或已在目标上）：不给色相建议
+        ss, s_note = ac.cap_slider(ac.sat_slider(c.mean_sat, sat_goal, channel=c.name) if len(stats) > 1 else 0)
         parts = []
         if abs(hs) >= 5:
-            parts.append(f"色相 {hs:+d}")
+            parts.append(f"色相 {hs:+d}{h_note}")
         if abs(ss) >= 8:
-            parts.append(f"饱和度 {ss:+d}")
+            parts.append(f"饱和度 {ss:+d}{s_note}")
         if parts:
             adjs.append(
                 Adjustment(
                     "Camera Raw 混色器",
                     f"{c.name}（管着这种{family}的 {c.share:.0%}）：" + "，".join(parts) + f" → 收拢到同一个{family}",
-                    "小幅",
+                    ac.slider_strength(max(abs(hs), abs(ss))),
                     True,
-                    (("色相", hs), ("饱和度", ss)),
+                    (("色相", hs if abs(hs) >= 5 else 0), ("饱和度", ss if abs(ss) >= 8 else 0)),
                 )
             )
     if target is not None and de is not None and de >= 3:
         cur = cs.lab_to_lch(mean)
         tl = cs.lab_to_lch(target)
+        hs, h_note = ac.cap_slider(ac.hue_slider(ac.lab_hue_to_hsb_hue(cur[2]), ac.lab_hue_to_hsb_hue(tl[2])))
+        ls, l_note = ac.cap_slider(ac.lum_slider(tl[0] - cur[0]))
         adjs.append(
             Adjustment(
                 "Camera Raw 混色器",
-                f"整体往目标{family}靠：色相 {ac.hue_slider(ac.lab_hue_to_hsb_hue(cur[2]), ac.lab_hue_to_hsb_hue(tl[2])):+d}，"
-                f"明亮度 {ac.lum_slider(tl[0] - cur[0]):+d}（当前与目标相差 ΔE00 {de:.1f}）",
-                "小幅",
+                f"整体往目标{family}靠：色相 {hs:+d}{h_note}，明亮度 {ls:+d}{l_note}（当前与目标相差 ΔE00 {de:.1f}）",
+                ac.slider_strength(max(abs(hs), abs(ls))),
                 True,
             )
         )
@@ -318,6 +332,12 @@ def family_unity(
         adjustments=tuple(adjs),
         patches=tuple(patches[:8]),
     )
+
+
+def _toward_name(h: float, d: float) -> str:
+    """色相从 h 往 d 的方向偏：说成“偏青 / 偏黄”这样的相邻色，而不是“绿偏绿”。"""
+    base, step = cs.hue_name(h), (1.0 if d >= 0 else -1.0)
+    return next((n for n in (cs.hue_name(h + step * k) for k in range(1, 181)) if n != base), base)
 
 
 # ================================================================ 风格模板
@@ -342,7 +362,12 @@ def _center(lo: float, hi: float) -> float:
     return ((lo + ((hi - lo) % 360) / 2.0)) % 360
 
 
-TINT_MAX_C = 20.0
+# “接近中性”的像素才能代表调色加的色调：优先用 C* < 8 的；没有足够多时才放宽到 C* < 15
+# （任何风格要的色调都不超过 15；淡蓝的天空 C* 约 20，是有颜色的物体，不能当成高光色调）
+TINT_NEUTRAL_C = 8.0
+TINT_MAX_C = 15.0
+GRADING_SAT_MAX = 30  # 颜色分级饱和度建议上限（常用做法 10–25）
+DESAT_SAT_FLOOR = 10.0  # 通道平均饱和度（HSB）已低于此值：不再建议降饱和
 
 
 def _tint(lab: np.ndarray, sel: np.ndarray, min_share: float = 0.0, band=None) -> tuple[float, float, np.ndarray] | None:
@@ -350,6 +375,11 @@ def _tint(lab: np.ndarray, sel: np.ndarray, min_share: float = 0.0, band=None) -
         return None
     m = lab[sel].mean(axis=0)
     return float(np.degrees(np.arctan2(m[2], m[1])) % 360), float(np.hypot(m[1], m[2])), m
+
+
+def _band_tint(lab, C, band):
+    return (_tint(lab, band & (C < TINT_NEUTRAL_C), min_share=0.05, band=band)
+            or _tint(lab, band & (C < TINT_MAX_C), min_share=0.05, band=band))
 
 
 def _tint_ok(t, spec) -> bool | None:
@@ -398,8 +428,8 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     contrast = float(p95 - p5)
     # 调色加在阴影/高光上的色调，主要体现在“接近中性”的像素上（灰墙、白衣、暗部），
     # 本身就很鲜艳的物体（绿叶、蓝天）不能代表色调。
-    sh = _tint(lab2, (L <= p15) & (C < TINT_MAX_C), min_share=0.05, band=L <= p15)
-    hl = _tint(lab2, (L >= p85) & (C < TINT_MAX_C), min_share=0.05, band=L >= p85)
+    sh = _band_tint(lab2, C, L <= p15)
+    hl = _band_tint(lab2, C, L >= p85)
     sh_ok = _tint_ok(sh, style.get("shadow_tint"))
     hl_ok = _tint_ok(hl, style.get("highlight_tint"))
 
@@ -412,12 +442,13 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
             if s.hue_offset is not None and abs(s.hue_offset) >= 10 and s.share >= 0.05:
                 gaps.append(f"“{s.name}”平均色相与目标中心差 {s.hue_offset:+.0f}°")
     gaps.append(f"色彩丰富度 {cf.value:.0f}（{cf.label}），目标 {cr[0]:g}–{cr[1]:g}{'' if cf_ok else '，需要' + ('降低' if cf.value > cr[1] else '提高')}")
-    if sh is None and style.get("shadow_tint"):
-        gaps.append("阴影里接近中性的区域太少，无法判断阴影色调")
-    if sh is not None and sh_ok is False:
-        gaps.append(f"阴影色调：色相 {sh[0]:.0f}°、色度 {sh[1]:.1f}，目标色相 {style['shadow_tint']['hue']}、色度 {style['shadow_tint']['chroma']}")
-    if hl is not None and hl_ok is False:
-        gaps.append(f"高光色调：色相 {hl[0]:.0f}°、色度 {hl[1]:.1f}，目标色相 {style['highlight_tint']['hue']}、色度 {style['highlight_tint']['chroma']}")
+    for label, t, key in (("阴影", sh, "shadow_tint"), ("高光", hl, "highlight_tint")):
+        if t is None and style.get(key):
+            gaps.append(f"{label}里接近中性的区域太少（有颜色的物体如天空、绿叶不算），无法判断{label}色调")
+    for label, t, ok, key in (("阴影", sh, sh_ok, "shadow_tint"), ("高光", hl, hl_ok, "highlight_tint")):
+        if t is not None and ok is False:
+            now = f"色相 {t[0]:.0f}°、色度 {t[1]:.1f}" if t[1] >= 1.5 else f"接近中性（色度 {t[1]:.1f}）"
+            gaps.append(f"{label}色调：{now}，目标色相 {style[key]['hue']}、色度 {style[key]['chroma']}")
     bp_max = style.get("black_point_max")
     if bp_max is not None and p5 > bp_max:
         gaps.append(f"黑位不够深：P5 明度 {p5:.0f}（目标 ≤ {bp_max}）")
@@ -446,7 +477,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
         parts.append((0.15, max(0.0, 1 - dist / 25)))
     score = 100 * sum(wt * v for wt, v in parts) / sum(wt for wt, _ in parts)
 
-    adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok)
+    adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok, cf.value)
     if bp_min is not None and p5 < bp_min:
         gray = int(cs.lab_to_srgb8(np.array([float(bp_min), 0.0, 0.0]))[0])
         adjs.insert(0, Adjustment("曲线", f"RGB 黑场抬起：输入 0 → 输出约 {gray}（P5 明度 {p5:.0f} → ≥ {bp_min}）", "小幅", False))
@@ -479,30 +510,53 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     )
 
 
-def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None) -> list[Adjustment]:
+def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None, cf_value=None) -> list[Adjustment]:
     out: list[Adjustment] = []
-    sector_center = {s["name"]: _center(*s["hue"]) for s in style.get("sectors", [])}
-    for c in ac.channel_stats(sub):
+    sectors = {s["name"]: tuple(s["hue"]) for s in style.get("sectors", [])}
+    cr = style.get("colorfulness", [0, 200])
+    for c in ac.channel_stats(sub, primary=True):
         if c.share < 0.03 or c.mean_hue is None:
             continue
         act = style.get("channel_targets", {}).get(c.name, "keep")
         if act.startswith("toward:"):
-            goal = ac.lab_hue_to_hsb_hue(sector_center[act.split(":", 1)[1]])
-            hs = ac.hue_slider(c.mean_hue, goal, channel=c.name)
+            sec = act.split(":", 1)[1]
+            lo, hi = sectors[sec]
+            cur_h = ac.lab_hue_of(c.mean_lab)
+            if _in_range(np.array([cur_h]), lo, hi)[0]:
+                continue  # 已经在目标色区里：不动
+            # 往最近的边界（略往里）靠，而不是区段中心
+            margin = min(5.0, ((hi - lo) % 360) / 4)
+            near_lo = abs(cs.hue_diff(cur_h, lo)) <= abs(cs.hue_diff(cur_h, hi))
+            goal_h = (lo + margin) % 360 if near_lo else (hi - margin) % 360
+            hs = ac.hue_slider(c.mean_hue, ac.lab_hue_to_hsb_hue(goal_h), channel=c.name)
+            if hs * cs.hue_diff(cur_h, goal_h) <= 0:
+                continue  # 换算后方向与目标相反：不给
+            hs, note = ac.cap_slider(hs)
             if abs(hs) >= 8:
-                text = f"{c.name}（占画面颜色 {c.share:.0%}）：色相 {hs:+d}，往“{act.split(':', 1)[1]}”靠"
-                if abs(hs) >= 100:
-                    text += "（已到滑块上限仍不够：再配合校准面板，或降低该通道饱和度）"
-                out.append(Adjustment("Camera Raw 混色器", text, "中等" if abs(hs) >= 60 else "小幅", True, (("色相", hs),)))
+                text = f"{c.name}（占画面颜色 {c.share:.0%}）：色相 {hs:+d}，往“{sec}”靠{note}"
+                out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(hs), True, (("色相", hs),)))
         elif act.startswith("desat"):
-            amount = -int(np.clip(30 + 200 * c.share, 30, 90)) if act != "desat_light" else -15
-            text = f"{c.name}（占画面颜色 {c.share:.0%}）：饱和度 {amount:+d}"
+            if c.mean_sat <= DESAT_SAT_FLOOR:
+                continue  # 这个通道的颜色已经很淡
+            if sectors:  # 有目标色区：这是区外的颜色，降到很淡
+                ratio = DESAT_SAT_FLOOR / c.mean_sat
+            elif cf_value is None or cf_value <= cr[1]:
+                continue  # 整体低饱和风格：色彩丰富度已经在目标内，不用再降
+            else:
+                ratio = cr[1] / cf_value
+            amount = int(round((ratio - 1) * 100))
+            if act == "desat_light":
+                amount = max(amount, -15)
+            amount, note = ac.cap_slider(amount)
+            if amount > -8:
+                continue
+            text = f"{c.name}（占画面颜色 {c.share:.0%}）：饱和度 {amount:+d}{note}"
             prm = [("饱和度", amount)]
             if act == "desat_dark":
-                lum = -int(np.clip(20 + 100 * c.share, 20, 60))
+                lum = -int(np.clip(20 + 100 * c.share, 20, ac.SLIDER_CAP))
                 text += f"，明亮度 {lum:+d}"
                 prm.append(("明亮度", lum))
-            out.append(Adjustment("Camera Raw 混色器", text, "中等" if c.share >= 0.15 else "小幅", True, tuple(prm)))
+            out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(amount), True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
     for key, label, t, ok in (("shadow_tint", "阴影", sh, sh_ok), ("highlight_tint", "高光", hl, hl_ok)):
         spec = style.get(key)
@@ -525,6 +579,7 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None)
             continue
         # 颜色分级是在现有色调上“加”一个色调：要加的是差值（目标 − 当前），不是目标本身
         gh, gs = ac.tint_to_grading(goal[0], goal[1] - cur[1], goal[2] - cur[2])
+        gs = min(gs, GRADING_SAT_MAX)
         out.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（目标 Lab 色调 a* {goal[1]:+.1f}、b* {goal[2]:+.1f}，当前 a* {cur[1]:+.1f}、b* {cur[2]:+.1f}）", "小幅", True,
                               (("色相", gh), ("饱和度", gs))))
         rgb_cur = cs.lab_to_srgb8(cur).astype(int)

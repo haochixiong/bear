@@ -130,3 +130,24 @@ def test_reference_curve_layer_keeps_highlight_point():
     pts = plan.get("ref_curve").params["channels"]["composite"]
     assert [255, 215] in pts and [255, 255] not in pts
     assert np.all(np.diff([p[0] for p in pts]) > 0)
+
+
+def test_black_and_white_reference_suggests_converting_not_desaturating():
+    mine = _scene()
+    g = np.repeat(np.linspace(10, 245, 200)[None, :], 160, 0)
+    ref = np.clip(np.stack([g, g, g], -1), 0, 255).astype(np.uint8)
+    m = rm.match_reference(mine, ref)
+    assert not [a for a in m.adjustments if a.tool == "Camera Raw 混色器"]
+    assert any("转黑白" in a.instruction for a in m.adjustments)
+    assert any("黑白作品" in f for f in m.fit)
+
+
+def test_reference_mixer_sliders_capped_and_labelled_by_value():
+    from colordoctor.core import acr_channels as ac
+
+    m = rm.match_reference(_scene(), _scene(bg_h=140, subject=(60, 45, 30)))
+    mix = [a for a in m.adjustments if a.tool == "Camera Raw 混色器"]
+    assert mix
+    for a in mix:
+        v = max(abs(x) for _, x in a.params)
+        assert v <= ac.SLIDER_CAP and a.strength == ac.slider_strength(v), a.instruction

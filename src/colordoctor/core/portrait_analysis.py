@@ -46,8 +46,8 @@ def ita_label(ita: float) -> str:
     return "深"
 
 
-def tendency_of(a: float, b: float) -> tuple[str, float]:
-    """相对自然肤色的总体倾向与超出量（度，≥ 0：到自然区间最近一端的色相差）。
+def tendency_of(a: float, b: float, hue_range: tuple[float, float] = NATURAL_HUE) -> tuple[str, float]:
+    """相对自然肤色（或所选风格的色相区间）的总体倾向与超出量（度，≥ 0：到区间最近一端的色相差）。
 
     色相按顺时针连续处理：0° 两侧不再跳变（h = 359° 与 h = 1° 的超出量相近）。
     a* < 0 时皮肤已经没有红色成分：b* ≥ 0 视为偏绿，b* < 0 视为偏青/偏蓝。
@@ -55,7 +55,7 @@ def tendency_of(a: float, b: float) -> tuple[str, float]:
     if math.hypot(a, b) < 4.0:
         return "正常", 0.0  # 几乎没有颜色（灰 / 黑白）：色相只是噪声，发灰另有判断
     h = math.degrees(math.atan2(b, a)) % 360.0
-    lo, hi = NATURAL_HUE
+    lo, hi = hue_range
     if a < 0:
         return ("偏绿" if b >= 0 else "偏青/偏蓝"), float(abs(((h - hi + 180) % 360) - 180) if b >= 0 else abs(((h - lo + 180) % 360) - 180))
     if h > 180:  # a ≥ 0、b < 0：红偏紫
@@ -64,7 +64,7 @@ def tendency_of(a: float, b: float) -> tuple[str, float]:
         return "偏绿", float(max(0.0, h - hi))
     if h > hi:
         return "偏黄", float(h - hi)
-    if h < MAGENTA_HUE:
+    if h < min(MAGENTA_HUE, lo):
         return "偏洋红", float(lo - h)
     if h < lo:
         return "偏红", float(lo - h)
@@ -120,7 +120,9 @@ def analyze_skin(
     mean_lch = cs.lab_to_lch(mean)
     lab65 = cs.srgb8_to_lab(cs.lab_to_srgb8(mean), white="D65")
     ita = ita_angle(float(lab65[0]), float(lab65[2]))
-    tendency, amount = tendency_of(float(mean[1]), float(mean[2]))
+    custom = preset is not None and preset.key != "natural"
+    hue_range = tuple(preset.hue) if custom else NATURAL_HUE
+    tendency, amount = tendency_of(float(mean[1]), float(mean[2]), hue_range)
 
     Ls = sl[:, 0]
     p15, p40, p60, p85 = np.percentile(Ls, [15, 40, 60, 85])
@@ -160,6 +162,8 @@ def analyze_skin(
         expected_saturation=(round(exp_sat[0], 4), round(exp_sat[1], 4)),
         mixed_region=bool(mixed),
         anomaly_fractions=dict(contam.anomaly_fractions),
+        hue_range=hue_range,
+        hue_ref=f"「{preset.name}」" if custom else "自然肤色",
     )
 
 

@@ -222,3 +222,27 @@ def test_grey_selection_has_no_cast_and_very_bright_skin_floor_is_smooth():
     lo92 = pa._expected_saturation(None, 92.0)[0]
     lo95 = pa._expected_saturation(None, 95.0)[0]
     assert abs(lo92 - lo95) < 0.02
+
+
+# ------------------------------------------------------------------ 风格与整体偏色的一致性（审计回归）
+def test_skin_cast_uses_selected_preset_hue_range():
+    from colordoctor.core import analysis as an
+    from colordoctor.core.color_management import synthetic_context
+    from synth import face_scene
+
+    lab = (86, 11 * np.cos(np.radians(36)), 11 * np.sin(np.radians(36)))  # 冷白皮：色相 36°，在 Cos 区间内
+    img = face_scene(skin_lab=lab)[0]
+    r = an.analyze_skin_region(img, synthetic_context(), preset_key="cosplay")
+    assert r.skin.tendency == "正常", r.skin
+    assert not any(f.problem.startswith("肤色整体") for f in r.findings)
+    r = an.analyze_skin_region(img, synthetic_context())  # 没选风格：按自然肤色仍是偏红
+    assert r.skin.tendency == "偏红"
+
+
+@pytest.mark.parametrize("key", [p.key for p in sp.builtin_presets()])
+def test_preset_centre_passes_its_own_quick_rule(key):
+    p = sp.get_preset(key, sp.builtin_presets())
+    rule = p.quick_rule or sp.DEFAULT_QUICK_RULE
+    L, a, b = p.target_lab
+    r = pa.quick_rule_check(np.array([[L, a, b + 0.3]]), rule)  # 渲染后的平均值会有零点几的偏差
+    assert r.passed, (key, r)

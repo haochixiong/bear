@@ -299,3 +299,152 @@ def test_dispersion_advice_is_meaningful():
     assert "“肤色”" not in text and "橙色" in text and "红色" in text and "黄色" in text
     adj = rec.dispersion_adjustments("绿", False)
     assert "黄色" in adj[0].instruction and "浅绿色" in adj[0].instruction
+
+
+# ------------------------------------------------------------------ 建议文字/数值一致性（审计回归）
+_ORDER = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
+
+
+def _sallow_face():
+    from synth import face_scene
+
+    return face_scene(skin_lab=(66, 9, 28))[0]
+
+
+def test_region_compare_names_problem_by_its_own_colour():
+    ref = skin_region(68, 14, 19)
+    r = an.compare_regions(ref, skin_region(68, 10, 28, seed=3), CTX, skin=True)
+    assert "偏黄" in r.findings[0].problem or "偏黄" in " ".join(f.problem for f in r.findings)
+    assert not any("偏绿" in f.problem or "偏青" in f.problem for f in r.findings)
+    r = an.compare_regions(ref, skin_region(66, 22, 15, seed=3), CTX, skin=True)
+    main = next(f for f in r.findings if f.problem.startswith("问题区"))
+    assert "偏红" in main.problem and "洋红" not in main.problem
+
+
+@pytest.mark.parametrize("make", [
+    lambda: an.analyze_skin_region(_sallow_face(), CTX, preset_key="natural"),
+    lambda: an.analyze_skin_region(skin_region(68, 14, 19), CTX),
+    lambda: an.scan_image(sprinkle(noisy(flat(lch_color(60, 35, 260), 160, 200), 2), YELLOW, 0.03, seed=1), CTX),
+    lambda: an.analyze_palette_report(noisy(flat(lch_color(55, 30, 135), 120, 160), 1), CTX, style_key="teal_orange"),
+])
+def test_headline_severity_not_below_any_card(make):
+    r = make()
+    worst = max(_ORDER.index(f.severity) for f in r.findings)
+    assert _ORDER.index(r.overall_severity) >= worst
+    from colordoctor.core.color_models import severity_from_score
+
+    assert severity_from_score(r.overall_risk) == r.overall_severity
+
+
+def test_scan_top_card_matches_component_severity():
+    img = sprinkle(noisy(flat(lch_color(60, 35, 260), 160, 200), 2), YELLOW, 0.03, seed=1)
+    r = an.scan_image(img, CTX)
+    cards = [f for f in r.findings if f.problem.startswith("可疑脏色")]
+    assert cards and cards[0].severity == comp(r, "opposite").severity
+
+
+def test_contamination_card_and_layer_use_same_saturation():
+    from colordoctor.core import layer_plan as lp
+
+    img = sprinkle(noisy(flat(BLUE), 2), YELLOW, 0.05, seed=5)
+    r = an.analyze_region(img, CTX)
+    card = next(a for f in r.findings for a in f.adjustments if a.tool == "色相/饱和度" and "饱和度" in dict(a.params))
+    layer = lp.plan_from_report(r, img.shape).get("opposite")
+    assert int(dict(card.params)["饱和度"]) == layer.params["ranges"][0]["saturation"]
+    assert f"饱和度 {layer.params['ranges'][0]['saturation']}" in card.instruction
+
+
+def test_uneven_yellow_patch_text_follows_saturation_sign():
+    from types import SimpleNamespace
+
+    from colordoctor.core import layer_plan as lp
+    from colordoctor.core.skin_uniformity import UniformPatch
+
+    def uni(ds):
+        p = UniformPatch("偏黄", (10, 10, 20, 20), 0.1, 9.0, ds, (60.0, 8.0, 20.0), "明显")
+        return SimpleNamespace(patches=(p,), median_hue=55.0, score=80.0)
+
+    dull = an._uniformity_findings(uni(-0.3), 0.9, [])[0].adjustments[0].instruction
+    vivid = an._uniformity_findings(uni(+0.3), 0.9, [])[0].adjustments[0].instruction
+    assert "饱和度略加" in dull and "略降" not in dull
+    assert "饱和度略降" in vivid
+    _, params, _ = lp._skin_layer("偏黄", 9.0, -0.3, (60.0, 8.0, 20.0))
+    assert params["ranges"][0]["saturation"] > 0
+    _, params, _ = lp._skin_layer("偏黄", 9.0, 0.3, (60.0, 8.0, 20.0))
+    assert params["ranges"][0]["saturation"] < 0
+
+
+def test_overall_skin_cast_gets_a_layer_matching_the_card():
+    from colordoctor.core import layer_plan as lp
+
+    img = _sallow_face()
+    r = an.analyze_skin_region(img, CTX)
+    card = next(f for f in r.findings if f.problem == "肤色整体偏黄")
+    hs = next(a for a in card.adjustments if a.tool == "色相/饱和度")
+    layer = lp.plan_from_report(r, img.shape).get("skin_cast")
+    assert layer.kind == "hueSaturation" and layer.mask is not None
+    hue = layer.params["ranges"][0]["hue"]
+    assert hue < 0 and hue == int(dict(hs.params)["色相"])  # 往红
+    assert layer.mask[10, 10] == 0  # 背景不受影响
+
+
+def test_basically_equal_regions_get_no_adjustments():
+    r = an.compare_regions(skin_region(68, 14, 19), skin_region(68, 14.3, 19.2, seed=3), CTX, skin=True)
+    assert all(a.tool == "提示" for a in r.adjustments)
+    r = an.analyze_skin_region(skin_region(68, 14, 19), CTX, part="脸部", other_part=("身体", (69.5, 13.0, 19.8)))
+    f = next(f for f in r.findings if "差异" in f.problem)
+    assert "基本一致" in f.problem and all(a.tool == "提示" for a in f.adjustments)
+    r = an.analyze_skin_region(skin_region(68.5, 14, 19), CTX, preset_key="natural")
+    assert not any(f.problem.startswith("与目标风格") for f in r.findings)
+    assert all(a.tool == "提示" for a in r.adjustments)
+
+
+def test_scan_cards_name_the_patch_colour():
+    img = noisy(flat(BLUE, 200, 300), 2)
+    img[50:150, 50:150] = sprinkle(img[50:150, 50:150], YELLOW, 0.06, seed=3)
+    r = an.scan_image(img, CTX)
+    text = " ".join([f.problem for f in r.findings] + [a.instruction for f in r.findings for a in f.adjustments])
+    assert "“”" not in text and "相邻色" not in text
+    assert "“蓝”中夹杂“黄”" in text
+    from colordoctor.core import layer_plan as lp
+
+    names = [ly.name + ly.reason for ly in lp.plan_from_report(r, img.shape).layers]
+    assert names and not any("多种颜色" in n for n in names)
+
+
+def test_skin_cast_card_defers_to_style_card_for_same_target():
+    r = an.analyze_skin_region(_sallow_face(), CTX, preset_key="natural")
+    cast = next(f for f in r.findings if f.problem.startswith("肤色整体"))
+    assert any(f.problem.startswith("与目标风格") for f in r.findings)
+    assert not [a for a in cast.adjustments if a.tool == "Camera Raw"]
+    r = an.analyze_skin_region(_sallow_face(), CTX)  # 没选风格：卡片自己给方向
+    cast = next(f for f in r.findings if f.problem.startswith("肤色整体"))
+    assert [a for a in cast.adjustments if a.tool == "Camera Raw"]
+
+
+def test_explanations_are_accurate():
+    adj = rec.acr_directions(dL=6, da=0, db=0, dC=0, dh=0)
+    assert not any("只影响肤色" in a.instruction for a in adj)
+    adjs = rec.skin_adjustments(skin_region(66, 9, 28), (66.0, 14.0, 19.0), keep_lightness=True)
+    hs = next(a for a in adjs if a.tool == "色相/饱和度")
+    if int(dict(hs.params)["明度"]):
+        assert "只改颜色" not in hs.instruction
+    cb = next(a for a in adjs if a.tool == "色彩平衡")
+    assert "往蓝" in cb.instruction
+
+
+def test_flat_graying_patch_is_one_card():
+    base = noisy(flat(lch_color(55, 40, 140), 160, 200), 1.5)
+    base[40:80, 40:80] = lch_color(55, 15, 140)
+    r = an.analyze_region(base, CTX)
+    assert any("发灰" in f.problem for f in r.findings)
+    assert not any("明度和色度同时被压缩" in f.problem for f in r.findings)
+
+
+def test_black_and_white_palette_is_not_called_desaturated():
+    g = np.repeat(np.linspace(10, 245, 240)[None, :], 200, 0)
+    mono = np.clip(np.stack([g, g, g], -1), 0, 255).astype(np.uint8)
+    r = an.analyze_palette_report(mono, CTX)
+    assert any(f.problem.startswith("黑白作品") for f in r.findings)
+    assert not any("缺色" in f.problem and not f.problem.startswith("黑白") for f in r.findings)
+    assert not any("自然饱和度" in a.instruction for f in r.findings for a in f.adjustments)
