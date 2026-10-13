@@ -300,7 +300,10 @@ def analyze(
             ratios.append(C[gray & (bands == band)] / ref)
         depth = float(1.0 - np.median(np.concatenate(ratios)))
 
-    base_name = cs.hue_name(base_hue, base_C)
+    rest = family if bicolor else (chromatic & ~opp)
+    _, _, spread = weighted_circular_hue(h[rest], C[rest]) if rest.any() else (None, 0, None)
+
+    base_name = "肤色" if mode == "skin" else cs.hue_name(base_hue, base_C)
     blobs: list[Blob] = []
     if n_opp and not bicolor:
         blobs += _blobs(mask, MASK_OPPOSITE, "opposite", L, C, h, step, offset, base_name, 2, 0.004)
@@ -322,6 +325,7 @@ def analyze(
         graying_depth=round(depth, 4),
         chromatic_fraction=round(chrom_frac, 5),
         noise_like=bool(noise_like),
+        hue_spread=None if spread is None else round(spread, 3),
         opposite_threshold=round(thr, 3),
         anomaly_fractions=tuple(sorted(anomalies.items(), key=lambda t: -t[1])),
         mask=mask,
