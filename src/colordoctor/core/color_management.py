@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import os
 from pathlib import Path
@@ -99,8 +100,12 @@ def load_jpeg(path: str | os.PathLike) -> SourceImage:
         raise ImageLoadError(f"找不到文件：{path}")
     if path.stat().st_size == 0:
         raise ImageLoadError("文件为空，无法读取")
+    return _decode_jpeg(lambda: Image.open(path), path.name)
+
+
+def _decode_jpeg(opener, name: str) -> SourceImage:
     try:
-        with Image.open(path) as im:
+        with opener() as im:
             if im.format != "JPEG":
                 raise ImageLoadError(f"只支持 JPG 图片（当前为 {im.format or '未知格式'}）")
             w, h = im.size
@@ -158,13 +163,63 @@ def load_jpeg(path: str | os.PathLike) -> SourceImage:
         converted=converted,
         assumed_srgb=assumed,
         profile_near_srgb=near,
-        device=path.name,
+        device=name,
         clipped_fraction=clipped,
         warnings=tuple(warnings),
     )
     pixels = np.ascontiguousarray(out, dtype=np.uint8)
     pixels.setflags(write=False)
     return SourceImage(pixels=pixels, context=ctx, original_size=(im.size[0], im.size[1]))
+
+
+RAW_EXTS = {".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf", ".orf", ".rw2", ".dng",
+            ".pef", ".srw", ".3fr", ".iiq", ".erf", ".kdc", ".mos", ".mrw", ".x3f"}
+RAW_WARNING = ("RAW 由 LibRaw 解码（相机白平衡、sRGB）：颜色与 ACR 的相机配置文件（如“Adobe 颜色”）不同，"
+               "数值只作参考。要与 ACR 一致，请在 PS 插件里分析 ACR 打开后的画面")
+
+
+def is_raw(path: str | os.PathLike) -> bool:
+    return Path(path).suffix.lower() in RAW_EXTS
+
+
+def load_raw(path: str | os.PathLike, use_preview: bool = False) -> SourceImage:
+    """读取相机 RAW。use_preview=True 时改用文件里内嵌的 JPG 预览（相机直出的颜色）。"""
+    path = Path(path)
+    if not path.exists():
+        raise ImageLoadError(f"找不到文件：{path}")
+    try:
+        import rawpy
+    except ImportError as e:
+        raise ImageLoadError("读取 RAW 需要安装 rawpy：pip install rawpy") from e
+    try:
+        with rawpy.imread(str(path)) as raw:
+            if use_preview:
+                thumb = raw.extract_thumb()
+                if thumb.format != rawpy.ThumbFormat.JPEG:
+                    raise ImageLoadError("这个 RAW 文件没有内嵌的 JPG 预览，请取消“使用内嵌预览”")
+                data = bytes(thumb.data)
+                src = _decode_jpeg(lambda: Image.open(io.BytesIO(data)), path.name)
+                note = "使用 RAW 内嵌的 JPG 预览（相机直出的颜色，尺寸可能较小）"
+                ctx = dataclasses.replace(src.context, warnings=(*src.context.warnings, note))
+                return SourceImage(src.pixels, ctx, src.original_size)
+            sizes = raw.sizes
+            if sizes.width * sizes.height > MAX_PIXELS:
+                raise ImageLoadError(f"图片过大（{sizes.width}×{sizes.height}），超过 {MAX_PIXELS // 1_000_000} MP 上限")
+            rgb = raw.postprocess(use_camera_wb=True, output_color=rawpy.ColorSpace.sRGB, output_bps=8)
+    except ImageLoadError:
+        raise
+    except Exception as e:  # rawpy 的错误类型较多（LibRawFileUnsupportedError 等）
+        raise ImageLoadError(f"无法读取 RAW 文件：{e}") from e
+    ctx = ColorContext(source="file", analysis_space=ANALYSIS_SPACE, source_profile="相机 RAW（LibRaw 解码）",
+                       converted=True, device=path.name, warnings=(RAW_WARNING,))
+    pixels = np.ascontiguousarray(rgb, dtype=np.uint8)
+    pixels.setflags(write=False)
+    return SourceImage(pixels=pixels, context=ctx, original_size=(pixels.shape[1], pixels.shape[0]))
+
+
+def load_image(path: str | os.PathLike, use_raw_preview: bool = False) -> SourceImage:
+    """按扩展名选择：RAW 用 load_raw，其余按 JPG 读取。"""
+    return load_raw(path, use_raw_preview) if is_raw(path) else load_jpeg(path)
 
 
 def screen_pixels_to_srgb(

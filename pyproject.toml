@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-qt>=4.4", "hypothesis>=6.100"]
 ai = ["anthropic>=1.0"]  # 仅“Claude API”方式需要；Claude Code / Codex 会话和 DeepSeek 不需要
+raw = ["rawpy>=0.19"]  # 读取相机 RAW
+seg = ["onnxruntime>=1.17"]  # AI 抠皮肤；Windows 显卡加速改装 onnxruntime-directml
 
 [project.scripts]
 colordoctor = "colordoctor.app:main"

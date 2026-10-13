@@ -21,7 +21,7 @@ from colordoctor.core import analysis as an
 from colordoctor.core import palette as pl
 from colordoctor.core import report_json as rj
 from colordoctor.core import skin_presets as sp
-from colordoctor.core.color_management import ImageLoadError, load_jpeg
+from colordoctor.core.color_management import ImageLoadError, load_image
 from colordoctor.core.sampling import SampleError, crop
 
 MODES = ("general", "scan", "skin", "palette", "reference", "point")
@@ -56,7 +56,7 @@ def _text(report) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="colordoctor", description="人像色彩诊断（离线，只读）")
     sub = p.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("analyze", help="分析一张 JPG")
+    a = sub.add_parser("analyze", help="分析一张 JPG 或相机 RAW")
     a.add_argument("image")
     a.add_argument("--mode", choices=MODES, default="general")
     a.add_argument("--rect", type=lambda t: _ints(t, 4), help="x,y,w,h（像素）；默认整张图")
@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--family", help="检查哪种颜色是否统一：红/橙/黄/绿/青/蓝/紫/品红")
     a.add_argument("--reference", help="仿色参考图（reference 模式）")
     a.add_argument("--json", action="store_true", help="输出完整 JSON")
+    a.add_argument("--raw-preview", action="store_true", help="RAW 文件改用内嵌的 JPG 预览（相机直出的颜色）")
     a.add_argument("--summary", action="store_true", help="输出精简 JSON 摘要（适合给 AI）")
     sub.add_parser("presets", help="列出肤色风格")
     sub.add_parser("styles", help="列出整图风格模板")
@@ -93,7 +94,7 @@ def run(argv: list[str]) -> int:
             print(f"{s['key']:22s} [{s.get('category', '')}] {s['name']}  {s['description']}")
         return 0
     try:
-        src = load_jpeg(args.image)
+        src = load_image(args.image, use_raw_preview=args.raw_preview)
         img = src.pixels
         ctx = src.context
         rect = args.rect
@@ -112,7 +113,7 @@ def run(argv: list[str]) -> int:
         elif args.mode == "reference":
             if not args.reference:
                 raise SampleError("reference 模式需要 --reference 参考图.jpg")
-            ref = load_jpeg(args.reference).pixels
+            ref = load_image(args.reference).pixels
             report = an.compare_reference(region, ref, ctx, rect=rect)
         else:
             report = an.analyze_region(region, ctx, rect=rect)

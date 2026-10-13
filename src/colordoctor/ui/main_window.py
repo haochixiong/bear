@@ -37,7 +37,7 @@ from colordoctor.capture import screen_capture as sc
 from colordoctor.core import portrait_analysis as pa
 from colordoctor.core import recommendations as rec
 from colordoctor.core import skin_presets as sp
-from colordoctor.core.color_management import ImageLoadError, load_jpeg, screen_pixels_to_srgb
+from colordoctor.core.color_management import RAW_EXTS, ImageLoadError, load_image, screen_pixels_to_srgb
 from colordoctor.core.color_models import AnalysisReport, PointSample, Severity
 from colordoctor.core.sampling import SampleError, color_values
 from colordoctor.ui.capture_overlay import CaptureSession
@@ -232,7 +232,7 @@ class MainWindow(QMainWindow):
         self.live_btn.toggled.connect(self.set_live)
         self.capture_btn = QPushButton("▭ 框选屏幕")
         self.capture_btn.clicked.connect(self.start_capture)
-        self.jpg_btn = QPushButton("打开 JPG")
+        self.jpg_btn = QPushButton("打开 JPG / RAW")
         self.jpg_btn.clicked.connect(lambda: self.open_jpg())
         self.reselect_btn = QPushButton("JPG 重选")
         self.reselect_btn.setEnabled(False)
@@ -636,11 +636,13 @@ class MainWindow(QMainWindow):
     # ================================================================ JPG
     def open_jpg(self, path: str | None = None):
         if path is None:
-            path, _ = QFileDialog.getOpenFileName(self, "打开 JPG（只读取，不会修改原图）", "", "JPG 图片 (*.jpg *.jpeg *.JPG *.JPEG)")
+            raw = " ".join(f"*{e} *{e.upper()}" for e in sorted(RAW_EXTS))
+            path, _ = QFileDialog.getOpenFileName(self, "打开 JPG / RAW（只读取，不会修改原图）", "",
+                                                  f"图片 (*.jpg *.jpeg *.JPG *.JPEG {raw});;JPG (*.jpg *.jpeg *.JPG *.JPEG);;相机 RAW ({raw})")
             if not path:
                 return
         try:
-            self.jpg = load_jpeg(path)
+            self.jpg = load_image(path, use_raw_preview=self.settings.value("raw/use_preview", False, type=bool))
         except ImageLoadError as e:
             QMessageBox.warning(self, "无法打开图片", str(e))
             return

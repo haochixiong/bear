@@ -127,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     win.show()
     _start_bridge(win)
     for a in argv[1:]:
-        if Path(a).suffix.lower() in (".jpg", ".jpeg") and Path(a).exists():
+        from colordoctor.core.color_management import RAW_EXTS
+
+        if Path(a).suffix.lower() in (".jpg", ".jpeg", *RAW_EXTS) and Path(a).exists():
             win.open_jpg(a)
             break
     return app.exec()
