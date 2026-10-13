@@ -158,6 +158,8 @@ class ContaminationResult:
     graying_depth: float  # 发灰处 s_ab 相对同色干净处的下降比例
     chromatic_fraction: float
     noise_like: bool
+    opposite_threshold: float = 0.0  # 判为对立色所需的最低色度
+    anomaly_fractions: tuple[tuple[str, float], ...] = ()  # 按色相名统计的异常像素占比
     mask: object = None  # np.ndarray (h, w) uint8：0 正常 1 无彩/忽略 2 对立色 3 发灰
     mask_scale: float = 1.0  # mask 像素到源像素的倍数
     blobs: tuple[Blob, ...] = ()
