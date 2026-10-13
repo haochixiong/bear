@@ -46,7 +46,8 @@ def point_html(s: PointSample, preset: SkinPreset | None = None, preset_delta=No
     v = s.values
     rows = [
         ("坐标", f"x {s.x}, y {s.y}"),
-        ("采样", f"{s.size_label} 平均（{s.pixel_count} 像素）"),
+        ("采样", f"{s.size_label} 平均（{s.pixel_count} 像素）" if s.pixel_count <= (2 * s.radius + 1) ** 2
+                 else f"拖框区域平均（{s.pixel_count} 像素）"),
         ("HEX", v.hex),
         ("RGB", "%d, %d, %d" % v.rgb),
         ("HSB（PS 拾色器）", "H %.0f°  S %.0f%%  B %.0f%%" % v.hsb),

@@ -57,6 +57,7 @@ class CaptureSession(QObject):
             ov = _ScreenOverlay(cap, i)
             ov.view.radius = radius
             ov.view.lasso_mode = lasso
+            ov.view.allow_point = allow_point
             ov.view.radius_changed.connect(self._sync_radius)
             ov.view.polygon_selected.connect(lambda pts, i=i: self._on_polygon(i, pts))
             ov.view.point_selected.connect(lambda x, y, i=i: self._on_point(i, x, y))

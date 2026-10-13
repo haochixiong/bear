@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSlider,
     QToolButton,
@@ -25,10 +26,11 @@ EDIT_PIXELS = 2_000_000  # 编辑用的工作分辨率上限；大图在缩小�
 
 TOOLS = {
     "brush_add": "画笔添加",
-    "brush_erase": "画笔擦除",
+    "brush_erase": "画笔删除",
     "wand_add": "魔棒添加",
     "wand_erase": "魔棒删除",
 }
+MIN_PIXELS = 30  # 少于这么多皮肤像素无法分析
 
 
 def work_step(h: int, w: int) -> int:
@@ -69,6 +71,7 @@ class MaskCanvas(ImageSelectWidget):
         self.brush = 12.0
         self.tolerance = 8.0
         self._stroke: list[tuple[float, float]] = []
+        self.edited = False
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.set_image(self._compose())
 
@@ -135,10 +138,27 @@ class MaskCanvas(ImageSelectWidget):
         r = self.brush + 2
         return (min(ax, bx) - r, min(ay, by) - r, max(ax, bx) + r, max(ay, by) + r)
 
+    def keyPressEvent(self, ev):
+        # 与 Photoshop 习惯一致：[ ] 调画笔大小；Esc 交给对话框（取消）
+        if ev.key() in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
+            step = max(1.0, round(self.brush * 0.2))
+            self.brush = float(np.clip(self.brush + (step if ev.key() == Qt.Key.Key_BracketRight else -step), 2, 120))
+            self.brush_changed(self.brush)
+            self.update()
+            return
+        if ev.key() == Qt.Key.Key_Escape:
+            ev.ignore()
+            return
+        super().keyPressEvent(ev)
+
+    def brush_changed(self, _value: float):
+        """对话框替换这个回调，用来同步滑块。"""
+
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(ev)
         x, y = self.to_image(ev.position())
+        self.edited = True
         self.push()
         if self.tool.startswith("wand"):
             region = me.magic_wand(self.region, int(x), int(y), self.tolerance)
@@ -198,19 +218,34 @@ class MaskEditorDialog(QDialog):
             b.clicked.connect(lambda _c, k=key: setattr(self.canvas, "tool", k))
             group.addButton(b)
             tools.addWidget(b)
-        tools.addWidget(QLabel("画笔"))
+        brush_label = QLabel("画笔 12")
+        tools.addWidget(brush_label)
         self.brush = QSlider(Qt.Orientation.Horizontal)
         self.brush.setRange(2, 120)
         self.brush.setValue(12)
         self.brush.setMinimumWidth(110)
-        self.brush.valueChanged.connect(lambda v: setattr(self.canvas, "brush", float(v)))
+        self.brush.setToolTip("画笔半径（像素）；也可以用 [ 和 ] 调整")
+
+        def set_brush(v):
+            self.canvas.brush = float(v)
+            brush_label.setText(f"画笔 {int(v)}")
+
+        self.brush.valueChanged.connect(set_brush)
+        self.canvas.brush_changed = lambda v: self.brush.setValue(int(round(v)))
         tools.addWidget(self.brush)
-        tools.addWidget(QLabel("魔棒容差"))
+        tol_label = QLabel("魔棒容差 8")
+        tools.addWidget(tol_label)
         self.tol = QSlider(Qt.Orientation.Horizontal)
         self.tol.setRange(2, 30)
         self.tol.setValue(8)
         self.tol.setMinimumWidth(90)
-        self.tol.valueChanged.connect(lambda v: setattr(self.canvas, "tolerance", float(v)))
+        self.tol.setToolTip("颜色相差多少以内算同一块（Lab 色差）")
+
+        def set_tol(v):
+            self.canvas.tolerance = float(v)
+            tol_label.setText(f"魔棒容差 {int(v)}")
+
+        self.tol.valueChanged.connect(set_tol)
         tools.addWidget(self.tol)
         undo = QPushButton("撤销")
         undo.clicked.connect(self._undo)
@@ -221,10 +256,14 @@ class MaskEditorDialog(QDialog):
         tools.addWidget(reset)
         self.info = QLabel()
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText("用这个蒙版重新分析")
+        ok_btn = bb.button(QDialogButtonBox.StandardButton.Ok)
+        ok_btn.setText("用这个蒙版重新分析")
+        ok_btn.setAutoDefault(False)  # 回车不直接确定，避免误触
+        ok_btn.setDefault(False)
         bb.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        bb.button(QDialogButtonBox.StandardButton.Cancel).setAutoDefault(False)
         bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
+        bb.rejected.connect(self._cancel)
         lay = QVBoxLayout(self)
         lay.addLayout(tools)
         lay.addWidget(self.canvas, 1)
@@ -232,18 +271,45 @@ class MaskEditorDialog(QDialog):
         bottom.addWidget(self.info, 1)
         bottom.addWidget(bb)
         lay.addLayout(bottom)
-        self.info.setText("左键涂抹/点击；滚轮缩放，右键拖动平移；Ctrl+Z 撤销")
+        self.info.setText("左键涂抹/点击；[ ] 调画笔大小；滚轮缩放，右键拖动平移；Ctrl+Z 撤销")
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Z and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self._undo()
+        elif ev.key() == Qt.Key.Key_Escape:
+            self._cancel()
         else:
             super().keyPressEvent(ev)
+
+    def accept(self):
+        if int(self.canvas.mask.sum()) * self.canvas.step ** 2 < MIN_PIXELS:
+            # 不关闭对话框，刚才的修改还在
+            QMessageBox.warning(self, "蒙版太小", "蒙版里的皮肤像素太少，无法分析。请再添加一些皮肤区域。")
+            return
+        super().accept()
+
+    def _confirm_discard(self) -> bool:
+        if not self.canvas.edited:
+            return True
+        ok = QMessageBox.question(self, "放弃修改？", "蒙版已经修改过，确定放弃这些修改吗？")
+        return ok == QMessageBox.StandardButton.Yes
+
+    def _cancel(self):
+        # 用户点“取消” / 按 Esc：改过蒙版时先确认
+        if self._confirm_discard():
+            self.reject()
+
+    def closeEvent(self, ev):
+        if ev.spontaneous() and not self._confirm_discard():  # 用户点窗口的关闭按钮
+            ev.ignore()
+            return
+        super().closeEvent(ev)
 
     def _undo(self):
         self.canvas.undo()
 
     def _reset(self):
+        self.canvas.edited = True
         self.canvas.reset_to(self.auto_mask)
 
     @property

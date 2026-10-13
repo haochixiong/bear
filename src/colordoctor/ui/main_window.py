@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 from colordoctor import __version__
 from colordoctor.capture import hotkeys as hk
 from colordoctor.capture import screen_capture as sc
+from colordoctor.core import color_spaces as cs
 from colordoctor.core import portrait_analysis as pa
 from colordoctor.core import recommendations as rec
 from colordoctor.core import skin_presets as sp
@@ -48,6 +49,22 @@ from colordoctor.ui.result_view import ResultView
 from colordoctor.ui.selection_widget import ImageSelectWidget
 from colordoctor.ui.session import MODES, RADIUS_CHOICES, HistoryItem, Session, crop_selection, point_patch_from
 from colordoctor.ui.worker import run_in_background
+
+MIN_SIDE = 8  # 区域分析的最小边长（像素）；更小的选区统计没有意义，有的计算也会出错
+
+
+def hk_norm(text: str) -> str:
+    return "+".join(sorted(t.strip().lower() for t in text.split("+")))
+
+
+def _looks_like_skin(lab) -> bool:
+    """宽松的肤色范围：明度适中、偏暖（a*、b* 为正），色相在红到黄之间。用来避免把蓝天当肤色比较。"""
+    L, a, b = (float(v) for v in lab[:3])
+    if not (20 <= L <= 95) or a < -2 or b < 0:
+        return False
+    h = float(np.degrees(np.arctan2(b, a))) % 360
+    return 10 <= h <= 85 and np.hypot(a, b) >= 4
+
 
 STEPS = {
     "point": ["单击取点（拖动则取框内平均）"],
@@ -64,10 +81,10 @@ class JpgSelectDialog(QDialog):
     """在 JPG 上选择点/区域（不是图片浏览器，只用来取样）。"""
 
     def __init__(self, parent, pixels: np.ndarray, steps: list[str], radius: int, lasso: bool = False,
-                 labels: list[str] | None = None):
+                 labels: list[str] | None = None, allow_point: bool = True):
         super().__init__(parent)
         self.labels = labels or (["参考区", "问题区"] if len(steps) > 1 else ["选区"])
-        self.setWindowTitle("在 JPG 上选择（滚轮缩放，右键拖动平移，Esc 取消）")
+        self.setWindowTitle("在图片上选择（滚轮缩放，右键拖动平移，Esc 取消）")
         self.resize(1100, 760)
         self.steps = steps
         self.step = 0
@@ -75,6 +92,7 @@ class JpgSelectDialog(QDialog):
         self.view = ImageSelectWidget(self, magnifier=True, allow_zoom=True)
         self.view.radius = radius
         self.view.lasso_mode = lasso
+        self.view.allow_point = allow_point
         self.view.set_image(pixels)
         self.view.polygon_selected.connect(lambda pts: self._got("polygon", tuple(pts)))
         self.view.point_selected.connect(lambda x, y: self._got("point", (x, y)))
@@ -190,7 +208,7 @@ class MainWindow(QMainWindow):
         self.settings = settings or QSettings("ColorDoctor", "ColorDoctor")
         self.setWindowTitle(f"人像色彩诊断取色器 {__version__}")
         self.resize(480, 940)
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(440)  # _build 之后按实际布局再调大
         self.setAcceptDrops(True)
         self.jpg = None
         self.capture_session: CaptureSession | None = None
@@ -245,7 +263,8 @@ class MainWindow(QMainWindow):
         self.capture_btn.clicked.connect(self.start_capture)
         self.jpg_btn = QPushButton("打开 JPG / RAW")
         self.jpg_btn.clicked.connect(lambda: self.open_jpg())
-        self.reselect_btn = QPushButton("JPG 重选")
+        self.reselect_btn = QPushButton("在图片上重选")
+        self.reselect_btn.setToolTip("在已打开的 JPG / RAW 上重新框选或取点")
         self.reselect_btn.setEnabled(False)
         self.reselect_btn.clicked.connect(self.select_on_jpg)
         for w in (self.live_btn, self.capture_btn, self.jpg_btn, self.reselect_btn):
@@ -271,7 +290,8 @@ class MainWindow(QMainWindow):
         )
         row.addWidget(QLabel("采样"))
         row.addWidget(self.radius_box)
-        row.addWidget(QLabel("风格"))
+        self.preset_label = QLabel("肤色目标")
+        row.addWidget(self.preset_label)
         row.addWidget(self.preset_box, 1)
         lay.addLayout(row)
         row = QHBoxLayout()
@@ -304,7 +324,7 @@ class MainWindow(QMainWindow):
         self.auto_mask_check = QCheckBox("自动抠皮肤")
         self.auto_mask_check.setChecked(True)
         self.auto_mask_check.setToolTip("只统计选区里的皮肤像素（自动去掉头发、眼睛、嘴唇、背景）")
-        self.auto_mask_check.toggled.connect(lambda v: setattr(self.session, "auto_mask", v))
+        self.auto_mask_check.toggled.connect(self._toggle_auto_mask)
         from colordoctor.core import segmentation as sg
 
         seg_ok, seg_why = sg.available()
@@ -338,14 +358,14 @@ class MainWindow(QMainWindow):
                 last_cat = cat
             self.style_box.addItem(st["name"], st["key"])
             self.style_box.setItemData(self.style_box.count() - 1, f"{cat}：{st['description']}", Qt.ItemDataRole.ToolTipRole)
-        self.style_box.currentIndexChanged.connect(lambda _i: setattr(self.session, "style_key", self.style_box.currentData()))
+        self.style_box.currentIndexChanged.connect(self._palette_option_changed)
         self.family_box = QComboBox()
         self.family_box.addItem("（不检查）", None)
         for fam in FAMILIES:
             self.family_box.addItem(f"统一：{fam}", fam)
         self.family_box.setToolTip("检查画面里某一种颜色（例如所有绿色）是不是同一种")
-        self.family_box.currentIndexChanged.connect(lambda _i: setattr(self.session, "family", self.family_box.currentData()))
-        for wdg in (QLabel("风格"), self.style_box, self.family_box):
+        self.family_box.currentIndexChanged.connect(self._palette_option_changed)
+        for wdg in (QLabel("风格模板"), self.style_box, QLabel("统一色"), self.family_box):
             r.addWidget(wdg)
         lay.addWidget(self.palette_row)
         # 仿色：更换参考作品
@@ -353,10 +373,11 @@ class MainWindow(QMainWindow):
         rr = QHBoxLayout(self.ref_row)
         rr.setContentsMargins(0, 0, 0, 0)
         self.ref_reset_btn = QPushButton("更换参考作品")
-        self.ref_reset_btn.setToolTip("下一次框选 / 打开 JPG 时重新选择参考作品")
+        self.ref_reset_btn.setToolTip("下一次框选 / 打开图片时重新选择参考")
         self.ref_reset_btn.clicked.connect(self.reset_reference_image)
-        rr.addWidget(QLabel("仿色：先选参考作品，再选你的照片；参考作品会一直沿用"))
-        rr.addStretch(1)
+        self.ref_label = QLabel()
+        self.ref_label.setWordWrap(True)
+        rr.addWidget(self.ref_label, 1)
         rr.addWidget(self.ref_reset_btn)
         lay.addWidget(self.ref_row)
 
@@ -375,7 +396,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(2, 2, 2, 2)
         top = QHBoxLayout()
         self.details_check = QCheckBox("显示详细数据")
-        self.details_check.toggled.connect(lambda _v: self._show_item(self._current))
+        self.details_check.toggled.connect(lambda _v: self._show_item(self._current, switch_tab=False))
         top.addWidget(self.details_check, 1)
         self.ai_btn = QPushButton("AI 点评")
         self.ai_btn.setToolTip("把分析数值发给你在设置中选择的 AI（Claude Code / Codex / DeepSeek / Claude API）")
@@ -410,6 +431,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.statusBar().showMessage("就绪：所有计算在本地完成，不上传、不修改任何图片")
 
+        # 最小宽度不能小于布局需要的宽度，否则按钮文字被截断
+        self.setMinimumWidth(max(440, central.minimumSizeHint().width() + 12))
         act = QAction(self)
         act.setShortcut(QKeySequence("Ctrl+O"))
         act.triggered.connect(lambda: self.open_jpg())
@@ -474,8 +497,44 @@ class MainWindow(QMainWindow):
         }
 
     def reset_reference_image(self):
-        self.ref_image_item = None
-        self.statusBar().showMessage("下一次框选或打开 JPG 时请先选参考作品", 6000)
+        if self.session.mode == "compare":
+            self.session.reference = None
+            self._after_add(None, quiet=True)
+            self.statusBar().showMessage("下一次框选时请先框参考区", 6000)
+        else:
+            self.ref_image_item = None
+            self.statusBar().showMessage("下一次框选或打开图片时请先选参考作品", 6000)
+        self._update_ref_label()
+
+    def _update_ref_label(self):
+        mode = self.session.mode
+        if mode == "compare":
+            ref = self.session.reference
+            self.ref_reset_btn.setText("更换参考区")
+            self.ref_label.setText(f"当前参考区：{ref.label}（{ref.time_text}）" if ref is not None
+                                   else "参考对比：先框参考区（干净皮肤），再框问题区；参考区会一直沿用")
+        else:
+            ref = self.ref_image_item
+            self.ref_reset_btn.setText("更换参考作品")
+            self.ref_label.setText(f"当前参考作品：{ref.label}（{ref.time_text}）" if ref is not None
+                                   else "仿色：先选参考作品，再选你的照片（可以是两张不同的图）；参考作品会一直沿用")
+        self.ref_reset_btn.setEnabled(ref is not None)
+
+    def _toggle_auto_mask(self, v: bool):
+        self.session.auto_mask = v
+        # AI 抠皮肤只在“自动抠皮肤”打开时起作用
+        from colordoctor.core import segmentation as sg
+
+        self.ai_seg_check.setEnabled(v and sg.available()[0])
+
+    def _palette_option_changed(self, _i=None):
+        self.session.style_key = self.style_box.currentData()
+        self.session.family = self.family_box.currentData()
+        cur = self._current
+        # 当前显示的是整图色彩结果：按新的风格 / 统一色重新计算（和改肤色目标的行为一致）
+        if cur is not None and isinstance(cur.result, AnalysisReport) and cur.result.mode == "palette" \
+                and cur is not self.ref_image_item:
+            self._rerun(cur, "palette")
 
     def _toggle_ai_seg(self, v: bool):
         self.session.ai_seg = v
@@ -505,6 +564,8 @@ class MainWindow(QMainWindow):
                 self.settings.setValue(f"ai/{k}", "true" if v is True else ("false" if v is False else v))
             new_keys = dlg.values()
             bad = []
+            if len({hk_norm(v) for v in new_keys.values()}) < len(new_keys):
+                bad.append("两个快捷键不能相同")
             for v in new_keys.values():
                 try:
                     hk.parse_hotkey(v)
@@ -531,7 +592,12 @@ class MainWindow(QMainWindow):
         self.skin_compare_check.setVisible(key == "compare")
         self.skin_row.setVisible(key == "skin")
         self.palette_row.setVisible(key == "palette")
-        self.ref_row.setVisible(key == "reference")
+        self.ref_row.setVisible(key in ("reference", "compare"))
+        self.history_panel.ref_action_text = "设为参考作品" if key == "reference" else "设为参考区"
+        self._update_ref_label()
+        # 肤色目标只在肤色 / 单点模式下起作用
+        self.preset_label.setVisible(key in ("skin", "point"))
+        self.preset_box.setVisible(key in ("skin", "point"))
         self.wheel.set_preset(self.session.preset if key in ("skin", "point") else None)
         hints = {
             "palette": "整图色彩：框选整张照片，看缺色、6:3:1 比例、某种颜色是否统一、与风格模板的差距",
@@ -550,12 +616,28 @@ class MainWindow(QMainWindow):
         self.session.preset_key = str(self.preset_box.currentData())
         self.wheel.set_preset(self.session.preset if self.session.mode in ("skin", "point") else None)
         cur = self._current
-        if cur is not None and isinstance(cur.result, AnalysisReport) and cur.result.mode == "skin":
-            mm = cur.result.valid_mask if cur.result.mask_info.get("manual") else None
-            self._run_rect(cur.region, cur.rect, cur.context, cur.source_label, step=0, replace=cur, manual_mask=mm,
-                           mode="skin")
+        # 只重算普通的肤色结果；参考区 / 参考作品不动（它们是对比的基准）
+        if cur is not None and isinstance(cur.result, AnalysisReport) and cur.result.mode == "skin" \
+                and cur is not self.session.reference and cur is not self.ref_image_item:
+            self._rerun(cur, "skin")
         elif cur is not None and isinstance(cur.result, PointSample):
-            self._show_item(cur)
+            self._show_item(cur, switch_tab=False)
+
+    def _rerun(self, item: HistoryItem, mode: str):
+        """按新设置重算一条历史结果并替换它。连续改设置时只采用最后一次的结果，不会出现重复记录。"""
+        self._rerun_gen = getattr(self, "_rerun_gen", 0) + 1
+        gen = self._rerun_gen
+        rep = item.result
+        mm = rep.valid_mask if mode == "skin" and rep.mask_info.get("manual") else None
+
+        def done(new_rep):
+            if gen != self._rerun_gen or self.session.get(item.id) is None:
+                return  # 已有更新的请求，或原条目已被删除
+            self._rect_done(item.region, item.rect, new_rep, item.source_label, None, item, item.lasso)
+
+        self.statusBar().showMessage("正在按新设置重新计算……")
+        self._start(self.session.compute_rect, item.region, item.context, item.rect, mode, item.lasso, mm,
+                    part=rep.part if mode == "skin" else None, on_done=done)
 
     def set_on_top(self, on: bool):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
@@ -569,6 +651,9 @@ class MainWindow(QMainWindow):
         else:
             self.live_timer.stop()
             self.live_label.setText("实时取色：关闭")
+            self._live = None  # 关掉后不能再锁定之前的旧读数
+            self.wheel.point = None
+            self.wheel.update()
         if self.live_btn.isChecked() != on:
             self.live_btn.setChecked(on)
 
@@ -630,7 +715,8 @@ class MainWindow(QMainWindow):
         if labels and self._capture_steps_offset:
             labels = labels[self._capture_steps_offset:]
         lasso = self.session.mode == "skin" and self.lasso_check.isChecked()
-        cs_ = CaptureSession(caps, steps, radius=self.session.radius, lasso=lasso, labels=labels)
+        multi = self.session.mode in ("compare", "reference")  # 多步框选：单击不能吃掉一步
+        cs_ = CaptureSession(caps, steps, radius=self.session.radius, lasso=lasso, labels=labels, allow_point=not multi)
         cs_.radius_changed.connect(self._set_radius)
         cs_.selected.connect(self._on_capture_selected)
         cs_.finished.connect(self._capture_done)
@@ -705,30 +791,43 @@ class MainWindow(QMainWindow):
     def select_on_jpg(self):
         if self.jpg is None:
             return
-        steps = STEPS[self.session.mode]
+        mode = self.session.mode
+        steps = STEPS[mode]
         offset = 0
-        if self.session.mode == "reference" and self.ref_image_item is not None:
+        # 已有参考时只选第二步（屏幕框选也是这样）；更换参考用“更换参考区 / 参考作品”按钮
+        if mode == "reference" and self.ref_image_item is not None:
             steps, offset = STEPS["reference"][1:], 1
-        labels = LABELS.get(self.session.mode)
-        lasso = self.session.mode == "skin" and self.lasso_check.isChecked()
+        elif mode == "compare" and self.session.reference is not None:
+            steps, offset = STEPS["compare"][1:], 1
+        elif mode == "reference":
+            # 参考作品和自己的照片通常是两个文件：这张图上只选参考作品，然后去打开自己的照片
+            steps = STEPS["reference"][:1]
+        labels = LABELS.get(mode)
+        lasso = mode == "skin" and self.lasso_check.isChecked()
         dlg = JpgSelectDialog(self, self.jpg.pixels, steps, self.session.radius, lasso=lasso,
-                              labels=labels[offset:] if labels else None)
+                              labels=labels[offset:] if labels else None, allow_point=mode not in ("compare", "reference"))
         if not dlg.exec() and not dlg.results:
             return
         label = f"文件 {self.jpg.context.device}"
         for kind, coords, step in dlg.results:
             step += offset
-            if kind == "point":
-                x, y = coords
-                patch = point_patch_from(self.jpg.pixels, x, y, self.session.radius)
-                self._handle_point(patch, x, y, self.jpg.context, label)
-            elif kind == "polygon":
-                rect, lasso_mask = self._polygon_rect(coords, self.jpg.pixels.shape)
-                region, rect = crop_selection(self.jpg.pixels, rect)
-                self._run_rect(region, rect, self.jpg.context, label, step, lasso=lasso_mask[: region.shape[0], : region.shape[1]])
-            else:
-                region, rect = crop_selection(self.jpg.pixels, coords)
-                self._run_rect(region, rect, self.jpg.context, label, step)
+            try:
+                if kind == "point":
+                    x, y = coords
+                    patch = point_patch_from(self.jpg.pixels, x, y, self.session.radius)
+                    self._handle_point(patch, x, y, self.jpg.context, label)
+                elif kind == "polygon":
+                    rect, lasso_mask = self._polygon_rect(coords, self.jpg.pixels.shape)
+                    region, rect = crop_selection(self.jpg.pixels, rect)
+                    self._run_rect(region, rect, self.jpg.context, label, step, lasso=lasso_mask[: region.shape[0], : region.shape[1]])
+                else:
+                    region, rect = crop_selection(self.jpg.pixels, coords)
+                    self._run_rect(region, rect, self.jpg.context, label, step)
+            except SampleError as e:
+                self.statusBar().showMessage(f"{e}，请在图像上重新框选", 6000)
+                return
+        if mode == "reference" and offset == 0:
+            self.statusBar().showMessage("已记录参考作品：现在打开你的照片（或框选屏幕）选你的照片", 10000)
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasUrls():
@@ -756,9 +855,12 @@ class MainWindow(QMainWindow):
         self._after_add(item)
 
     def _run_rect(self, region, rect, ctx, label, step, replace: HistoryItem | None = None, lasso=None, manual_mask=None,
-                  mode: str | None = None):
+                  mode: str | None = None, part: str | None = None):
         mode = mode or self.session.mode
         if region.size == 0:
+            return
+        if mode != "point" and min(region.shape[:2]) < MIN_SIDE:
+            self.statusBar().showMessage(f"选区太小（{region.shape[1]}×{region.shape[0]} 像素），请框大一些（至少 {MIN_SIDE}×{MIN_SIDE}）", 6000)
             return
         if mode == "reference":
             if step > 0 and self._ref_busy:
@@ -803,10 +905,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在分析……")
         if lasso is None and replace is not None:
             lasso = replace.lasso
-        self._start(self.session.compute_rect, region, ctx, rect, mode, lasso, manual_mask,
+        self._start(self.session.compute_rect, region, ctx, rect, mode, lasso, manual_mask, part=part,
                     on_done=lambda rep: self._rect_done(region, rect, rep, label, None, replace, lasso))
 
-    def _start(self, fn, *args, on_done):
+    def _start(self, fn, *args, on_done, **kwargs):
         def done(rep):
             # 窗口已关闭（例如分析还没结束就退出）时丢弃结果
             from PyQt6 import sip
@@ -821,7 +923,7 @@ class MainWindow(QMainWindow):
             if not sip.isdeleted(self):
                 self._failed(msg)
 
-        task = run_in_background(fn, *args, on_done=done, on_failed=failed)
+        task = run_in_background(fn, *args, on_done=done, on_failed=failed, **kwargs)
         self._tasks.append(task)
         self._tasks = self._tasks[-20:]
 
@@ -848,10 +950,13 @@ class MainWindow(QMainWindow):
             self._run_rect(region2, rect2, ctx2, label2, step=1)
 
     def _rect_done(self, region, rect, rep, label, role=None, replace=None, lasso=None):
+        was_ref = replace is not None and replace is self.session.reference
         if replace is not None:
             self.session.remove(replace.id)
         item = self.session.add_rect(region, rect, rep, label, role=role)
         item.lasso = lasso
+        if was_ref:
+            self.session.set_reference(item)  # 替换的是参考区：新结果继续作为参考区
         self._after_add(item)
         sev = rep.overall_severity.value
         self.statusBar().showMessage(f"分析完成：{sev}（风险 {rep.overall_risk:.0f}，置信度 {rep.confidence:.2f}）", 8000)
@@ -863,32 +968,50 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("分析失败", 5000)
         QMessageBox.warning(self, "分析失败", msg)
 
-    def _after_add(self, item: HistoryItem, quiet: bool = False):
+    def _after_add(self, item: HistoryItem | None, quiet: bool = False):
         ref = self.session.reference.id if self.session.reference else None
-        self.history_panel.set_items(self.session.history, ref)
-        if not quiet:
+        self.history_panel.set_items(self.session.history, ref, self.ref_image_item.id if self.ref_image_item else None)
+        if not quiet and item is not None:
             self._show_item(item)
+        cur = self._current
+        self.history_panel.highlight(cur.id if cur is not None else None)
+        self._update_ref_label()
 
     # ================================================================ 显示
-    def _show_item(self, item: HistoryItem | None):
-        self._current = item
+    def _clear_views(self):
+        self._current = None
+        self.wheel.clear()
+        self.report_view.clear()
+        self.point_view.clear()
+        self.result_view.clear()
+
+    def _show_item(self, item: HistoryItem | None, switch_tab: bool = True):
+        """显示一条结果。三个结果页始终对应同一条：显示单点时清掉区域结论，反之亦然。"""
         if item is None:
+            self._clear_views()
             return
+        self._current = item
+        self.history_panel.highlight(item.id)
         res = item.result
         if isinstance(res, PointSample):
             preset = self.session.preset
             delta = adjs = None
-            if preset is not None:
+            # 只在肤色 / 单点模式下和目标肤色比较；颜色明显不是肤色时不给“调成肤色”的建议
+            if preset is not None and item.mode in ("skin", "point") and _looks_like_skin(res.values.lab):
                 delta = pa.compare_lab(res.values.lab, preset.target_lab)
-                adjs = rec.skin_adjustments(item.region.reshape(-1, 3), preset.target_lab) if delta.delta_e00 >= 1 else ()
-            self.point_view.setHtml(point_html(res, preset, delta, adjs or ()))
+                adjs = rec.skin_adjustments(item.region.reshape(-1, 3), preset.target_lab) if delta.delta_e00 >= 2 else ()
+            self.point_view.setHtml(point_html(res, preset if delta is not None else None, delta, adjs or ()))
+            self.report_view.setHtml("<p>当前是单点取色，读数见「取色数值」页。</p>")
+            self.result_view.clear()
             self.wheel.set_scatter(None)
             self.wheel.set_compare(None, None)
             self.wheel.set_opposite(None)
             self.wheel.set_point(res.values.lab, res.values.rgb)
-            self.tabs.setCurrentWidget(self.point_view)
+            if switch_tab:
+                self.tabs.setCurrentWidget(self.point_view)
             return
         rep: AnalysisReport = res
+        self.point_view.setHtml("<p>当前是区域分析结果，见「结论」页。</p>")
         self.report_view.setHtml(report_html(rep, self.details_check.isChecked()))
         self.wheel.point = None
         ct = rep.contamination
@@ -908,15 +1031,23 @@ class MainWindow(QMainWindow):
         else:
             self.wheel.set_compare(None, None)
         self.result_view.show_report(item.region, rep)
-        self.tabs.setCurrentIndex(0)
+        if switch_tab:
+            self.tabs.setCurrentIndex(0)
 
     # ================================================================ 历史
     def _history_activated(self, hid: int):
-        self._show_item(self.session.get(hid))
+        # 在历史里逐条查看时不跳走标签页
+        self._show_item(self.session.get(hid), switch_tab=False)
 
     def _history_set_ref(self, hid: int):
         item = self.session.get(hid)
-        if item is not None:
+        if item is None:
+            return
+        if self.session.mode == "reference":
+            self.ref_image_item = item  # 仿色模式：设为参考作品
+            self._after_add(item, quiet=True)
+            self.statusBar().showMessage("已设为仿色的参考作品", 4000)
+        else:
             self.session.set_reference(item)
             self._after_add(item, quiet=True)
             self.statusBar().showMessage("已设为参考区", 4000)
@@ -935,25 +1066,33 @@ class MainWindow(QMainWindow):
         item = self.session.get(hid)
         if item is None:
             return
+        lab = cs.srgb8_to_lab(item.region.reshape(-1, 3)).mean(axis=0)
+        if not _looks_like_skin(lab):
+            ok = QMessageBox.question(self, "这不像肤色",
+                                      f"这条记录的平均颜色 Lab {lab[0]:.0f}, {lab[1]:.0f}, {lab[2]:.0f} 不在常见肤色范围内。\n"
+                                      "仍然用它作为目标肤色吗？")
+            if ok != QMessageBox.StandardButton.Yes:
+                return
         p = self.session.set_custom_preset_from(item)
         self._fill_presets()
-        self.statusBar().showMessage(f"已用该取样生成目标风格：Lab {p.target_lab[0]:.0f}, {p.target_lab[1]:.0f}, {p.target_lab[2]:.0f}", 6000)
+        self.statusBar().showMessage(f"已用该取样生成目标肤色：Lab {p.target_lab[0]:.0f}, {p.target_lab[1]:.0f}, {p.target_lab[2]:.0f}", 6000)
+        self._preset_changed()  # 当前的肤色结果按新目标重算
 
     def _history_remove(self, hid: int):
         if self.ref_image_item is not None and self.ref_image_item.id == hid:
             self.ref_image_item = None
         self.session.remove(hid)
-        ref = self.session.reference.id if self.session.reference else None
-        self.history_panel.set_items(self.session.history, ref)
+        if self._current is not None and self._current.id == hid:
+            self._clear_views()  # 删掉的正在显示：不能再导出 / 点评它
+        self._after_add(None, quiet=True)
 
     def _history_clear(self):
         self.ref_image_item = None
+        self._pending_problem = None
+        self._ref_busy = False
         self.session.clear()
-        self.history_panel.set_items([])
-        self.wheel.clear()
-        self.report_view.clear()
-        self.point_view.clear()
-        self.result_view.clear()
+        self._clear_views()
+        self._after_add(None, quiet=True)
 
     # ================================================================ 皮肤蒙版
     def edit_skin_mask(self):
@@ -975,14 +1114,12 @@ class MainWindow(QMainWindow):
         elif item.lasso is not None:
             auto = auto & item.lasso
         start = rep.valid_mask if rep.valid_mask is not None else np.ones(item.region.shape[:2], bool)
-        dlg = MaskEditorDialog(self, item.region, start, auto)
+        dlg = MaskEditorDialog(self, item.region, start, auto)  # 蒙版太小时对话框自己提示、不关闭
         if dlg.exec():
             mask = dlg.mask.copy()
-            if mask.sum() < 30:
-                QMessageBox.warning(self, "蒙版太小", "蒙版里的皮肤像素太少，无法分析")
-                return
-            self.session.part = rep.part or self.session.part
-            self._run_rect(item.region, item.rect, item.context, item.source_label, 0, replace=item, manual_mask=mask)
+            # 按原结果的部位重算，不改界面上当前选的部位
+            self._run_rect(item.region, item.rect, item.context, item.source_label, 0, replace=item, manual_mask=mask,
+                           mode="skin", part=rep.part)
 
     # ================================================================ AI / 导出
     def _current_prompt(self) -> str | None:
@@ -1010,14 +1147,19 @@ class MainWindow(QMainWindow):
     def export_json(self):
         item = self._current
         if item is None:
+            self.statusBar().showMessage("请先完成一次分析或取色", 4000)
             return
         path, _ = QFileDialog.getSaveFileName(self, "导出分析结果", "colordoctor_report.json", "JSON (*.json)")
         if not path:
             return
         from colordoctor.core import report_json as rj
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(rj.report_to_json(item.result))
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(rj.report_to_json(item.result))
+        except OSError as e:
+            QMessageBox.warning(self, "导出失败", f"无法写入文件：{path}\n（{e.strerror or e}）\n请换一个文件夹，或检查是否有写入权限。")
+            return
         self.statusBar().showMessage(f"已导出：{path}", 5000)
 
     def ask_ai(self):

@@ -58,6 +58,7 @@ class ResultView(QWidget):
         super().__init__(parent)
         self.view = ImageSelectWidget(self, magnifier=False, allow_zoom=True)
         self.view.setCursor(Qt.CursorShape.ArrowCursor)
+        self.view.select_enabled = False  # 只用来查看问题位置，左键框选没有用途
         self.toggle = QCheckBox("显示标记")
         self.toggle.setChecked(True)
         self.toggle.toggled.connect(self._refresh)

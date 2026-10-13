@@ -36,6 +36,9 @@ class ImageSelectWidget(QWidget):
         self.zoom = 1.0
         self.pan = QPointF(0, 0)
         self.instruction = ""
+        self.notice = ""  # 临时提示（例如“单击无效”），画在操作说明下面
+        self.allow_point = True  # 多步框选（参考区 / 问题区）时单击不算一步
+        self.select_enabled = True  # 只用来查看的画面（问题位置）不能框选
         self.marks: list[tuple[tuple[int, int, int, int], str]] = []
         self._press: QPointF | None = None
         self._cur: QPointF | None = None
@@ -82,7 +85,10 @@ class ImageSelectWidget(QWidget):
 
     # ---------------------------------------------------------------- 事件
     def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton and not self.select_enabled:
+            return
         if ev.button() == Qt.MouseButton.LeftButton:
+            self.notice = ""
             self._press = ev.position()
             self._cur = ev.position()
             self._path = [ev.position()] if self.lasso_mode else []
@@ -115,7 +121,10 @@ class ImageSelectWidget(QWidget):
         if abs(b.x() - a.x()) < DRAG_THRESHOLD and abs(b.y() - a.y()) < DRAG_THRESHOLD and len(path) < 4:
             xi, yi = int(x1), int(y1)
             if 0 <= xi < W and 0 <= yi < H:
-                self.point_selected.emit(xi, yi)
+                if self.allow_point:
+                    self.point_selected.emit(xi, yi)
+                else:
+                    self.notice = "单击无效：请按住左键拖动框选"
         elif self.lasso_mode and len(path) >= 3:
             pts = [self.to_image(p) for p in path]
             pts = [(min(max(px, 0.0), W), min(max(py, 0.0), H)) for px, py in pts]
@@ -127,6 +136,8 @@ class ImageSelectWidget(QWidget):
             rx, by = min(W, int(np.ceil(rx))), min(H, int(np.ceil(by)))
             if rx > lx and by > ty:
                 self.rect_selected.emit(lx, ty, rx - lx, by - ty)
+            else:
+                self.notice = "框选的范围在图像外面，请在图像上框选"
         self.update()
 
     def wheelEvent(self, ev):
@@ -206,6 +217,11 @@ class ImageSelectWidget(QWidget):
             p.fillRect(QRectF(self.width() / 2 - 260, 6, 520, 32), QColor(0, 0, 0, 170))
             p.setPen(QColor(240, 240, 240))
             p.drawText(r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, self.instruction)
+        if self.notice:
+            r = QRectF(0, 42, self.width(), 26)
+            p.fillRect(QRectF(self.width() / 2 - 220, 42, 440, 26), QColor(120, 60, 0, 200))
+            p.setPen(QColor(255, 230, 200))
+            p.drawText(r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, self.notice)
         p.end()
 
     def _label(self, p, pos, text):

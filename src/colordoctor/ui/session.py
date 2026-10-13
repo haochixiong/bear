@@ -112,15 +112,18 @@ class Session:
         return None
 
     def compute_rect(
-        self, region: np.ndarray, ctx: ColorContext, rect, mode: str | None = None, lasso=None, manual_mask=None
+        self, region: np.ndarray, ctx: ColorContext, rect, mode: str | None = None, lasso=None, manual_mask=None,
+        part: str | None = None,
     ) -> AnalysisReport:
+        """part：肤色模式下的部位；None 时用当前选择（重算已有结果时传原结果的部位）。"""
         mode = mode or self.mode
         if mode == "skin":
+            part = part or self.part
             if self.ai_seg and self.auto_mask and manual_mask is None:
-                manual_mask, ctx = ai_skin_mask(region, ctx, self.part)
+                manual_mask, ctx = ai_skin_mask(region, ctx, part)
             return an.analyze_skin_region(
                 region, ctx, preset=self.preset, rect=rect, auto_mask=self.auto_mask, lasso=lasso,
-                part=self.part, other_part=self.other_part(self.part), manual_mask=manual_mask,
+                part=part, other_part=self.other_part(part), manual_mask=manual_mask,
             )
         if mode == "palette":
             return an.analyze_palette_report(region, ctx, self.style_key, self.family, self.family_target_lab, rect=rect)
@@ -187,10 +190,17 @@ class Session:
         self.history = [h for h in self.history if h.id != item_id]
         if self.reference is not None and self.reference.id == item_id:
             self.reference = None
+        # 各部位的肤色改用剩下的、最近一次的结果；没有了就不再比较
+        self.skin_by_part.clear()
+        for h in self.history:
+            r = h.result
+            if isinstance(r, AnalysisReport) and r.mode == "skin" and r.part and r.skin is not None:
+                self.skin_by_part[r.part] = r.skin.mean_lab
 
     def clear(self) -> None:
         self.history.clear()
         self.reference = None
+        self.skin_by_part.clear()  # 清空后“脸部 vs 身体”不能再拿已删的结果比较
 
     def get(self, item_id: int) -> HistoryItem | None:
         for h in self.history:
