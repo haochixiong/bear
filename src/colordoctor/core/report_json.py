@@ -23,7 +23,8 @@ def to_jsonable(obj, _depth: int = 0):
     if isinstance(obj, Enum):
         return obj.value
     if isinstance(obj, dict):
-        return {str(k): to_jsonable(v, _depth + 1) for k, v in obj.items() if k not in SKIP_FIELDS}
+        # 以下划线开头的键是内部提示（例如图层的蒙版位置），不导出
+        return {str(k): to_jsonable(v, _depth + 1) for k, v in obj.items() if k not in SKIP_FIELDS and not str(k).startswith("_")}
     if isinstance(obj, (list, tuple)):
         return [to_jsonable(v, _depth + 1) for v in obj]
     if isinstance(obj, np.ndarray):

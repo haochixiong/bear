@@ -380,11 +380,15 @@ def test_overall_skin_cast_gets_a_layer_matching_the_card():
     img = _sallow_face()
     r = an.analyze_skin_region(img, CTX)
     card = next(f for f in r.findings if f.problem == "肤色整体偏黄")
-    hs = next(a for a in card.adjustments if a.tool == "色相/饱和度")
-    layer = lp.plan_from_report(r, img.shape).get("skin_cast")
-    assert layer.kind == "hueSaturation" and layer.mask is not None
-    hue = layer.params["ranges"][0]["hue"]
-    assert hue < 0 and hue == int(dict(hs.params)["色相"])  # 往红
+    # 肤色整体偏色用可选颜色（修图常用做法，产品决定），卡片数字就是图层数字
+    sc = next(a for a in card.adjustments if a.tool == "可选颜色")
+    plan = lp.plan_from_report(r, img.shape)
+    layer = plan.get("skin_cast")
+    assert layer.kind == "selectiveColor" and layer.mask is not None
+    assert layer.params == sc.layer["params"] and layer.finding == r.findings.index(card)
+    yellows = layer.params["colors"]["yellows"]
+    assert yellows["y"] < 0  # 偏黄 -> 黄色里减黄
+    assert f"黄色 {yellows['y']:+d}%" in sc.instruction
     assert layer.mask[10, 10] == 0  # 背景不受影响
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 from html import escape
 
 from colordoctor.core.color_models import AnalysisReport, ColorContext, Finding, PointSample, SkinPreset
+from colordoctor.core.perception import de_words
 from colordoctor.ui.theme import SEVERITY_COLORS, TEXT_DIM
 
 
@@ -66,7 +67,7 @@ def point_html(s: PointSample, preset: SkinPreset | None = None, preset_delta=No
     if preset is not None and preset_delta is not None:
         d = preset_delta
         extra = (
-            f"<p>相对目标风格「{escape(preset.name)}」：ΔE00 {d.delta_e00:.1f}；"
+            f"<p>相对目标风格「{escape(preset.name)}」：ΔE00 {d.delta_e00:.1f}（{de_words(d.delta_e00)}）；"
             f"需要 ΔL* {d.dL:+.1f}，Δa* {d.da:+.1f}，Δb* {d.db:+.1f}</p>"
         ) + adjustments_html(adjustments)
     return head + f"<table cellpadding=3>{body}</table>" + extra + "<hr>" + context_html(s.context)
@@ -231,7 +232,7 @@ def details_html(r: AnalysisReport) -> str:
     if r.comparison is not None:
         c = r.comparison
         out += (
-            f"<p><b>参考对比</b>：ΔE00 {c.delta_e00:.2f}，ΔL* {c.dL:+.2f}，ΔC* {c.dC:+.2f}，ΔH* {c.dH:+.2f}，"
+            f"<p><b>参考对比</b>：ΔE00 {c.delta_e00:.2f}（{de_words(c.delta_e00)}），ΔL* {c.dL:+.2f}，ΔC* {c.dC:+.2f}，ΔH* {c.dH:+.2f}，"
             f"Δh {c.dh:+.1f}°，Δa* {c.da:+.2f}，Δb* {c.db:+.2f}</p>"
         )
     out += "<h3>色彩管理</h3>" + context_html(r.context)

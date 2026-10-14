@@ -1,8 +1,9 @@
-"""把分析结果翻译成 Photoshop 调整图层方案：每条问题一个调整图层 + 灰度蒙版。
+"""把分析结果翻译成 Photoshop 调整图层方案：每张问题卡片上带图层的建议 -> 一个调整图层 + 灰度蒙版。
 
 只生成“方案”（参数 + 蒙版数组），真正在 PS 里建图层由 UXP 插件完成。
-参数单位与 PS 调整图层面板一致（色相/饱和度 ±180/±100、色彩平衡 ±100、自然饱和度 ±100、
-曲线 0–255 点）。全部是估计值，图层建好后可以直接在属性面板里改。
+图层参数来自建议本身（Adjustment.layer，见 native_layers），所以卡片上的数字就是图层里的数字；
+每个图层记下它修的是第几条问题（finding = report.findings 的序号），插件把图层放进对应的卡片。
+参数单位与 PS 调整图层面板一致。全部是估计值，图层建好后可以直接在属性面板里改。
 """
 
 from __future__ import annotations
@@ -11,22 +12,21 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from colordoctor.core import acr_channels as ac
 from colordoctor.core import contamination as ct_mod
-from colordoctor.core import recommendations as rec
-from colordoctor.core.color_models import AnalysisReport, Severity
+from colordoctor.core import native_layers as nl
+from colordoctor.core.color_models import AnalysisReport
 
-# PS 色相/饱和度的六个颜色范围：(localRange 编号, 名称, HSB 中心色相, 默认渐变 beginRamp..endRamp)
-PS_RANGES = (
-    (1, "红色", 0, (315, 345, 15, 45)),
-    (2, "黄色", 60, (15, 45, 75, 105)),
-    (3, "绿色", 120, (75, 105, 135, 165)),
-    (4, "青色", 180, (135, 165, 195, 225)),
-    (5, "蓝色", 240, (195, 225, 255, 285)),
-    (6, "洋红", 300, (255, 285, 315, 345)),
-)
-
-LAYER_KINDS = ("hueSaturation", "colorBalance", "vibrance", "curves")
+# 兼容旧名字（测试和其他模块在用）
+PS_RANGES = nl.PS_RANGES
+LAYER_KINDS = nl.LAYER_KINDS
+ps_range_for_lab_hue = nl.ps_range_for_lab_hue
+hsb_shift = nl.hsb_shift
+custom_range = nl.custom_range
+patch_sat = nl.patch_sat
+_huesat = nl.huesat
+_clip = nl.clip
+_skin_layer = nl.skin_patch_layer
+_KIND_NAME = nl.KIND_NAME
 
 
 @dataclass
@@ -35,15 +35,16 @@ class LayerSpec:
     name: str  # 图层名（中文，PS 里显示）
     kind: str  # LAYER_KINDS 之一
     params: dict
-    reason: str  # 对应的问题（给面板卡片用）
+    reason: str  # 卡片上的建议原文（数字与参数相同）
     mask: np.ndarray | None = field(default=None, repr=False)  # uint8 (H, W)，255 = 作用；None = 全图
     estimated: bool = True
+    finding: int | None = None  # 修的是 report.findings 里的第几条；None = 不属于任何一条
 
     def to_json(self) -> dict:
         cov = None if self.mask is None else round(float((self.mask > 127).mean()), 4)
         return {"id": self.id, "name": self.name, "kind": self.kind, "params": self.params,
                 "reason": self.reason, "has_mask": self.mask is not None, "mask_coverage": cov,
-                "estimated": self.estimated}
+                "estimated": self.estimated, "finding": self.finding}
 
 
 @dataclass
@@ -69,6 +70,9 @@ class LayerPlan:
             if ly.id == layer_id:
                 return ly
         raise KeyError(layer_id)
+
+    def for_finding(self, index: int) -> list[LayerSpec]:
+        return [ly for ly in self.layers if ly.finding == index]
 
 
 # ---------------------------------------------------------------- 蒙版工具
@@ -126,13 +130,16 @@ def _pool_max(mask: np.ndarray, k: int) -> np.ndarray:
     return pad.reshape(H, k, W, k).any(axis=(1, 3))
 
 
-def _soft_mask(mask: np.ndarray, rad: int, k: int, grow: bool = False) -> np.ndarray:
-    """全分辨率布尔蒙版 -> 工作分辨率上的羽化 uint8 蒙版（大图快很多）。"""
-    small = _pool_max(mask, k)
+def _soft_small(small: np.ndarray, rad: int, k: int, grow: bool = False) -> np.ndarray:
     r = max(1, rad // k)
     if grow:
         small = dilate(small, max(1, r // 2))
     return feather(small, r)
+
+
+def _soft_mask(mask: np.ndarray, rad: int, k: int, grow: bool = False) -> np.ndarray:
+    """全分辨率布尔蒙版 -> 工作分辨率上的羽化 uint8 蒙版（大图快很多）。"""
+    return _soft_small(_pool_max(mask, k), rad, k, grow)
 
 
 def _feather_radius(shape) -> int:
@@ -162,190 +169,200 @@ def _bbox_mask(shape, boxes, offset, within=None) -> np.ndarray:
     return m
 
 
-def ps_range_for_lab_hue(lab_hue: float) -> tuple[int, str, tuple[int, int, int, int]]:
-    """Lab 色相角 -> PS 色相/饱和度里最接近的颜色范围。"""
-    hsb = ac.lab_hue_to_hsb_hue(lab_hue)
-    best = min(PS_RANGES, key=lambda r: abs(((hsb - r[2] + 180) % 360) - 180))
-    return best[0], best[1], best[3]
+class _Masks:
+    """按图层的作用范围取蒙版（工作分辨率，缓存）：skin = 皮肤蒙版，local = 该问题的位置，global = 无蒙版。"""
+
+    _FLAG = {"opposite": ct_mod.MASK_OPPOSITE, "graying": ct_mod.MASK_GRAYING}
+
+    def __init__(self, report: AnalysisReport, shape, offset):
+        self.report, self.shape, self.offset = report, shape, offset
+        h, w = shape[:2]
+        self.rad = _feather_radius(shape)
+        self.k = max(1, int(np.ceil(np.sqrt(h * w / MASK_WORK_PIXELS))))  # 大图在缩小 k 倍的分辨率上做蒙版
+        vm = getattr(report, "valid_mask", None)
+        self.skin = vm if vm is not None and vm.shape == (h, w) else None
+        self._flags = None
+        self._cache: dict = {}
+
+    def _small(self, key, fn):
+        if key not in self._cache:
+            self._cache[key] = fn()
+        return self._cache[key]
+
+    def _small_flags(self, value: int) -> np.ndarray | None:
+        def make():
+            if self._flags is None:
+                self._flags = _contamination_flags(self.report, self.shape)
+            return None if self._flags is None else _pool_max(self._flags == value, self.k)
+        return self._small(("flag", value), make)
+
+    def _small_skin(self):
+        return None if self.skin is None else self._small("skin", lambda: _pool_max(self.skin, self.k))
+
+    def _small_boxes(self, boxes) -> np.ndarray:
+        """问题位置（源图坐标）的矩形 -> 工作分辨率上的布尔蒙版。"""
+        h, w = self.shape[:2]
+        k = self.k
+        m = np.zeros((-(-h // k), -(-w // k)), bool)
+        ox, oy = self.offset
+        for x, y, bw, bh in boxes:
+            x0, y0 = max(0, x - ox), max(0, y - oy)
+            x1, y1 = min(w, x - ox + bw), min(h, y - oy + bh)
+            if x1 > x0 and y1 > y0:
+                m[y0 // k:-(-y1 // k), x0 // k:-(-x1 // k)] = True
+        return m
+
+    def get(self, spec: dict) -> np.ndarray | None:
+        scope = spec.get("scope")
+        if scope == "skin":
+            s = self._small_skin()
+            return None if s is None else self._small(("soft", "skin"), lambda: _soft_small(s, self.rad, self.k))
+        if scope != "local" or not spec.get("_at"):
+            return None
+        at = spec["_at"]
+        return self._small(("soft", at), lambda: self._local(at))
+
+    def _local(self, at: str) -> np.ndarray | None:
+        stem, _, arg = at.partition("@")
+        rep = self.report
+        if stem in self._FLAG:
+            flags = self._small_flags(self._FLAG[stem])
+            if flags is None:
+                return None
+            m = flags
+            if arg:  # 整图扫描：只作用于这一处问题位置里的杂色 / 发灰像素
+                blobs = rep.contamination.blobs if rep.contamination is not None else ()
+                j = int(arg)
+                if j >= len(blobs):
+                    return None
+                m = flags & self._small_boxes([blobs[j].bbox])
+            return _soft_small(m, self.rad, self.k, grow=True) if m.any() else None
+        if stem == "skin" and arg:  # 肤色不均匀：这一类小块
+            uni = getattr(rep, "uniformity", None)
+            boxes = [p.bbox for p in (uni.patches if uni is not None else ()) if p.kind == arg]
+            if not boxes:
+                return None
+            m = self._small_boxes(boxes)
+            s = self._small_skin()
+            if s is not None:
+                m &= s
+            return _soft_small(m, self.rad, self.k)
+        if stem == "unity" and arg:  # 某种颜色不统一：偏离的这一块
+            pal = getattr(rep, "palette", None)
+            patches = pal.unity.patches if pal is not None and pal.unity is not None else ()
+            j = int(arg)
+            if j >= len(patches):
+                return None
+            return _soft_small(self._small_boxes([patches[j].bbox]), self.rad, self.k)
+        return None
 
 
-def hsb_shift(lab_from: float, lab_to: float, L: float = 62.0, C: float = 30.0) -> float:
-    """Lab 色相从 lab_from 变到 lab_to，对应 PS（HSB）色相要转多少度。
+# ---------------------------------------------------------------- 同一张卡片里的图层合并
+def _merge_pair(a: dict, b: dict) -> dict | None:
+    """同类型、同作用范围的两个图层能自然合成一层时返回合并后的参数，否则 None。"""
+    if a["kind"] != b["kind"] or a["scope"] != b["scope"] or a.get("_at") != b.get("_at"):
+        return None
+    pa, pb = a["params"], b["params"]
+    if a["kind"] == "curves":
+        if set(pa["channels"]) != set(pb["channels"]):
+            return None  # 例如“颜色曲线”和“明度曲线”：卡片要求分开
+        out = {}
+        for ch, pts in pa["channels"].items():
+            xa = {x for x, _ in pts if x not in (0, 255)}
+            xb = {x for x, _ in pb["channels"][ch] if x not in (0, 255)}
+            if xa & xb:
+                return None
+            ends = {x: y for x, y in pts + pb["channels"][ch] if x in (0, 255) and (x, y) not in ((0, 0), (255, 255))}
+            mid = [(x, y) for x, y in pts + pb["channels"][ch] if x not in (0, 255)]
+            merged = nl.curve_points(mid + list(ends.items()))
+            ys = [y for _, y in merged]
+            if any(y1 < y0 for y0, y1 in zip(ys, ys[1:])):
+                return None  # 合并后不再单调：分开放
+            out[ch] = merged
+        return {"channels": out}
+    if a["kind"] == "colorBalance":
+        tones = [t for t, _ in nl.CB_TONES]
+        if any(any(pa[t]) and any(pb[t]) for t in tones):
+            return None
+        return nl.balance(*[pa[t] if any(pa[t]) else pb[t] for t in tones])
+    if a["kind"] == "hueSaturation":
+        if any(pa["master"].values()) or any(pb["master"].values()) or len(pa["ranges"]) + len(pb["ranges"]) > 6:
+            return None
+        if {r["localRange"] for r in pa["ranges"]} & {r["localRange"] for r in pb["ranges"]}:
+            return None
+        return {"master": dict(pa["master"]), "ranges": pa["ranges"] + pb["ranges"]}
+    return None
 
-    两种色相刻度差别很大（绿色区域约 2 倍、肤色区域约 0.5 倍），不能直接拿 Lab 度数当 PS 滑块值。
-    """
-    a = ac.lab_hue_to_hsb_hue(lab_from % 360, L=L, C=max(C, 8.0))
-    b = ac.lab_hue_to_hsb_hue(lab_to % 360, L=L, C=max(C, 8.0))
-    return ((b - a + 180) % 360) - 180
+
+def _finding_layers(f) -> list[tuple[dict, list[str]]]:
+    """一张卡片上带图层的建议 -> [(图层字典, 对应的建议原文)]：完全相同的只留一个，能自然合并的合成一层。"""
+    out: list[tuple[dict, list[str]]] = []
+    for a in f.adjustments:
+        spec = getattr(a, "layer", None)
+        if not spec:
+            continue
+        same = next((o for o in out if o[0]["kind"] == spec["kind"] and o[0]["params"] == spec["params"]
+                     and o[0]["scope"] == spec["scope"] and o[0].get("_at") == spec.get("_at")), None)
+        if same is not None:
+            if a.instruction not in same[1]:
+                same[1].append(a.instruction)
+            continue
+        for i, (o, texts) in enumerate(out):
+            merged = _merge_pair(o, spec)
+            if merged is not None:
+                out[i] = ({**o, "params": merged, "name": o["name"]}, [*texts, a.instruction])
+                break
+        else:
+            out.append((dict(spec), [a.instruction]))
+    return out
 
 
-def custom_range(hsb_center: float, half_core: int = 10, half_ramp: int = 30) -> tuple[int, tuple[int, int, int, int]]:
-    """以某个 HSB 色相为中心的自定义颜色范围（PS 色相/饱和度里可以拖动范围滑块，效果相同）。"""
-    idx = min(PS_RANGES, key=lambda r: abs(((hsb_center - r[2] + 180) % 360) - 180))[0]
-    c = int(round(hsb_center))
-    return idx, ((c - half_ramp) % 360, (c - half_core) % 360, (c + half_core) % 360, (c + half_ramp) % 360)
+_ID_STEM = {"hueSaturation": "huesat", "colorBalance": "balance", "vibrance": "vibrance", "curves": "curves",
+            "selectiveColor": "selective"}
 
 
-def _huesat(range_idx: int, ramps, hue=0, sat=0, light=0, master=False) -> dict:
-    if master:
-        return {"master": {"hue": int(hue), "saturation": int(sat), "lightness": int(light)}, "ranges": []}
-    b0, b1, e0, e1 = ramps
-    return {"master": {"hue": 0, "saturation": 0, "lightness": 0},
-            "ranges": [{"localRange": range_idx, "beginRamp": b0, "beginSustain": b1, "endSustain": e0,
-                        "endRamp": e1, "hue": int(hue), "saturation": int(sat), "lightness": int(light)}]}
+def _unique(stem: str, used: set[str]) -> str:
+    lid, n = stem, 2
+    while lid in used:
+        lid, n = f"{stem}_{n}", n + 1
+    used.add(lid)
+    return lid
 
 
-def _clip(v, lo, hi) -> int:
-    return int(np.clip(round(float(v)), lo, hi))
+def ref_curve_points(curve_points) -> list[tuple[int, int]]:
+    """仿色曲线点 + 端点：参考点（例如 255 → 215）覆盖默认端点，而不是被它覆盖。"""
+    return [tuple(p) for p in nl.curve_points(curve_points)]
 
 
 # ---------------------------------------------------------------- 方案生成
 def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: str | None = None) -> LayerPlan:
-    """shape：分析图像 (H, W[, C])；offset：分析区域在文档中的左上角（插件一般整图分析，为 (0, 0)）。"""
-    h, w = shape[:2]
-    rad = _feather_radius(shape)
-    k = max(1, int(np.ceil(np.sqrt(h * w / MASK_WORK_PIXELS))))  # 大图在缩小 k 倍的分辨率上做蒙版
-    layers: list[LayerSpec] = []
-    flags = _contamination_flags(report, shape)
-    ct = report.contamination
-    skin = report.valid_mask if report.valid_mask is not None and report.valid_mask.shape == (h, w) else None
-    scan = ct is not None and report.mode == "scan"
-    base = "画面" if scan else (ct.base_hue_name if ct is not None else "")
+    """shape：分析图像 (H, W[, C])；offset：分析区域在文档中的左上角（插件一般整图分析，为 (0, 0)）。
 
-    # 1) 对立色混入：在杂色所在颜色范围降饱和，只作用于杂色位置
-    if ct is not None and flags is not None and ct.opposite_hue is not None and not ct.bicolor:
-        opp = flags == ct_mod.MASK_OPPOSITE
-        if opp.mean() > 0.0005:
-            idx, rname, ramps = ps_range_for_lab_hue(ct.opposite_hue)
-            sat = rec.contamination_saturation(ct.opposite_chroma)
-            what = f"{base}里的{ct.opposite_hue_name}" + ("散点" if scan else "")
-            layers.append(LayerSpec(
-                "opposite", f"{what} · 色相/饱和度", "hueSaturation",
-                _huesat(idx, ramps, sat=sat),
-                f"{what}（占分析像素 {ct.opposite_fraction:.1%}）：{rname} 饱和度 {sat}（只作用于杂色位置）",
-                _soft_mask(opp, rad, k, grow=True)))
-    # 2) 局部发灰：自然饱和度，只作用于发灰位置
-    if ct is not None and flags is not None and ct.graying_fraction > 0:
-        gray = flags == ct_mod.MASK_GRAYING
-        if gray.mean() > 0.0005:
-            vib = _clip(12 + 60 * ct.graying_depth, 10, 40)
-            what = "局部" if scan else base
-            layers.append(LayerSpec(
-                "graying", f"{what}发灰 · 自然饱和度", "vibrance",
-                {"vibrance": vib, "saturation": 0},
-                f"{what}发灰（{ct.graying_fraction:.0%}）：自然饱和度 +{vib}（只作用于发灰位置）",
-                _soft_mask(gray, rad, k, grow=True)))
-    # 2b) 肤色整体偏色：皮肤蒙版内的色相/饱和度，数值与卡片上的相同
-    sk = report.skin
-    sc = next((c for c in report.components if c.key == "skin_cast"), None)
-    if sk is not None and sk.target_hue is not None and sc is not None and sc.severity != Severity.NORMAL:
-        spec = skin_cast_huesat(sk.mean_lab, sk.target_hue)
-        if spec is not None:
-            idx, ramps, rname, hue = spec
-            layers.append(LayerSpec(
-                "skin_cast", f"肤色整体{sk.tendency} · 色相/饱和度", "hueSaturation", _huesat(idx, ramps, hue=hue),
-                f"肤色整体{sk.tendency}：{rname}（范围已对准肤色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）",
-                None if skin is None else _soft_mask(skin, rad, k)))
-    # 3) 肤色不均匀：同一类问题合成一层（偏黄 / 偏红橙 是方向相反的两层）
-    uni = report.uniformity
-    if uni is not None and uni.patches:
-        by_kind: dict[str, list] = {}
-        for p in uni.patches:
-            by_kind.setdefault(p.kind, []).append(p)
-        for kind, ps in by_kind.items():
-            area = sum(p.area_fraction for p in ps)
-            dh = float(np.average([p.hue_shift for p in ps], weights=[p.area_fraction for p in ps]))
-            ds = float(np.average([p.sat_shift for p in ps], weights=[p.area_fraction for p in ps]))
-            mask = _soft_mask(_bbox_mask(shape, [p.bbox for p in ps], offset, skin), rad, k)
-            lab = np.average([p.lab for p in ps], axis=0, weights=[p.area_fraction for p in ps])
-            spec = _skin_layer(kind, dh, ds, tuple(float(v) for v in lab))
-            if spec is None:
-                continue
-            lkind, params, text = spec
-            layers.append(LayerSpec(f"skin_{len(layers)}", f"肤色{kind} · {_KIND_NAME[lkind]}", lkind, params,
-                                    f"肤色{kind}（占皮肤 {area:.0%}，色相 {dh:+.0f}°）：{text}", mask))
-    # 4) 某种颜色不统一：把偏离的那一簇推回主色
-    pal = report.palette
-    if pal is not None and pal.unity is not None and pal.unity.patches:
-        u = pal.unity
-        for i, p in enumerate(u.patches):
-            L0, a0, b0 = u.mean_lab
-            main_h = float(np.degrees(np.arctan2(b0, a0))) % 360
-            patch_h = main_h + p.hue_shift
-            C0 = float(np.hypot(a0, b0))
-            hue = _clip(hsb_shift(patch_h, main_h, L0, C0), -30, 30)  # 把偏离的一簇推回主色
-            if hue == 0:
-                continue
-            idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(patch_h % 360, L=L0, C=max(C0, 8.0)))
-            rname = PS_RANGES[idx - 1][1]
-            layers.append(LayerSpec(f"unity_{i}", f"{u.family}统一 {i + 1} · 色相/饱和度", "hueSaturation",
-                                    _huesat(idx, ramps, hue=hue), f"{p.note}：{rname}（范围已对准这一簇）色相 {hue:+d}",
-                                    _soft_mask(_bbox_mask(shape, [p.bbox], offset), rad, k)))
-    # 5) 仿色：把影调拉向参考的 RGB 复合曲线（全图，无蒙版）
+    每条问题（report.findings[i]）上带 layer 的建议各生成一层（相同的只生成一次，同类可合并的合成一层），
+    图层的 finding = i；蒙版按作用范围：skin = 皮肤蒙版，local = 这条问题的位置，global = 全图。
+    """
+    h, w = shape[:2]
+    masks = _Masks(report, shape, offset)
+    layers: list[LayerSpec] = []
+    used: set[str] = set()
+    for i, f in enumerate(getattr(report, "findings", ()) or ()):
+        for spec, texts in _finding_layers(f):
+            at = spec.get("_at")
+            stem = at.partition("@")[0] if at else _ID_STEM[spec["kind"]]
+            layers.append(LayerSpec(_unique(stem, used), spec["name"], spec["kind"], spec["params"], "；".join(texts),
+                                    masks.get(spec), finding=i))
+    # 没有对应卡片的仿色曲线（例如只有 MatchReport 的报告）：仍给出，不挂在任何卡片上
     ref = getattr(report, "reference", None)
-    if ref is not None and getattr(ref, "curve_points", None):
-        # 端点放前面：参考点（例如 255 → 215）覆盖默认端点，而不是被它覆盖
-        pts = [(0, 0), (255, 255), *[(int(a), int(b)) for a, b in ref.curve_points]]
-        pts = sorted({p[0]: p for p in pts}.values())
-        layers.append(curves_layer("ref_curve", "仿色影调 · 曲线", {"composite": pts},
+    if ref is not None and getattr(ref, "curve_points", None) and "ref_curve" not in used:
+        pts = ref_curve_points(ref.curve_points)
+        layers.append(curves_layer(_unique("ref_curve", used), "仿色影调 · 曲线", {"composite": pts},
                                    "把影调拉向参考：" + "；".join(f"{a}→{b}" for a, b in ref.curve_points)))
     name = group_name or f"ColorDoctor · {_MODE_NAME.get(report.mode, report.mode)}"
     return LayerPlan(name, w, h, layers)
 
 
-def skin_cast_huesat(mean_lab, target_hue: float):
-    """肤色整体偏色 -> (范围编号, 范围渐变, 范围名, 色相)：只转色相，把肤色拉到目标色相。卡片和图层共用。"""
-    L, a, b = (float(v) for v in mean_lab)
-    hp = float(np.degrees(np.arctan2(b, a))) % 360
-    C = float(np.hypot(a, b))
-    hue = _clip(hsb_shift(hp, target_hue, L, C), -30, 30)
-    if hue == 0:
-        return None
-    idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(hp, L=L, C=max(C, 8.0)))
-    return idx, ramps, PS_RANGES[idx - 1][1], hue
-
-
-_KIND_NAME = {"hueSaturation": "色相/饱和度", "colorBalance": "色彩平衡", "vibrance": "自然饱和度", "curves": "曲线"}
-_MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色", "reference": "仿色"}
-
-
-def _skin_layer(kind: str, dh: float, ds: float, lab=(68.0, 14.0, 19.0)):
-    """肤色问题块 -> (图层类型, 参数, 说明)。dh：相对整体的 Lab 色相偏移（度，正 = 偏黄）；lab：问题块平均色。"""
-    L, a, b = lab
-    hp = float(np.degrees(np.arctan2(b, a))) % 360
-    C = float(np.hypot(a, b))
-    if kind in ("偏黄", "偏洋红"):
-        shift = hsb_shift(hp, hp - dh, L, C)  # 把问题块拉回整体肤色
-        hue = int(np.sign(shift) or (-1 if kind == "偏黄" else 1)) * _clip(abs(shift), 2, 15)
-        idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(hp, L=L, C=max(C, 8.0)))
-        rname = PS_RANGES[idx - 1][1]
-        if kind == "偏黄":
-            sat = patch_sat(ds)
-            return ("hueSaturation", _huesat(idx, ramps, hue=hue, sat=sat),
-                    f"{rname}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）" + (f"，饱和度 {sat:+d}" if sat else ""))
-        return "hueSaturation", _huesat(idx, ramps, hue=hue), f"{rname}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）"
-    if kind == "偏红橙":
-        cr = -_clip(abs(dh) / 2, 2, 15)
-        yb = -_clip(abs(dh) / 3, 1, 10)  # 负值 = 往黄
-        return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, 0, yb], "highlights": [0, 0, 0], "preserveLuminosity": True},
-                f"中间调 青-红 {cr}（往青），黄-蓝 {yb}（往黄）")
-    if kind == "偏青绿":
-        cr = _clip(abs(dh) / 2, 3, 15)
-        mg = -_clip(cr / 2, 1, 8)
-        return ("colorBalance", {"shadows": [0, 0, 0], "midtones": [cr, mg, 0], "highlights": [0, 0, 0],
-                                 "preserveLuminosity": True}, f"中间调 青-红 +{cr}（往红），洋红-绿 {mg}（往洋红）")
-    if kind == "缺色发灰":
-        vib = _clip(abs(ds) * 60, 8, 30)
-        return "vibrance", {"vibrance": vib, "saturation": 0}, f"自然饱和度 +{vib}"
-    if kind == "饱和度偏高":
-        sat = -_clip(abs(ds) * 60, 5, 25)
-        return "hueSaturation", _huesat(0, None, sat=sat, master=True), f"全图 饱和度 {sat}"
-    return None
-
-
-def patch_sat(ds: float) -> int:
-    """偏色小块的饱和度修正：比周围更艳就降、更灰就加（与卡片文字一致），变化很小时不动。"""
-    return _clip(-ds * 60, -20, 20) if abs(ds) >= 0.05 else 0
+_MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色",
+              "reference": "仿色", "general": "区域检查"}
 
 
 def curves_layer(lid: str, name: str, points: dict[str, list[tuple[int, int]]], reason: str) -> LayerSpec:

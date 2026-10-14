@@ -14,6 +14,7 @@ from colordoctor.core import color_spaces as cs
 from colordoctor.core import contamination as ct_mod
 from colordoctor.core import diagnosis_rules as dr
 from colordoctor.core import layer_plan as lp
+from colordoctor.core import native_layers as nl
 from colordoctor.core import portrait_analysis as pa
 from colordoctor.core import recommendations as rec
 from colordoctor.core import region_statistics as rs
@@ -30,6 +31,7 @@ from colordoctor.core.color_models import (
     Severity,
     severity_from_score,
 )
+from colordoctor.core.perception import de_words
 from colordoctor.core.sampling import grid_downsample, sample_point
 
 MAX_SAMPLES = rs.MAX_SAMPLES
@@ -139,7 +141,8 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence + tuple(_blob_text([b for b in ct.blobs if b.kind == "opposite"])),
                 causes=CAUSES_OPPOSITE,
-                adjustments=tuple(rec.contamination_adjustments(main, ct.base_hue_name if not skin else "橙", skin, ct.opposite_chroma)),
+                adjustments=tuple(rec.contamination_adjustments(main, ct.base_hue_name if not skin else "橙", skin, ct.opposite_chroma,
+                                                                hue=ct.opposite_hue)),
                 confidence=conf,
                 notes=tuple(notes),
             )
@@ -149,6 +152,10 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
     graying_card = bool(c and c.severity != Severity.NORMAL)
     if graying_card:
         problem = "肤色发灰、不够透亮（色度偏低）" if skin else f"“{ct.base_hue_name}”区域局部发灰（比同色干净处更灰）"
+        deficit = None
+        if skin and skin_report is not None:
+            lo = skin_report.expected_saturation[0]
+            deficit = max(0.0, (lo - skin_report.saturation_ab) / lo) if lo > 0 else 0.0
         # 明度也被压缩时并进这一条（建议相同，不再单独出一张卡）
         flat = lc.evidence if lc and lc.severity != Severity.NORMAL else ()
         findings.append(
@@ -157,7 +164,7 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence + tuple(flat) + tuple(_blob_text([b for b in ct.blobs if b.kind == "graying"])),
                 causes=CAUSES_GRAY,
-                adjustments=tuple(rec.graying_adjustments("橙" if skin else ct.base_hue_name)),
+                adjustments=tuple(rec.graying_adjustments("橙" if skin else ct.base_hue_name, ct.graying_depth, skin_deficit=deficit)),
                 confidence=conf,
                 notes=("低饱和本身不是错误；只有在你希望它更干净通透时才需要处理",) + tuple(base_notes),
             )
@@ -170,7 +177,7 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence,
                 causes=("多光源（色温不同的灯/窗光）", "局部调色叠加不均匀", "选区包含了不同物体"),
-                adjustments=tuple(rec.dispersion_adjustments(ct.base_hue_name, skin)),
+                adjustments=tuple(rec.dispersion_adjustments(ct.base_hue_name, skin, ct.base_hue, ct.hue_spread, C=ct.base_chroma)),
                 confidence=conf * 0.9,
                 notes=("确认选区内只有同一种材质/物体",) + tuple(base_notes),
             )
@@ -199,7 +206,7 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence,
                 causes=("曲线压低了对比且饱和度偏低",),
-                adjustments=tuple(rec.graying_adjustments("橙" if skin else ct.base_hue_name)[1:2]),
+                adjustments=(rec.contrast_adjustment("skin" if skin else "global"),),
                 confidence=conf * 0.8,
                 notes=("暗调本身不是问题",),
             )
@@ -252,7 +259,7 @@ def _skin_cast_findings(skin, comp, conf, base_notes):
                     "颜色分级/分离色调作用到了皮肤",
                     "环境光：阴影里常有天空/绿植的反射，高光里常有暖光源",
                 ),
-                adjustments=tuple(rec.cast_adjustments(where, name)),
+                adjustments=tuple(rec.cast_adjustments(where, name, shift)),
                 confidence=conf,
                 notes=("如果是刻意的风格（例如高光暖、阴影冷），可以忽略",) + tuple(base_notes),
             )
@@ -349,14 +356,14 @@ def analyze_skin_region(
         cur_lch = cs.lab_to_lch(np.asarray(skin.mean_lab, dtype=float))
         target = cs.lch_to_lab(np.array([cur_lch[0], cur_lch[1], tgt_h]))
         adjs = []
-        hs = lp.skin_cast_huesat(skin.mean_lab, tgt_h)
-        if hs is not None:
-            _, _, rname, hue = hs
-            adjs.append(Adjustment(
-                "色相/饱和度",
-                f"编辑范围选“{rname}”并把范围滑块对准肤色：色相 {hue:+d}（往{'黄' if hue > 0 else '红'}），饱和度、明度不动；"
-                "用皮肤蒙版只作用于皮肤（生成的调整图层就是这一层）",
-                rec.strength_label(float(cs.hue_diff(cur_lch[2], tgt_h)) / 2.0), params=(("色相", float(hue)),)))
+        sc_params = nl.skin_selective(float(target[1] - skin.mean_lab[1]), float(target[2] - skin.mean_lab[2]))
+        if sc_params["colors"]:
+            adjs.append(nl.adjustment(
+                "selectiveColor", sc_params,
+                f"方法“相对”：{nl.selective_text(sc_params)}（把肤色色相拉回{skin.hue_ref}，明暗和浓淡基本不变；"
+                "用皮肤蒙版只作用于皮肤，生成的调整图层就是这一层）",
+                "skin", f"肤色整体{skin.tendency} · 可选颜色", "skin_cast",
+                strength=rec.strength_label(float(cs.hue_diff(cur_lch[2], tgt_h)) / 2.0)))
         if style_card:  # 同一个目标，完整参数只在风格那一条给，避免两张卡强度标签对不上
             adjs.append(Adjustment("提示", f"色温/色调、曲线等其余参数见“与目标风格「{preset.name}」”那一条（同一个目标）", None, False))
         else:
@@ -394,7 +401,7 @@ def analyze_skin_region(
         if style_card:
             findings.append(
                 Finding(
-                    problem=f"与目标风格「{preset.name}」相差 ΔE00 {cmp.delta_e00:.1f}",
+                    problem=f"与目标风格「{preset.name}」相差 ΔE00 {cmp.delta_e00:.1f}（{de_words(cmp.delta_e00)}）",
                     severity=Severity.MILD if cmp.delta_e00 < 6 else Severity.NOTABLE,
                     evidence=tuple(f"{k}：{v}" for k, v in fit.items())
                     + (f"需要的变化：ΔL* {cmp.dL:+.1f}，Δa* {cmp.da:+.1f}，Δb* {cmp.db:+.1f}，ΔC* {cmp.dC:+.1f}",),
@@ -464,6 +471,14 @@ def _uniformity_findings(uni, conf, reasons) -> list[Finding]:
         ds = float(np.average([p.sat_shift for p in ps], weights=[p.area_fraction for p in ps]))
         sat = lp.patch_sat(ds)
         fix = fix.format(sat="" if not sat else f"、饱和度略{'降' if sat < 0 else '加'}（约 {sat:+d}）")
+        adjs = [Adjustment("Camera Raw / PS 局部", fix, "轻微")]
+        lab = tuple(float(v) for v in np.average([p.lab for p in ps], axis=0, weights=[p.area_fraction for p in ps]))
+        dh = float(np.average([p.hue_shift for p in ps], weights=[p.area_fraction for p in ps]))
+        spec = nl.skin_patch_layer(kind, dh, ds, lab)
+        if spec is not None:
+            lkind, params, text = spec
+            adjs.append(nl.adjustment(lkind, params, f"{text}（只作用于这些位置）", "local",
+                                      f"肤色{kind} · {nl.KIND_NAME[lkind]}", f"skin@{kind}", strength="轻微"))
         out.append(
             Finding(
                 problem=f"肤色不均匀：{len(ps)} 处{kind}（占皮肤 {area:.0%}）",
@@ -475,7 +490,7 @@ def _uniformity_findings(uni, conf, reasons) -> list[Finding]:
                 )
                 + (f"整体色相中位 h {uni.median_hue:.1f}°，均匀度 {uni.score:.0f}/100",),
                 causes=("光线不均（窗光/反光/不同光源）", "局部调整（画笔、蒙版）边缘没过渡好", "皮肤本身的红血丝、晒痕或妆容"),
-                adjustments=(Adjustment("Camera Raw / PS 局部", fix, "轻微"),),
+                adjustments=tuple(adjs),
                 confidence=conf,
                 notes=("“问题位置”页会标出这些区域",) + tuple(reasons[:1]),
             )
@@ -495,7 +510,8 @@ def _part_compare_finding(part, lab, other, skin_px, conf) -> Finding:
         parts.append(f"{'更灰' if c.dC < 0 else '更艳'} {abs(c.dC):.1f}")
     sev = severity_from_score(dr._interp(c.delta_e00, ([0, 3, 5, 8, 12], [0, 20, 45, 65, 80])))
     return Finding(
-        problem=f"{part}与{other_name}的肤色差异：ΔE00 {c.delta_e00:.1f}" + (f"（{part}{'、'.join(parts)}）" if parts else "（基本一致）"),
+        problem=f"{part}与{other_name}的肤色差异：ΔE00 {c.delta_e00:.1f}（{de_words(c.delta_e00)}"
+        + (f"；{part}{'、'.join(parts)}）" if parts else "，基本一致）"),
         severity=sev,
         evidence=(
             f"{other_name} Lab ({other_lab[0]:.1f}, {other_lab[1]:.1f}, {other_lab[2]:.1f})，{part} Lab ({lab[0]:.1f}, {lab[1]:.1f}, {lab[2]:.1f})",
@@ -565,7 +581,7 @@ def compare_regions(
             word = f"色相偏向{cs.hue_name(cs.lab_to_lch(prob_lab)[2])}"
         parts.append(f"{word}（Δh {c.dh:+.1f}°，Δa* {c.da:+.1f}，Δb* {c.db:+.1f}）")
     if not parts:
-        parts.append(f"两个区域非常接近（ΔE00 {c.delta_e00:.1f}）")
+        parts.append(f"两个区域非常接近（ΔE00 {c.delta_e00:.1f}，{de_words(c.delta_e00)}）")
         adjustments = (rec.near_hint(c.delta_e00, skin),)
     else:
         adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin))
@@ -573,7 +589,7 @@ def compare_regions(
         problem="问题区相对参考区：" + "；".join(parts),
         severity=severity_from_score(sev_score),
         evidence=(
-            f"色差 ΔE00 {c.delta_e00:.2f}",
+            f"色差 ΔE00 {c.delta_e00:.2f}（{de_words(c.delta_e00)}）",
             f"ΔL* {c.dL:+.2f}，ΔC* {c.dC:+.2f}，Δh {c.dh:+.1f}°，Δa* {c.da:+.2f}，Δb* {c.db:+.2f}",
             f"沿参考色相方向的色度变化 {c.along_ref_hue:+.2f}，垂直方向（色相偏移）{c.across_ref_hue:+.2f}",
             f"对立色像素比例变化 {c.opposite_component_change:+.2%}",
@@ -615,7 +631,7 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
     comp_sev = {"opposite": components[0].severity, "graying": components[1].severity}
     order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
     seen: set[str] = set()
-    for b in ct.blobs[:8]:
+    for j, b in enumerate(ct.blobs[:8]):
         own = Severity.MILD if b.score < 0.08 else Severity.NOTABLE
         top = comp_sev[b.kind]
         sev = top if b.kind not in seen else min(own, top, key=order.index)
@@ -623,11 +639,13 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
         seen.add(b.kind)
         if b.kind == "opposite":
             problem = f"可疑脏色：“{b.base_hue_name}”中夹杂“{b.contaminant_hue_name}”散点"
-            adj = rec.contamination_adjustments(b.contaminant_hue_name or "", b.base_hue_name, False, ct.opposite_chroma)
+            adj = rec.contamination_adjustments(b.contaminant_hue_name or "", b.base_hue_name, False, ct.opposite_chroma,
+                                                hue=b.contaminant_hue, at=f"opposite@{j}",
+                                                name=f"{b.base_hue_name}里的{b.contaminant_hue_name}散点")
             causes = CAUSES_OPPOSITE
         else:
             problem = f"可疑发灰：这块“{b.base_hue_name}”比同色区域更灰"
-            adj = rec.graying_adjustments(b.base_hue_name)
+            adj = rec.graying_adjustments(b.base_hue_name, ct.graying_depth, at=f"graying@{j}")
             causes = CAUSES_GRAY
         x, y, w, h = b.bbox
         findings.append(
@@ -673,14 +691,17 @@ def analyze_palette_report(
         lo = min(lo, cf.value)
     elif cf.value < lo:
         sev = Severity.NOTABLE if cf.value < lo * 0.6 else Severity.MILD
+        vib = nl.clip(10 + 40 * (lo - cf.value) / lo, 10, 25)  # 缺得越多加得越多（+10 ~ +25）
         findings.append(Finding(
             problem=f"整体缺色/发灰：色彩丰富度 {cf.value:.0f}（{cf.label}）" + (f"，低于「{style.name}」的 {lo:g}" if style else ""),
             severity=sev,
             evidence=(f"有彩像素平均色度 C* {cf.mean_chroma:.1f}，P90 色度 {cf.p90_chroma:.1f}", f"有彩像素占 {cf.chromatic_share:.0%}"),
             causes=("整体降饱和过多、去朦胧为负", "曝光/对比偏低导致发闷", "白平衡把颜色中和掉了"),
             adjustments=(
-                Adjustment("Camera Raw", "自然饱和度 +10 ~ +25（比饱和度更保护肤色）", "小幅"),
-                Adjustment("曲线", "RGB 曲线加一点 S 形对比", "轻微"),
+                nl.adjustment("vibrance", {"vibrance": vib, "saturation": 0},
+                              f"自然饱和度 +{vib}，饱和度 0（比饱和度更保护肤色；Camera Raw 里同名滑块也可以）", "global",
+                              "整体缺色 · 自然饱和度"),
+                rec.contrast_adjustment("global", where="整体"),
                 Adjustment("Camera Raw 混色器", "只提高主色所在通道的饱和度，其他颜色保持", "小幅"),
             ),
             confidence=conf,
@@ -690,7 +711,9 @@ def analyze_palette_report(
         findings.append(Finding(
             problem=f"颜色过艳：色彩丰富度 {cf.value:.0f}，高于「{style.name}」的 {hi:g}",
             severity=Severity.MILD, evidence=(f"P90 色度 {cf.p90_chroma:.1f}",), causes=("饱和度/自然饱和度过高",),
-            adjustments=(Adjustment("Camera Raw", "饱和度或自然饱和度降低 10 ~ 20", "小幅"),), confidence=conf,
+            adjustments=(nl.adjustment("vibrance", {"vibrance": -nl.clip(10 + 40 * (cf.value - hi) / cf.value, 10, 20), "saturation": 0},
+                                       f"自然饱和度 {-nl.clip(10 + 40 * (cf.value - hi) / cf.value, 10, 20):+d}，饱和度 0"
+                                       "（Camera Raw 里同名滑块也可以）", "global", "颜色过艳 · 自然饱和度"),), confidence=conf,
         ))
     r = pr.ratio
     findings.append(Finding(
@@ -699,7 +722,7 @@ def analyze_palette_report(
         evidence=tuple(f"{role}：{p.family} {p.share:.0%}（Lab {p.lab[0]:.0f}, {p.lab[1]:.0f}, {p.lab[2]:.0f}）"
                        for role, p in zip(("主色", "辅色", "点缀色"), r.roles)) + (f"其余颜色 {r.other_share:.0%}",),
         causes=(),
-        adjustments=tuple(Adjustment("构图/调色", t, None, True) for t in r.tips),
+        adjustments=tuple(Adjustment("构图/调色", t, None, True) for t in r.tips) + _ratio_layers(pr, r),
         confidence=conf,
         notes=("6:3:1 是设计和电影常用的经验比例，不是硬性规则；中性色（黑白灰）也算一种颜色",),
     ))
@@ -709,7 +732,7 @@ def analyze_palette_report(
             problem=f"“{u.family}”统一度 {u.score:.0f}/100" + ("（不统一）" if u.score < 70 else "（基本统一）"),
             severity=Severity.NORMAL if u.score >= 80 else (Severity.MILD if u.score >= 60 else Severity.NOTABLE),
             evidence=(f"{u.family}占画面 {u.share:.0%}，色相标准差 {u.hue_spread:.1f}°，饱和度变异 {u.sat_cv:.0%}，明度标准差 {u.lightness_std:.1f}",)
-            + ((f"与目标相差 ΔE00 {u.delta_e_to_target:.1f}",) if u.delta_e_to_target is not None else ())
+            + ((f"与目标相差 ΔE00 {u.delta_e_to_target:.1f}（{de_words(u.delta_e_to_target)}）",) if u.delta_e_to_target is not None else ())
             + tuple(f"位置 x {p.bbox[0]}, y {p.bbox[1]}，{p.bbox[2]}×{p.bbox[3]}：{p.note}" for p in u.patches[:4]),
             causes=("不同光源/阴影里的同一种颜色偏向不同", "混色器只调了部分通道"),
             adjustments=u.adjustments,
@@ -732,6 +755,29 @@ def analyze_palette_report(
     return _finalize("palette", context, stats, comps, findings, reasons, conf, palette=pr, region=rect)
 
 
+_NO_DESAT = ("橙", "黑/深灰", "白/浅灰", "灰")  # 不自动降饱和：肤色所在的橙、无彩色
+
+
+def _ratio_layers(pr, r) -> tuple[Adjustment, ...]:
+    """6:3:1 里“其余颜色偏杂”：把这些颜色降饱和（一层色相/饱和度，范围各自对准；主色、辅色、点缀色和肤色不动）。"""
+    if r.score >= 75 or r.other_share <= 0.1:
+        return ()
+    keep = [nl.ps_hsb_of_lab(p.lab) for p in r.roles if p.chroma >= 8]
+    items, words = [], []
+    for p in pr.palette[3:6]:
+        if p.family in _NO_DESAT or p.chroma < 8:
+            continue
+        c = nl.ps_hsb_of_lab(p.lab)
+        if any(abs(((c - k + 180) % 360) - 180) < 30 for k in keep):
+            continue  # 离主色/辅色/点缀色太近，会一起被降掉
+        items.append((c, 8, 25, 0, -25, 0))
+        words.append(f"{p.family}（范围对准色相 {c:.0f}°）饱和度 -25")
+    if not items:
+        return ()
+    return (nl.adjustment("hueSaturation", nl.huesat_multi(items), "其余的杂色降饱和：" + "；".join(words) + "（主色、辅色、点缀色不动）",
+                          "global", "杂色降饱和 · 色相/饱和度", strength="小幅"),)
+
+
 def compare_reference(mine: np.ndarray, ref: np.ndarray, context: ColorContext, skin_mine=None, skin_ref=None, rect=None) -> AnalysisReport:
     """仿色：参考是什么色彩，我的图差多少，适不适合照着调。"""
     from colordoctor.core import reference_match as rm
@@ -744,7 +790,7 @@ def compare_reference(mine: np.ndarray, ref: np.ndarray, context: ColorContext, 
         Finding(
             problem=f"与参考的相似度 {m.similarity:.0f}/100",
             severity=sev,
-            evidence=m.gaps + tuple(f"参考主色 {f}（{s:.0%}）↔ 我的 {mf}，ΔE00 {de:.0f}" for f, s, mf, de in m.palette_match),
+            evidence=m.gaps + tuple(f"参考主色 {f}（{s:.0%}）↔ 我的 {mf}，ΔE00 {de:.0f}（{de_words(de)}）" for f, s, mf, de in m.palette_match),
             causes=(),
             adjustments=m.adjustments,
             confidence=conf,

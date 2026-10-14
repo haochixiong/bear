@@ -11,7 +11,9 @@ import numpy as np
 from colordoctor.core import acr_channels as ac
 from colordoctor.core import clustering
 from colordoctor.core import color_spaces as cs
+from colordoctor.core import native_layers as nl
 from colordoctor.core.color_models import Adjustment
+from colordoctor.core.perception import de_words
 from colordoctor.core.contamination import _components
 from colordoctor.core.region_statistics import weighted_circular_hue
 from colordoctor.core.sampling import SampleError, grid_downsample
@@ -281,6 +283,7 @@ def family_unity(
     goal = ac.lab_hue_to_hsb_hue(goal_lab_h)
     sat_goal = float(np.median([c.mean_sat for c in stats])) if stats else 0
     adjs = []
+    rows = []  # PS 色相/饱和度：(通道, HSB 中心, 色相度数, 饱和度, 明亮度)
     for c in stats:
         hs, h_note = ac.cap_slider(ac.hue_slider(c.mean_hue, goal, channel=c.name))
         if hs * cs.hue_diff(ac.lab_hue_of(c.mean_lab), goal_lab_h) <= 0:
@@ -292,6 +295,8 @@ def family_unity(
         if abs(ss) >= 8:
             parts.append(f"饱和度 {ss:+d}{s_note}")
         if parts:
+            rows.append((c.name, c.mean_hue, float(cs.hue_diff(c.mean_hue, goal)) if abs(hs) >= 5 else 0.0,
+                         ss if abs(ss) >= 8 else 0, 0))
             adjs.append(
                 Adjustment(
                     "Camera Raw 混色器",
@@ -309,11 +314,17 @@ def family_unity(
         adjs.append(
             Adjustment(
                 "Camera Raw 混色器",
-                f"整体往目标{family}靠：色相 {hs:+d}{h_note}，明亮度 {ls:+d}{l_note}（当前与目标相差 ΔE00 {de:.1f}）",
+                f"整体往目标{family}靠：色相 {hs:+d}{h_note}，明亮度 {ls:+d}{l_note}（当前与目标相差 ΔE00 {de:.1f}，{de_words(de)}）",
                 ac.slider_strength(max(abs(hs), abs(ls))),
                 True,
             )
         )
+        c0 = ac.lab_hue_to_hsb_hue(cur[2])
+        for params, words in nl.mixer_rows_to_huesat(
+                [(family, c0, float(cs.hue_diff(c0, ac.lab_hue_to_hsb_hue(tl[2]))), 0, ls)]):
+            adjs.append(nl.adjustment("hueSaturation", params, f"往目标{family}靠：{words}（PS 做法，与上一条二选一）",
+                                      "global", f"{family}往目标靠 · 色相/饱和度"))
+    adjs += _unity_native(family, mean, patches[:8], rows)
     if not adjs:
         adjs.append(Adjustment("提示", f"画面中的{family}已经比较统一", None, False))
     adjs.append(Adjustment("提示", "混色器调整会影响整张照片中同一通道的颜色；只想改局部时用蒙版", None, False))
@@ -332,6 +343,29 @@ def family_unity(
         adjustments=tuple(adjs),
         patches=tuple(patches[:8]),
     )
+
+
+def _unity_native(family: str, mean, patches, rows) -> list[Adjustment]:
+    """统一度的 PS 做法：有偏离的小块时逐块推回主色（各自只作用于那一块）；没有时一层色相/饱和度把各通道收拢。"""
+    out = []
+    L0, a0, b0 = (float(v) for v in mean)
+    main_h = float(np.degrees(np.arctan2(b0, a0))) % 360
+    C0 = float(np.hypot(a0, b0))
+    for i, p in enumerate(patches):
+        patch_h = main_h + p.hue_shift
+        hue = nl.clip(nl.hsb_shift(patch_h, main_h, L0, C0), -30, 30)  # 把偏离的一块推回主色
+        if hue == 0:
+            continue
+        idx, ramps = nl.custom_range(ac.lab_hue_to_hsb_hue(patch_h % 360, L=L0, C=max(C0, 8.0)))
+        rname = nl.PS_RANGES[idx - 1][1]
+        out.append(nl.adjustment("hueSaturation", nl.huesat(idx, ramps, hue=hue),
+                                 f"{p.note}：{rname}（范围已对准这一块的颜色）色相 {hue:+d}（只作用于这一块）",
+                                 "local", f"{family}统一 {i + 1} · 色相/饱和度", f"unity@{i}"))
+    if not out:
+        for params, words in nl.mixer_rows_to_huesat(rows):
+            out.append(nl.adjustment("hueSaturation", params, f"PS 做法（与上面的混色器二选一）：{words}",
+                                     "global", f"{family}统一 · 色相/饱和度"))
+    return out
 
 
 def _toward_name(h: float, d: float) -> str:
@@ -366,6 +400,7 @@ def _center(lo: float, hi: float) -> float:
 # （任何风格要的色调都不超过 15；淡蓝的天空 C* 约 20，是有颜色的物体，不能当成高光色调）
 TINT_NEUTRAL_C = 8.0
 TINT_MAX_C = 15.0
+TONE_MOVE_CAP = 15.0  # 风格影调曲线一次最多把一个分位移动这么多 L*（更大的差距多半要从曝光/光线入手）
 GRADING_SAT_MAX = 30  # 颜色分级饱和度建议上限（常用做法 10–25）
 DESAT_SAT_FLOOR = 10.0  # 通道平均饱和度（HSB）已低于此值：不再建议降饱和
 
@@ -478,15 +513,11 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     score = 100 * sum(wt * v for wt, v in parts) / sum(wt for wt, _ in parts)
 
     adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok, cf.value)
-    if bp_min is not None and p5 < bp_min:
-        gray = int(cs.lab_to_srgb8(np.array([float(bp_min), 0.0, 0.0]))[0])
-        adjs.insert(0, Adjustment("曲线", f"RGB 黑场抬起：输入 0 → 输出约 {gray}（P5 明度 {p5:.0f} → ≥ {bp_min}）", "小幅", False))
-    if ct_ok is False:
-        if contrast > ct[1]:
-            text = f"RGB 降低对比：亮暗差 {contrast:.0f} → {ct[1]} 以内（黑场抬、白场略压，或中间调 S 曲线减弱）"
-        else:
-            text = f"RGB 加对比：亮暗差 {contrast:.0f} → ≥ {ct[0]}（S 形曲线，暗部下压、亮部上提）"
-        adjs.insert(0, Adjustment("曲线", text, "小幅", True))
+    tone_adjs = []
+    tone = _tone_curve(style, p5, p50, p95, contrast, ct, ct_ok, bp_min, bp_max)
+    if tone is not None:
+        tone_adjs.append(tone)
+    adjs[0:0] = tone_adjs
     return StyleMatch(
         key=style["key"],
         name=style["name"],
@@ -510,8 +541,52 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     )
 
 
+def _tone_curve(style, p5, p50, p95, contrast, ct, ct_ok, bp_min, bp_max) -> Adjustment | None:
+    """风格的影调（黑场、黑位、对比、中间调）合成一条 RGB 曲线：几个要求一起算，不会两条曲线叠加把暗部压两次。"""
+    reasons, pts = [], {}
+    lo, hi = float(p5), float(p95)
+    capped = False
+    if ct_ok is False:
+        goal = ct[1] if contrast > ct[1] else ct[0]
+        shift = (goal - contrast) / 2.0
+        capped |= abs(shift) > TONE_MOVE_CAP
+        shift = float(np.clip(shift, -TONE_MOVE_CAP, TONE_MOVE_CAP))
+        lo, hi = lo - shift, hi + shift
+        reasons.append(f"降低对比：亮暗差 {contrast:.0f} → {ct[1]} 以内" if contrast > ct[1] else f"加对比：亮暗差 {contrast:.0f} → ≥ {ct[0]}")
+    if bp_max is not None and p5 > bp_max:
+        capped |= p5 - bp_max > TONE_MOVE_CAP
+        lo = min(lo, max(float(bp_max), p5 - TONE_MOVE_CAP))
+        reasons.append(f"黑位压深：P5 明度 {p5:.0f} → ≤ {bp_max}")
+    if bp_min is not None and p5 < bp_min:
+        pts[0] = nl.gray8(bp_min)
+        lo = max(lo, float(bp_min))
+        reasons.append(f"黑场抬起：输入 0 → 输出约 {pts[0]}（P5 明度 {p5:.0f} → ≥ {bp_min}）")
+    lo, hi = float(np.clip(lo, 0, 100)), float(np.clip(hi, 0, 100))
+    for x, y in ((nl.gray8(p5), nl.gray8(lo)), (nl.gray8(p95), nl.gray8(hi))):
+        if 0 < x < 255 and x != y:
+            pts[x] = y
+    if style.get("min_median_L") and p50 < style["min_median_L"]:
+        pts[nl.gray8(p50)] = nl.gray8(style["min_median_L"])
+        reasons.append(f"中间调提亮：中位明度 {p50:.0f} → ≥ {style['min_median_L']}")
+    if not reasons:
+        return None
+    curve, last = [], -1
+    for x in sorted(pts):  # 输出必须随输入单调增加，否则曲线会翻折
+        if pts[x] > last:
+            curve.append((x, pts[x]))
+            last = pts[x]
+    p = nl.curves({"composite": curve})
+    moved = nl.curves_text(p)
+    if not moved:
+        return Adjustment("曲线", "RGB 曲线：" + "；".join(reasons), "小幅", True)
+    note = "（差得太多，先调这么多，重新分析后再看）" if capped else ""
+    return nl.adjustment("curves", p, "RGB 曲线（风格影调）：" + "；".join(reasons) + f"。{moved}{note}", "global", "风格影调 · 曲线")
+
+
 def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None, cf_value=None) -> list[Adjustment]:
     out: list[Adjustment] = []
+    rows = []  # PS 色相/饱和度：(通道, HSB 中心, 色相度数, 饱和度, 明亮度)
+    grading = {}  # 色彩平衡：色调 -> [青-红, 洋红-绿, 黄-蓝]
     sectors = {s["name"]: tuple(s["hue"]) for s in style.get("sectors", [])}
     cr = style.get("colorfulness", [0, 200])
     for c in ac.channel_stats(sub, primary=True):
@@ -534,6 +609,7 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
             hs, note = ac.cap_slider(hs)
             if abs(hs) >= 8:
                 text = f"{c.name}（占画面颜色 {c.share:.0%}）：色相 {hs:+d}，往“{sec}”靠{note}"
+                rows.append((c.name, c.mean_hue, float(cs.hue_diff(c.mean_hue, ac.lab_hue_to_hsb_hue(goal_h))), 0, 0))
                 out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(hs), True, (("色相", hs),)))
         elif act.startswith("desat"):
             if c.mean_sat <= DESAT_SAT_FLOOR:
@@ -552,10 +628,12 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
                 continue
             text = f"{c.name}（占画面颜色 {c.share:.0%}）：饱和度 {amount:+d}{note}"
             prm = [("饱和度", amount)]
+            lum = 0
             if act == "desat_dark":
                 lum = -int(np.clip(20 + 100 * c.share, 20, ac.SLIDER_CAP))
                 text += f"，明亮度 {lum:+d}"
                 prm.append(("明亮度", lum))
+            rows.append((c.name, c.mean_hue, 0.0, amount, lum))
             out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(amount), True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
     for key, label, t, ok in (("shadow_tint", "阴影", sh, sh_ok), ("highlight_tint", "高光", hl, hl_ok)):
@@ -580,13 +658,21 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
         # 颜色分级是在现有色调上“加”一个色调：要加的是差值（目标 − 当前），不是目标本身
         gh, gs = ac.tint_to_grading(goal[0], goal[1] - cur[1], goal[2] - cur[2])
         gs = min(gs, GRADING_SAT_MAX)
+        grading["shadows" if label == "阴影" else "highlights"] = nl.grading_to_balance(gh, gs)
         out.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（目标 Lab 色调 a* {goal[1]:+.1f}、b* {goal[2]:+.1f}，当前 a* {cur[1]:+.1f}、b* {cur[2]:+.1f}）", "小幅", True,
                               (("色相", gh), ("饱和度", gs))))
         rgb_cur = cs.lab_to_srgb8(cur).astype(int)
         rgb_goal = cs.lab_to_srgb8(goal).astype(int)
         pts = "；".join(f"{n}通道 输入 {a} → 输出 {b}" for n, a, b in zip(("红", "绿", "蓝"), rgb_cur, rgb_goal) if a != b)
         if pts:
-            out.append(Adjustment("曲线", f"{label}（平均色）：{pts}", "小幅", False))
+            out.append(Adjustment("曲线", f"{label}（平均色）：{pts}（可代替色彩平衡，二选一）", "小幅", False))
+    for params, words in nl.mixer_rows_to_huesat(rows):
+        out.append(nl.adjustment("hueSaturation", params, f"PS 做法（代替上面的 Camera Raw 混色器）：{words}",
+                                 "global", f"「{style['name']}」颜色 · 色相/饱和度"))
+    if any(any(v) for v in grading.values()):
+        p = nl.balance(**grading)
+        out.append(nl.adjustment("colorBalance", p, f"PS 做法（代替上面的颜色分级），勾选“保留明度”：{nl.balance_text(p)}",
+                                 "global", f"「{style['name']}」色调 · 色彩平衡"))
     for panel, lines in style.get("recipe", {}).items():
         for line in lines:
             out.append(Adjustment(f"常用做法·{panel}", line, None, True))

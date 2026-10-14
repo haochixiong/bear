@@ -18,8 +18,10 @@ import numpy as np
 
 from colordoctor.core import acr_channels as ac
 from colordoctor.core import color_spaces as cs
+from colordoctor.core import native_layers as nl
 from colordoctor.core import palette as pl
 from colordoctor.core.color_models import Adjustment
+from colordoctor.core.perception import de_words
 
 PCTS = (5, 25, 50, 75, 95)
 NEUTRAL_C = 12.0
@@ -140,10 +142,11 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         (f"中性区域偏色：参考 a* {cast_r[0]:+.1f}、b* {cast_r[1]:+.1f}；我的 a* {cast_m[0]:+.1f}、b* {cast_m[1]:+.1f}" if both_cast
          else "中性区域偏色：有一张图几乎没有接近中性的颜色，无法比较白平衡"),
         f"色彩丰富度：参考 {cf_r:.0f} / 我的 {cf_m:.0f}",
-        f"主色平均差异 ΔE00 {pal_de:.1f}",
+        f"主色平均差异 ΔE00 {pal_de:.1f}（{de_words(pal_de)}）",
     ]
     if skin_delta is not None:
-        gaps.append(f"肤色差异 ΔE00 {skin_delta[0]:.1f}（参考 - 我的：ΔL* {skin_delta[1]:+.1f}，Δa* {skin_delta[2]:+.1f}，Δb* {skin_delta[3]:+.1f}）")
+        gaps.append(f"肤色差异 ΔE00 {skin_delta[0]:.1f}（{de_words(skin_delta[0])}；参考 - 我的：ΔL* {skin_delta[1]:+.1f}，"
+                    f"Δa* {skin_delta[2]:+.1f}，Δb* {skin_delta[3]:+.1f}）")
 
     fit = []
     if abs(tr[2] - tm[2]) > 20:
@@ -153,7 +156,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         fit.append("参考是黑白作品：把你的图转成黑白后，主要比较影调（曲线）即可")
     for fam, share, mine_fam, de in () if ref_bw else matches:
         if share >= 0.15 and de > 20:
-            fit.append(f"参考的主色“{fam}”（占 {share:.0%}）在你的画面里没有接近的颜色（最近的是“{mine_fam}”，ΔE00 {de:.0f}）："
+            fit.append(f"参考的主色“{fam}”（占 {share:.0%}）在你的画面里没有接近的颜色（最近的是“{mine_fam}”，ΔE00 {de:.0f}，{de_words(de)}）："
                        "只能靠大幅偏色制造，效果可能不自然")
     if cf_r - cf_m > 25:
         fit.append("参考明显更鲜艳：强行提高饱和度容易出现色块和溢色，注意肤色")
@@ -165,11 +168,16 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     adjs: list[Adjustment] = []
     if curve:
         adjs.append(Adjustment("曲线", "RGB 复合曲线（把影调拉向参考）：" + "；".join(f"输入 {a} → 输出 {b}" for a, b in curve), "小幅", False,
-                               tuple((f"输入 {a}", float(b)) for a, b in curve)))
+                               tuple((f"输入 {a}", float(b)) for a, b in curve),
+                               layer=nl.layer("curves", nl.curves({"composite": list(curve)}), "global", "仿色影调 · 曲线", "ref_curve")))
     if ref_bw:
         adjs.insert(0, Adjustment("Camera Raw", "参考是黑白作品：先把你的图转黑白（Camera Raw 处理方式选「黑白」，或饱和度 -100），"
                                   "再用曲线对齐影调；各颜色转成多亮的灰用「黑白混合」调", None, False))
+        adjs.insert(1, nl.adjustment("hueSaturation", nl.huesat(0, None, sat=-100, master=True),
+                                     "PS 做法：色相/饱和度 全图 饱和度 -100（转黑白；想控制各颜色转成多亮的灰，改用 PS「黑白」调整图层）",
+                                     "global", "转黑白 · 色相/饱和度", strength=None))
     da, db = (cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]) if both_cast else (0.0, 0.0)
+    balance = {"midtones": nl.balance_for_shift(da, db, "midtones") if max(abs(da), abs(db)) >= 1.5 else [0, 0, 0]}
     if abs(db) >= 1.5:
         adjs.append(Adjustment("Camera Raw", f"色温往{'黄' if db > 0 else '蓝'}（中性区域 b* 需要 {db:+.1f}）", "小幅"))
     if abs(da) >= 1.5:
@@ -183,8 +191,14 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
             continue  # 这一段没有可比较的中性色
         if np.hypot(tr_[0] - tm_[0], tr_[1] - tm_[1]) >= 2:
             gh, gs = ac.tint_to_grading(60.0, tr_[0] - tm_[0], tr_[1] - tm_[1])  # 要加的是差值
+            # PS 色彩平衡：中间调已经按色温/色调修了整体偏色，阴影/高光只补剩下的差别（否则同一个偏色修两次）
+            wb = (da, db) if any(balance["midtones"]) else (0.0, 0.0)
+            ra, rb = tr_[0] - tm_[0] - wb[0], tr_[1] - tm_[1] - wb[1]
+            if np.hypot(ra, rb) >= 2:
+                balance["shadows" if label == "阴影" else "highlights"] = nl.grading_to_balance(*ac.tint_to_grading(60.0, ra, rb))
             adjs.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（参考{label}色调 a* {tr_[0]:+.1f}、b* {tr_[1]:+.1f}，我的 a* {tm_[0]:+.1f}、b* {tm_[1]:+.1f}）", "小幅",
                                    True, (("色相", gh), ("饱和度", gs))))
+    rows = []  # PS 色相/饱和度：(通道, HSB 中心, 色相度数, 饱和度, 明亮度)
     for d in diffs:
         parts = []
         (hs, hn), (ss, sn), (ls, ln) = (ac.cap_slider(v) for v in (d.hue_slider, d.sat_slider, d.lum_slider))
@@ -195,9 +209,20 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         if abs(ls) >= 10:
             parts.append(f"明亮度 {ls:+d}{ln}")
         if parts:
+            a_, b_ = ch_m[d.name], ch_r[d.name]
+            center = a_.mean_hue if a_.mean_hue is not None else a_.center
+            deg = float(cs.hue_diff(a_.mean_hue, b_.mean_hue)) if abs(hs) >= 8 and a_.mean_hue is not None and b_.mean_hue is not None else 0.0
+            rows.append((d.name, center, deg, ss if abs(ss) >= 10 else 0, ls if abs(ls) >= 10 else 0))
             adjs.append(Adjustment("Camera Raw 混色器", f"{d.name}（参考占 {d.ref_share:.0%}，我的占 {d.my_share:.0%}）：" + "，".join(parts),
                                    ac.slider_strength(max(abs(hs), abs(ss), abs(ls))), True,
                                    (("色相", hs), ("饱和度", ss), ("明亮度", ls))))
+    if any(any(v) for v in balance.values()):
+        p = nl.balance(**balance)
+        adjs.append(nl.adjustment("colorBalance", p, f"PS 做法（代替上面的色温/色调和颜色分级），勾选“保留明度”：{nl.balance_text(p)}",
+                                  "global", "仿色色调 · 色彩平衡"))
+    for params, words in nl.mixer_rows_to_huesat(rows):
+        adjs.append(nl.adjustment("hueSaturation", params, f"PS 做法（代替上面的 Camera Raw 混色器）：{words}",
+                                  "global", "仿色颜色 · 色相/饱和度"))
     adjs.append(Adjustment("提示", "建议顺序：先曲线定影调 → 再色温/色调 → 混色器 → 颜色分级；每一步后重新对比", None, False))
     return MatchReport(
         similarity=round(sim, 1),

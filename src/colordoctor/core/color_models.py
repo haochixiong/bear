@@ -138,6 +138,7 @@ class Blob:
     contaminant_hue_name: str | None
     score: float
     evidence: tuple[str, ...]
+    contaminant_hue: float | None = None  # 杂色的 Lab 色相角（发灰处为 None）
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,8 @@ class Adjustment:
     strength: str | None = None  # 轻微 / 小幅 / 中等（估计）
     estimated: bool = True
     params: tuple[tuple[str, float], ...] = ()
+    # 能直接生成的 PS 原生调整图层（数值与 instruction 相同），格式见 native_layers；不参与比较/哈希
+    layer: dict | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

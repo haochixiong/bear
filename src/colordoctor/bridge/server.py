@@ -190,6 +190,11 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         opaque[oy:oy + vh, ox:ox + vw] = prep.valid
     sid = sessions.put(Session(plan, (h, w), prep.offset, doc_size or (w, h), opaque))
     plan_json = plan.to_json()
+    # 每条问题带上序号和修它的图层 id（图层的 finding 就是这个序号，顺序与 report.findings 相同）
+    findings_json = to_jsonable(list(report.findings))
+    for i, fj in enumerate(findings_json):
+        fj["index"] = i
+        fj["layers"] = [ly.id for ly in plan.layers if ly.finding == i]
     if opaque is not None:
         for ly in plan_json["layers"]:
             ly["has_mask"] = True  # 全图类的调整（如曲线）也要限制在这个图层的不透明范围内
@@ -199,7 +204,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "layer": layer_name,
         "notes": list(prep.notes) + [w for w in report.context.warnings if w not in photoshop_context().warnings],
         "summary": summary(report),
-        "findings": to_jsonable(list(report.findings)),
+        "findings": findings_json,
         "adjustments": to_jsonable(list(report.adjustments)),
         "plan": plan_json,
         "acr_params": acr_preset.params_for_report(report),

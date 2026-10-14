@@ -226,6 +226,7 @@ def _blobs(mask, kind_value, kind, L, C, h, step, offset, base_name, min_count, 
                 contaminant_hue_name=cname,
                 score=round(share * min(1.0, c_mean / 15.0 if kind == "opposite" else 1.0), 5),
                 evidence=tuple(ev),
+                contaminant_hue=None if cname is None else round(float(hue), 2),
             )
         )
     blobs.sort(key=lambda b: -(b.score * b.area_fraction))
