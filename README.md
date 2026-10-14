@@ -253,6 +253,7 @@ colordoctor styles       （列出整图风格）
 - 默认的抠皮肤基于颜色规则：与皮肤颜色非常接近的木头、沙发等可能被误选，可以用“编辑皮肤蒙版”修正。装了 `onnxruntime` 和模型时可以勾选“AI 抠皮肤”（MediaPipe 多类人像分割），脸和身体分开，误选少很多。
 - Windows 专属部分只能在 Windows 上验证，见 `docs/WINDOWS_HANDOFF.md`：显示器 ICC、全局快捷键、多显示器，以及 `claude -p` / `codex exec` 的实际调用参数。
 - 文件可读 JPG、PNG、TIFF、WebP（16 位按 8 位分析；16 位彩色 TIFF 需另存为 8 位）和相机 RAW（RAW 需要 `rawpy`）。RAW 由 LibRaw 解码，颜色与 ACR 的相机配置文件不同，数值只作参考；要与 ACR 一致，请在 PS 插件里分析。PSD 请在 PS 里打开后用插件或屏幕取色分析。
+- 单点模式下可以连续点多个点（回车或 Esc 结束），两个点以上自动做“多点对比”：以第一个点为基准，用“几乎看不出 / 仔细对比才看得出 / 能看出 / 明显 / 很明显 / 差别很大”说明差别和偏向（偏黄、偏暗…），并给出一句结论；也可以在历史里多选取色点后右键对比。
 - 界面上的选择（模式、取样大小、肤色目标、部位、套索、整图扫描、风格模板、统一色、置顶、窗口位置等）会自动保存，下次启动恢复。
 - “AI 点评”的 API Key 以明文保存在本机设置（Windows 注册表 `HKCU\Software\ColorDoctor`）里；介意的话留空，改用环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY`。
 

@@ -65,6 +65,10 @@
 | P14 | 不规则选区取色 | `ps.js` `readSelectionPixels` | 椭圆 / 套索 / 魔棒选区时 `imaging.getSelection` 返回的灰度与像素对齐；羽化选区的半透明部分按比例计入 |
 | P15 | 有选区时生成 | `ps.js` `withoutSelection` | 有选区时点「生成」：选区先存成临时通道并取消，整体调整图层不带选区蒙版；生成后选区恢复、临时通道删除 |
 | P16 | Camera Raw 图层 | `ps.js` `cameraRawLayer` | 分析单个图层后（当前选中的是调整图层组）点「生成 Camera Raw 图层」：复制的是分析过的图层；合并模式下盖印图层在最顶层；在 Camera Raw 里点「取消」时复制出的图层被撤回 |
+| P18 | 可选颜色图层 | `ps.js` `selectiveColorDescriptor` | 生成的「可选颜色」图层在属性面板里方法为“相对”，红色 / 黄色等各项数值正确（描述符按 ScriptListener 的 colors / cyan / magenta / yellowColor / black 写，未录制核对） |
+| P19 | 颜色取样器 | `ps.js` `readColorSamplers` | 用颜色取样器工具放 2–4 个点后点「多点对比」：`doc.colorSamplers[i].color.lab` 读得到，顺序与放置顺序一致 |
+| P20 | 选参考图文件 | `main.js` `chooseRefFile` | `getFileForOpening` + `file.read({format: binary})` 能读 JPG / PNG / TIFF / RAW；大文件（50 MB RAW）不卡死 |
+| P21 | 记住设置 | `main.js` `prefs` | 关闭再打开面板、重启 PS 后，上次的页面、分析对象、风格等恢复（UXP 的 localStorage） |
 | P17 | 非 RGB 文档 | `main.js` `generate` | CMYK / Lab / 灰度文档里点「生成」给出“请先转换为 RGB”的提示，不建图层；`doc.mode` 的实际取值请打印确认 |
 
 ## 还没做 / 建议下一步（按优先级）
