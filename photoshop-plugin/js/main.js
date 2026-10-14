@@ -48,13 +48,14 @@ const cur = () => state.bySub[state.sub] || null;
 
 function analyzeLabel() {
   if (MODE_OF[state.sub] === "patch") return "读取选区颜色";
-  return $("target").value === "merged" ? "分析合并画面" : "分析当前图层";
+  const t = $("target").value;
+  return t === "merged" ? "分析合并画面" : (t === "stack" ? "分析到这一层的画面" : "分析当前图层");
 }
 
 // ---------------------------------------------------------------- 分析对象栏
 function refreshTarget() {
   const info = ps.inspectTarget($("target").value);
-  $("targetName").textContent = info.label || "—";
+  $("targetName").textContent = (info.label || "—") + ((info.notes || []).length ? `（${info.notes.join("；")}）` : "");
   $("analyze").textContent = analyzeLabel();
   if (state.sub === "reference") refreshRefDocs();
   const st = $("status");
@@ -65,10 +66,13 @@ function refreshTarget() {
   const doc = app.activeDocument;
   if (a && a.justMade && doc && doc.id === a.docId) {
     // 刚生成的调整图层 / 组被选中：保留成功提示，不当成“不能分析”的错误
-    if (!info.ok && info.layer && a.justMade.has(info.layer.id)) {
+    const sel = (doc.activeLayers || [])[0];
+    if (sel && a.justMade.has(sel.id)) {
       st.className = "status ok";
-      st.textContent = `${a.justMadeText}。要再次分析，请在图层面板里选回「${a.layerName}」`;
-      $("analyze").disabled = true;
+      st.textContent = info.ok && info.stack
+        ? `${a.justMadeText}。现在点「${analyzeLabel()}」会连同新图层一起复查效果`
+        : `${a.justMadeText}。要再次分析，请在图层面板里选回「${a.layerName}」`;
+      $("analyze").disabled = !info.ok;
       return info;
     }
   }
@@ -79,7 +83,7 @@ function refreshTarget() {
     return info;
   }
   $("analyze").disabled = false;
-  if (a && info.doc && a.docId === info.doc.id && a.layerId === (info.layer ? info.layer.id : null)) {
+  if (a && info.doc && a.docId === info.doc.id && a.target === $("target").value && a.layerId === (info.layer ? info.layer.id : null)) {
     const stale = isStale(a, info.doc);
     st.className = stale ? "status warn" : "status ok";
     st.textContent = stale
@@ -261,7 +265,8 @@ async function runAnalyze() {
   // 在读像素之前记下历史状态：分析过程中如果有改动，会被正确判为“可能过期”
   const historyBefore = ps.historyStateId(info.doc);
   try {
-    const px = await ps.readModal(() => (mode === "patch" ? ps.readSelectionPixels(info) : ps.readPixels(info)));
+    // “及以下的画面”：读像素时临时隐藏上方图层（不留历史记录）
+    const px = await ps.readModal(() => (mode === "patch" ? ps.readSelectionPixels(info) : ps.readPixels(info)), info);
     if (refFile) {
       // 每次分析都重新交给服务（服务只暂存最近几张参考图）
       q.ref = (await bridge.uploadReferenceFile(refFile.name, refFile.data)).ref;
@@ -279,7 +284,8 @@ async function runAnalyze() {
       result: res, made: new Set(),
       analyzed: {
         docId: info.doc.id, docName: info.doc.name, layerId: info.layer ? info.layer.id : null,
-        layerName: info.layer ? info.label : "合并可见图层", okHistory: new Set([historyBefore]), bounds: sb,
+        layerName: info.layer ? info.layer.name : "合并可见图层", target: $("target").value,
+        okHistory: new Set([historyBefore]), bounds: sb,
         docWidth: info.doc.width, docHeight: info.doc.height, depth: String(info.doc.bitsPerChannel || ""),
         refName: refFile ? refFile.name : (refDoc ? refDoc.name : null),
       },
@@ -697,12 +703,19 @@ async function acrLayer() {
   // 先保存预设，再复制图层 → 智能对象 → 打开 Camera Raw 对话框，由用户套用预设并确认。
   if (state.busy) return;
   const merged = $("target").value === "merged";
+  const stack = $("target").value === "stack";
   const doc = app.activeDocument;
   const e = cur();
   const a = e && e.analyzed;
   let layerId = null;
   let layerName = "合并可见图层";
-  if (!merged) {
+  if (stack) {
+    // 及以下的画面：在选中图层上方盖印“到这一层为止”的画面（上方图层临时隐藏），调整图层也可以
+    const info = refreshTarget();
+    if (!info.ok) { statusError(new Error(info.reason)); return; }
+    layerId = info.layer.id;
+    layerName = `${info.layer.name}及以下的画面`;
+  } else if (!merged) {
     // 优先用这个页面分析过的图层（生成校正后当前选中的往往是调整图层 / 图层组）
     if (a && doc && a.docId === doc.id && a.layerId != null && ps.findLayer(doc, a.layerId)) {
       layerId = a.layerId;
@@ -724,9 +737,9 @@ async function acrLayer() {
     }
     return;
   }
-  setBusy(true, `第 2 步：复制「${layerName}」并打开 Camera Raw。在「预设」面板 → ⋯ → 导入配置文件和预设，选「${saved}.xmp」，再点确定`);
+  setBusy(true, `第 2 步：${stack ? "盖印" : "复制"}「${layerName}」并打开 Camera Raw。在「预设」面板 → ⋯ → 导入配置文件和预设，选「${saved}.xmp」，再点确定`);
   try {
-    await ps.modal("ColorDoctor Camera Raw", async (ctx, d) => ps.cameraRawLayer("ColorDoctor · Camera Raw", { merged, layerId, doc: d }),
+    await ps.modal("ColorDoctor Camera Raw", async (ctx, d) => ps.cameraRawLayer("ColorDoctor · Camera Raw", { merged, stack, layerId, doc: d }),
       { interactive: true });
     setBusy(false);
     if (a && doc && a.docId === doc.id) {
@@ -812,7 +825,7 @@ async function init() {
     state.cat = prefs.cat;
     state.sub = SUBS[state.cat].some(([k]) => k === prefs.sub) ? prefs.sub : SUBS[state.cat][0][0];
   }
-  if (prefs.target === "layer" || prefs.target === "merged") $("target").value = prefs.target;
+  if (["stack", "layer", "merged"].includes(prefs.target)) $("target").value = prefs.target;
   $("target").addEventListener("change", () => { savePref("target", $("target").value); refreshTarget(); });
   $("analyze").addEventListener("click", runAnalyze);
   $("generateAll").addEventListener("click", () => {

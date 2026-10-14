@@ -26,7 +26,24 @@ function kindName(layer) {
   return typeof k === "string" ? k : String(k);
 }
 
-// 返回 {ok, reason, doc, layer, kind, bounds}；target: "layer" | "merged"
+// 当前图层“上方”的所有图层（按叠放顺序；所在组之外更上面的也算），不含它的上级组
+function layersAbove(doc, layer) {
+  const out = [];
+  let node = layer;
+  while (node) {
+    const parent = node.parent || null;
+    const siblings = parent ? parent.layers : doc.layers;  // layers[0] 是最上面
+    const idx = siblings ? siblings.findIndex((l) => l.id === node.id) : -1;
+    if (idx > 0) out.push(...siblings.slice(0, idx));
+    node = parent;
+  }
+  return out;
+}
+
+// 返回 {ok, reason, doc, layer, kind, bounds, stack}
+// target: "stack" = 当前图层及以下看到的画面（默认；任何图层都可以，包括调整图层、组、透明图层）
+//         "layer" = 只看当前图层自己的像素（抠出来的透明图层要单独分析时用）
+//         "merged" = 合并可见图层（整个画面）
 function inspectTarget(target) {
   const doc = app.activeDocument;
   if (!doc) return { ok: false, reason: "没有打开的文档。" };
@@ -40,16 +57,25 @@ function inspectTarget(target) {
   }
   const layer = layers[0];
   const kind = kindName(layer);
+  if (target === "stack") {
+    // 读的是“从最底下到这个图层为止”叠起来的画面：调整图层、组、透明图层都能分析，不新建盖印图层
+    const hiddenAbove = layersAbove(doc, layer).filter((l) => l.visible !== false).length;
+    const notes = [];
+    if (layer.visible === false) notes.push("这个图层是隐藏的，画面里不包含它");
+    if (hiddenAbove) notes.push(`上方还有 ${hiddenAbove} 个可见图层，分析时不计入，生成的调整图层也放在它们下面`);
+    return { ok: true, doc, layer, kind: "stack", stack: true, label: `「${layer.name}」及以下的画面`, notes,
+      bounds: { left: 0, top: 0, right: doc.width, bottom: doc.height } };
+  }
   const label = `${layer.name}`;
   if (NO_PIXEL_KINDS.has(kind)) {
     return { ok: false, layer, kind, label,
-      reason: `「${layer.name}」是调整图层或填充图层，本身没有像素。请选中像素图层，或把分析对象改为「合并可见图层」。` };
+      reason: `「${layer.name}」是调整图层或填充图层，本身没有像素。请把分析对象改为「当前图层及以下」（分析到这一层为止看到的画面），或选中像素图层。` };
   }
   if (NEED_MERGED_KINDS[kind]) {
     // 图层组不能栅格化，只能合并
     const fix = kind === "group" ? "或先合并这个组（Ctrl+E）" : "或先栅格化（图层 → 栅格化）";
     return { ok: false, layer, kind, label,
-      reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「合并可见图层」，${fix}。` };
+      reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「当前图层及以下」，${fix}。` };
   }
   const b = layer.boundsNoEffects || layer.bounds;
   if (!b || b.right - b.left < 2 || b.bottom - b.top < 2) {
@@ -83,7 +109,7 @@ async function readPixels(info, sourceBounds) {
     applyAlpha: false,
   };
   if (scale < 1) opts.targetSize = w >= h ? { width: Math.round(w * scale) } : { height: Math.round(h * scale) };
-  if (info.layer) opts.layerID = info.layer.id;
+  if (info.layer && !info.stack) opts.layerID = info.layer.id;  // “及以下的画面”读合成结果（上方图层已临时隐藏）
   const res = await imaging.getPixels(opts);
   const img = res.imageData;
   const data = await img.getData({ chunky: true });
@@ -354,16 +380,56 @@ async function modal(name, fn, { interactive = false, docId = null, docSize = nu
   }, { commandName: name, interactive });
 }
 
-// 只读操作（读像素）也需要 modal，但不进历史记录
-async function readModal(fn) {
-  return core.executeAsModal(async () => fn(), { commandName: "ColorDoctor 读取像素" });
+// 只读操作（读像素）也需要 modal，但不进历史记录。
+// info.stack 时：临时隐藏当前图层上方的可见图层，读到的合成画面就是“到这一层为止”的样子；
+// 读完立即恢复，并且这一步的历史记录整体丢弃（resumeHistory(..., false)），文档不留任何改动。
+async function readModal(fn, info = null) {
+  if (!info || !info.stack) return core.executeAsModal(async () => fn(), { commandName: "ColorDoctor 读取像素" });
+  return core.executeAsModal(async (ctx) => {
+    const doc = info.doc;
+    const hist = await ctx.hostControl.suspendHistory({ documentID: doc.id, name: "ColorDoctor 读取像素" });
+    const hidden = [];
+    try {
+      for (const l of layersAbove(doc, info.layer)) {
+        if (l.visible !== false) { l.visible = false; hidden.push(l); }
+      }
+      return await fn();
+    } finally {
+      for (const l of hidden) { try { l.visible = true; } catch (_) { /* 已被删除 */ } }
+      await ctx.hostControl.resumeHistory(hist, false);
+    }
+  }, { commandName: "ColorDoctor 读取像素" });
 }
 
 // ---------------------------------------------------------------- Camera Raw（待在 Windows 上用 Alchemist 录制确认）
 // TODO(Windows)：录制“滤镜 → Camera Raw 滤镜”，改一个混色器滑块后确定，把描述符的键名替换到这里。
 // 目前没有可靠的公开文档，所以“生成 Camera Raw 图层”先只做：复制图层 → 转智能对象 → 打开 Camera Raw 对话框
 // （dialogOptions: "display"），并把 .xmp 预设导出给用户在对话框里一键套用。
-async function cameraRawLayer(name, { merged = false, layerId = null, doc = null } = {}) {
+async function cameraRawLayer(name, { merged = false, stack = false, layerId = null, doc = null } = {}) {
+  if (stack && layerId != null) {
+    // 到这一层为止的画面：选中它，临时隐藏上方图层，盖印可见图层（新图层就在它上方），再恢复上方图层
+    const d = doc || app.activeDocument;
+    await selectLayer(layerId);
+    const hidden = layersAbove(d, findLayer(d, layerId) || { id: layerId }).filter((l) => l.visible !== false);
+    for (const l of hidden) l.visible = false;
+    try {
+      checkResults(await action.batchPlay([{ _obj: "mergeVisible", duplicate: true }], {}), "盖印画面");
+    } finally {
+      for (const l of hidden) { try { l.visible = true; } catch (_) { /* 已被删除 */ } }
+    }
+    checkResults(await action.batchPlay([
+      { _obj: "newPlacedLayer" },
+      { _obj: "set", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], to: { _obj: "layer", name } },
+    ], {}), "准备 Camera Raw 图层");
+    const res = await action.batchPlay([{ _obj: "Adobe Camera Raw Filter", _options: { dialogOptions: "display" } }], {});
+    if (isCancel(res)) {
+      const e = new Error("已取消，没有新建图层。");
+      e.cancelled = true;
+      throw e;
+    }
+    checkResults(res, "Camera Raw");
+    return;
+  }
   // 合并可见图层：在最顶层盖印可见图层（Ctrl+Alt+Shift+E），否则上面的图层会挡住效果；
   // 单个图层：先选中要处理的图层，再整层复制。不用「通过拷贝的图层」(Ctrl+J)：有选区时它只复制选区里的像素，
   // 当前选中的是调整图层时还会复制成调整图层。
@@ -492,7 +558,7 @@ async function selectLayer(id) {
 
 module.exports = {
   selectLayer, selectTopLayer, withoutSelection, liftOutOfGroups, findLayer, findDocument, isCancel, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
-  constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, readColorSamplers, foregroundLab,
+  constants, inspectTarget, layersAbove, historyStateId, readPixels, readSelectionPixels, readColorSamplers, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor, selectiveColorDescriptor },
 };

@@ -253,6 +253,47 @@ function dirtySky(w, h) {
   await ps.liftOutOfGroups({ layers: [outer] }, 501);
   assert.deepStrictEqual(moved, [[500, "placeBefore"]]);
 
+  // 5n. “当前图层及以下”：上方图层（含所在组外更上面的）临时隐藏、读合成画面、恢复、历史丢弃；调整图层也能分析
+  {
+    const mk = (id, name, kind, extra = {}) => ({ id, name, kind, visible: true, ...extra });
+    const top = mk(1, "顶部曲线", "curves");
+    const inner = mk(3, "组内上层", "pixel");
+    const target = mk(4, "肤色调整", "hueSaturation");
+    const below = mk(5, "人像", "pixel");
+    const grp = mk(2, "组", "group", { layers: [inner, target, below] });
+    const bg = mk(6, "背景", "pixel");
+    [inner, target, below].forEach((l) => { l.parent = grp; });
+    const hiddenAlready = mk(7, "本来就隐藏", "pixel", { visible: false });
+    const sdoc = { id: 9, name: "s.psd", width: 40, height: 30, layers: [hiddenAlready, top, grp, bg], activeLayers: [target],
+      activeHistoryState: { id: 1 } };
+    assert.deepStrictEqual(ps.layersAbove(sdoc, target).map((l) => l.id), [3, 7, 1]);
+    const info = ps.inspectTarget("stack");  // 当前活动文档仍是 doc：先换成 sdoc
+    assert.ok(info);
+    const prevDoc = fakePs.app.activeDocument;
+    fakePs.app.activeDocument = sdoc;
+    const sinfo = ps.inspectTarget("stack");
+    assert.ok(sinfo.ok && sinfo.stack && /及以下/.test(sinfo.label) && /2 个可见图层/.test(sinfo.notes.join("")));
+    const linfo = ps.inspectTarget("layer");
+    assert.ok(!linfo.ok && /当前图层及以下/.test(linfo.reason));  // 只看像素时调整图层不能分析，提示改用“及以下”
+    let seenVis = null;
+    let seenOpts = null;
+    const resumes = [];
+    const realCore = fakePs.core.executeAsModal;
+    fakePs.core.executeAsModal = async (fn) => fn({ hostControl: { suspendHistory: async () => 77, resumeHistory: async (id, ok) => resumes.push([id, ok]) } });
+    fakePs.imaging.getPixels = async (o) => {
+      seenOpts = o;
+      seenVis = [top.visible, inner.visible, hiddenAlready.visible, target.visible, below.visible, bg.visible];
+      return { level: 0, sourceBounds: o.sourceBounds, imageData: { width: 40, height: 30, components: 4, getData: async () => new Uint8Array(40 * 30 * 4), dispose() {} } };
+    };
+    await ps.readModal(() => ps.readPixels(sinfo), sinfo);
+    assert.deepStrictEqual(seenVis, [false, false, false, true, true, true]);  // 读的时候上方都隐藏
+    assert.strictEqual(seenOpts.layerID, undefined);  // 读合成画面，不是单个图层
+    assert.deepStrictEqual([top.visible, inner.visible, hiddenAlready.visible], [true, true, false]);  // 读完恢复原样
+    assert.deepStrictEqual(resumes, [[77, false]]);  // 这一步不进历史记录
+    fakePs.core.executeAsModal = realCore;
+    fakePs.app.activeDocument = prevDoc;
+  }
+
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
   fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };

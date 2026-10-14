@@ -13,8 +13,9 @@
   <section class="target">
     <div class="row">
       <select id="target" aria-label="分析对象">
-        <option value="layer">当前图层</option>
-        <option value="merged">合并可见图层</option>
+        <option value="stack" title="从最底下到选中的图层为止叠起来看到的画面。选中的是调整图层、组、透明图层都可以；不会新建盖印图层">当前图层及以下（看到的画面）</option>
+        <option value="layer" title="只看选中图层自己的像素（例如抠出来的人像图层），透明的地方不算">只看当前图层的像素</option>
+        <option value="merged" title="所有可见图层合起来的整个画面；生成的调整图层放在最顶层">合并可见图层（整个画面）</option>
       </select>
       <button id="analyze" class="primary">分析当前图层</button>
     </div>
