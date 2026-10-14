@@ -162,6 +162,23 @@ async function grayImageData(bytes, width, height, depth) {
   return imaging.createImageDataFromBuffer(buf, opts);
 }
 
+// PS「颜色取样器工具」放下的取样点（最多 10 个），按放置顺序；取样大小跟随吸管设置
+function readColorSamplers() {
+  const doc = app.activeDocument;
+  if (!doc) throw new Error("没有打开的文档。");
+  const list = doc.colorSamplers;
+  const n = list ? list.length : 0;
+  if (n < 2) throw new Error("请先用「颜色取样器工具」（吸管工具组里，快捷键 Shift+I 切换）在画面上点至少两个点。");
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const s = list[i];
+    const lab = s.color.lab;
+    const pos = s.position || {};
+    out.push({ name: `取样点 ${i + 1}`, lab: [lab.l, lab.a, lab.b], x: Math.round(pos.x || 0), y: Math.round(pos.y || 0) });
+  }
+  return out;
+}
+
 function foregroundLab() {
   const c = app.foregroundColor;
   return { L: c.lab.l, a: c.lab.a, b: c.lab.b, hex: c.rgb.hexValue };
@@ -200,17 +217,32 @@ function curvesDescriptor(p) {
   return { _obj: "curves", presetKind: { _enum: "presetKindType", _value: "presetKindCustom" }, adjustment };
 }
 
+// 可选颜色（相对）：colors = {reds|yellows|greens|cyans|blues|magentas|whites|neutrals|blacks: {c, m, y, k}}（−100…100 %）
+const SELECTIVE_COLORS = ["reds", "yellows", "greens", "cyans", "blues", "magentas", "whites", "neutrals", "blacks"];
+function selectiveColorDescriptor(p) {
+  const pct = (v) => ({ _unit: "percentUnit", _value: Math.max(-100, Math.min(100, Math.round(v || 0))) });
+  const colorCorrection = Object.entries(p.colors || {})
+    .filter(([name]) => SELECTIVE_COLORS.includes(name))
+    .map(([name, v]) => ({
+      _obj: "colorCorrection", colors: { _enum: "colors", _value: name },
+      cyan: pct(v.c), magenta: pct(v.m), yellowColor: pct(v.y), black: pct(v.k),
+    }));
+  return { _obj: "selectiveColor", method: { _enum: "correctionMethod", _value: p.method === "absolute" ? "absolute" : "relative" }, colorCorrection };
+}
+
 const DESCRIPTORS = {
   hueSaturation: hueSatDescriptor,
   colorBalance: colorBalanceDescriptor,
   vibrance: vibranceDescriptor,
   curves: curvesDescriptor,
+  selectiveColor: selectiveColorDescriptor,
 };
 const DEFAULT_TYPES = {
   hueSaturation: { _obj: "hueSaturation", presetKind: { _enum: "presetKindType", _value: "presetKindDefault" }, colorize: false },
   colorBalance: { _obj: "colorBalance", shadowLevels: [0, 0, 0], midtoneLevels: [0, 0, 0], highlightLevels: [0, 0, 0], preserveLuminosity: true },
   vibrance: { _obj: "vibrance" },
   curves: { _obj: "curves", presetKind: { _enum: "presetKindType", _value: "presetKindDefault" } },
+  selectiveColor: { _obj: "selectiveColor", method: { _enum: "correctionMethod", _value: "relative" } },
 };
 
 // 在当前选中图层上方新建一个调整图层，返回其 layer id。必须在 executeAsModal 里调用。
@@ -443,7 +475,7 @@ async function selectLayer(id) {
 
 module.exports = {
   selectLayer, selectTopLayer, withoutSelection, findLayer, findDocument, isCancel, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
-  constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, foregroundLab,
+  constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, readColorSamplers, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
-  _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor },
+  _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor, selectiveColorDescriptor },
 };

@@ -220,6 +220,23 @@ function dirtySky(w, h) {
   // 5j. 直接选参考图文件：不是图片时给出中文原因
   await assert.rejects(bridge.uploadReferenceFile("参考.jpg", new Uint8Array([1, 2, 3])), (e) => e.status === 400 && /图片/.test(e.message));
 
+  // 5k. 可选颜色描述符；颜色取样器多点对比（真实服务）
+  const sc = ps._descriptors.selectiveColorDescriptor({ method: "relative", colors: { reds: { c: 5, m: -3, y: -12, k: 0 }, bogus: { c: 1 } } });
+  assert.strictEqual(sc._obj, "selectiveColor");
+  assert.strictEqual(sc.method._value, "relative");
+  assert.strictEqual(sc.colorCorrection.length, 1);
+  assert.strictEqual(sc.colorCorrection[0].colors._value, "reds");
+  assert.strictEqual(sc.colorCorrection[0].yellowColor._value, -12);
+  doc.colorSamplers = [{ color: { lab: { l: 71, a: 13.8, b: 19.6 } }, position: { x: 10, y: 10 } },
+    { color: { lab: { l: 67, a: 10.9, b: 24.9 } }, position: { x: 50, y: 80 } }];
+  const pts = ps.readColorSamplers();
+  assert.strictEqual(pts.length, 2);
+  const mpres = await bridge.multipoint(pts.map((p) => ({ name: p.name, lab: p.lab })));
+  assert.strictEqual(mpres.rows[0].judge, "基准");
+  assert.ok(/偏黄/.test(mpres.rows[1].direction) && mpres.rows[1].words);
+  doc.colorSamplers = [];
+  assert.throws(() => ps.readColorSamplers(), /颜色取样器/);
+
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
   fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };

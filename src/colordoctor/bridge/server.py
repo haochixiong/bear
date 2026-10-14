@@ -18,6 +18,7 @@
   GET  /calibration/chart  色卡像素（RGB）；GET /calibration/plan 要测的 (通道, 滑块, 数值) 列表
   POST /calibration/sample?slider=base | ?channel=&slider=&value=  上传色卡像素（未调整 / 调整后）
   POST /calibration/fit  拟合并保存换算表
+  POST /multipoint  {"points": [{"name", "lab"}]}  多点取色对比（第一个点为基准）
   POST /reference-file（X-File-Name）  参考图文件本身（JPG / PNG / TIFF / WebP / RAW），返回 ref
 """
 
@@ -123,6 +124,30 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
             raise ValueError("找不到参考图，请重新选择参考图")
         return analysis.compare_reference(prep.filled_for_statistics(), ref, ctx)
     raise ValueError(f"未知模式：{mode}")
+
+
+MAX_POINTS = 50
+
+
+def multipoint_request(req: dict) -> dict:
+    """多点对比（PS 颜色取样器）：{"points": [{"name": .., "lab": [L, a, b]}, ...]}，第一个点是基准。"""
+    from colordoctor.core.multipoint import compare_points
+
+    pts = req.get("points")
+    if not isinstance(pts, list) or not 2 <= len(pts) <= MAX_POINTS:
+        raise ValueError(f"需要 2–{MAX_POINTS} 个点")
+    labs, names = [], []
+    for i, p in enumerate(pts):
+        try:
+            lab = [float(v) for v in p["lab"]][:3]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"第 {i + 1} 个点的 Lab 无效") from e
+        if len(lab) != 3 or not all(np.isfinite(lab)):
+            raise ValueError(f"第 {i + 1} 个点的 Lab 无效")
+        labs.append(lab)
+        names.append(str(p.get("name") or f"点 {i + 1}")[:40])
+    res = compare_points(labs, names)
+    return {"summary": res.summary, "legend": res.legend, "rows": [dataclasses.asdict(r) for r in res.rows]}
 
 
 REF_SIDE = 2048  # 参考图按与插件读像素相同的长边缩小后保存（只用来统计颜色）
@@ -447,6 +472,8 @@ class Handler(BaseHTTPRequestHandler):
                     samples.append((q["channel"], q["slider"], int(q["value"]), img))
                 count = len(self.calibration.get("samples", []))
             return self._send(200, {"ok": True, "count": count})
+        if url.path == "/multipoint":
+            return self._send(200, multipoint_request(self._json()))
         if url.path == "/calibration/fit":
             from colordoctor.core import acr_calibration as cal
 

@@ -145,8 +145,10 @@ function renderControls() {
     syncPart();
   } else if (MODE_OF[state.sub] === "patch") {
     c.innerHTML = `<div class="row"><button id="fg">读取前景色（先用吸管取色）</button></div>
-      <div class="muted">或用选框 / 套索框出一块区域，再点上面的「读取选区颜色」（相当于大取样）。</div>`;
+      <div class="row"><button id="samplers">多点对比（读取颜色取样器）</button></div>
+      <div class="muted">或用选框 / 套索框出一块区域，再点上面的「读取选区颜色」（相当于大取样）。多点对比：先用「颜色取样器工具」在画面上点几个位置（例如额头、两颊、下巴），第一个点是基准。</div>`;
     $("fg").addEventListener("click", readForeground);
+    $("samplers").addEventListener("click", readSamplers);
   } else if (state.sub === "reference") {
     c.innerHTML = `<div class="row"><label>参考图</label><select id="refDoc"></select></div>
       <div class="row"><button id="refFile">选择文件…</button></div>
@@ -304,13 +306,50 @@ async function readForeground() {
   }
 }
 
+// PS 颜色取样器的多点对比：差别用文字说（几乎看不出 … 差别很大），不只给 ΔE 数字
+async function readSamplers() {
+  if (state.busy) return;
+  const sub = state.sub;
+  let pts;
+  try { pts = ps.readColorSamplers(); } catch (err) { statusError(err); return; }
+  setBusy(true, `正在对比 ${pts.length} 个取样点…`);
+  try {
+    const res = await bridge.multipoint(pts.map((p) => ({ name: p.name, lab: p.lab })));
+    state.bySub[sub] = { result: { mode: "multipoint", sub, multipoint: res }, analyzed: null, made: new Set() };
+    setBusy(false);
+    if (state.sub === sub) renderResult();
+    $("status").className = "status ok";
+    $("status").textContent = res.summary;
+  } catch (err) {
+    setBusy(false);
+    statusError(err);
+  }
+}
+
+const JUDGE_CLASS = { 基准: "", 一致: "ok", 略有差别: "warn", 不均: "bad" };
+
+function renderMultipoint(r) {
+  const m = r.multipoint;
+  const rows = m.rows.map((x) => {
+    const bar = x.de == null ? "—" : `${"▮".repeat(x.level + 1)}${"▯".repeat(5 - x.level)} ${esc(x.words)} <span class="muted">(${x.de.toFixed(1)})</span>`;
+    return `<tr><td>${esc(x.name)}</td><td><span class="dot" style="background:rgb(${x.rgb.join(",")})"></span></td>
+      <td>${bar}</td><td>${esc(x.direction)}</td><td class="${JUDGE_CLASS[x.judge] || ""}">${esc(x.judge)}</td></tr>`;
+  }).join("");
+  $("results").innerHTML = `
+    <div class="card"><div class="title"><span>多点对比</span></div><div class="line">${esc(m.summary)}</div></div>
+    <table class="mp"><tr><th>点</th><th>颜色</th><th>和基准的差别</th><th>偏向</th><th>判断</th></tr>${rows}</table>
+    <div class="muted">第一个点是基准。${esc(m.legend)}</div>`;
+  renderAcr({}, false);
+  updateButtons();
+}
+
 function hasLayers(e) {
   return !!(e && e.analyzed && e.result && e.result.plan && e.result.plan.layers.length);
 }
 
 function hasAcrSource() {
   const e = cur();
-  const fromResult = e && e.result && e.result.mode !== "patch";
+  const fromResult = e && e.result && e.result.mode !== "patch" && e.result.mode !== "multipoint";
   const edited = [...document.querySelectorAll("[data-acr]")].some((i) => i.dataset.set === "1" && Number(i.value));
   return !!(fromResult || edited);
 }
@@ -327,7 +366,7 @@ function updateButtons() {
   } else {
     $("generateAll").textContent = "一键生成全部（带蒙版）";
   }
-  document.querySelectorAll("[data-make],[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc; });
+  document.querySelectorAll("[data-make],[data-make-all],[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc; });
   const acrOk = !busy && hasAcrSource();
   $("acrExport").disabled = !acrOk;
   $("acrLayer").disabled = !acrOk;
@@ -369,37 +408,50 @@ function renderResult() {
   }
   const r = e.result;
   if (r.mode === "patch") return renderPatch(e);
+  if (r.mode === "multipoint") return renderMultipoint(r);
   const cards = [resultHeader(e)];
   (r.notes || []).forEach((n) => cards.push(`<div class="muted">${esc(n)}</div>`));
   const layers = (r.plan && r.plan.layers) || [];
-  if (layers.length) cards.push('<div class="strong">可生成的调整图层</div>');
-  layers.forEach((ly, i) => {
+  const findings = r.findings || [];
+  // 每张问题卡片里放修它的调整图层（layer.finding = 问题的序号）；没挂到问题上的放在最后“其他调整”
+  const owner = (ly) => (Number.isInteger(ly.finding) && ly.finding >= 0 && ly.finding < findings.length ? ly.finding : null);
+  const layerHtml = (ly) => {
     const done = e.made.has(ly.id);
+    return `
+      <div class="fix">
+        <div class="title"><span>${esc(ly.name)}</span><span class="muted">${done ? "已生成 ✓" : (ly.estimated ? "估计值" : "")}</span></div>
+        <div class="line">${esc(ly.reason)}</div>
+        <div class="row">
+          <button class="small make" data-make="${esc(ly.id)}">${done ? "再生成一次" : `生成此层${ly.has_mask ? "（带蒙版）" : ""}`}</button>
+          ${ly.has_mask ? `<button class="small" data-sel="${esc(ly.id)}" title="只在当前文档里建立这个问题区域的选区，不新建图层">只建选区</button>` : ""}
+        </div>
+      </div>`;
+  };
+  findings.forEach((f, i) => {
+    const own = layers.filter((ly) => owner(ly) === i);
+    const tips = (f.adjustments || []).filter((x) => !x.layer);
     cards.push(`
-    <div class="card">
-      <div class="title"><span>${i + 1}. ${esc(ly.name)}</span><span class="muted">${done ? "已生成 ✓" : (ly.estimated ? "估计值" : "")}</span></div>
-      <div class="line">${esc(ly.reason)}</div>
-      <div class="row">
-        <button class="small make" data-make="${esc(ly.id)}">${done ? "再生成一次" : `生成此层${ly.has_mask ? "（带蒙版）" : ""}`}</button>
-        ${ly.has_mask ? `<button class="small" data-sel="${esc(ly.id)}" title="只在当前文档里建立这个问题区域的选区，不新建图层">只建选区</button>` : ""}
-      </div>
-    </div>`);
-  });
-  if ((r.findings || []).length) cards.push('<div class="strong">诊断</div>');
-  (r.findings || []).forEach((f) => cards.push(`
-    <div class="card">
+    <div class="card problem">
       <div class="title"><span>${esc(f.problem)}</span><span class="sev-${esc(f.severity)}">${esc(f.severity)}</span></div>
       ${(f.evidence || []).slice(0, 3).map((x) => `<div class="line">证据：${esc(x)}</div>`).join("")}
       ${(f.causes || []).slice(0, 2).map((x) => `<div class="line">可能原因：${esc(x)}</div>`).join("")}
-      ${(f.adjustments || []).slice(0, 3).map((x) => `<div class="line">调整：${esc(x.tool)} · ${esc(x.instruction)}</div>`).join("")}
+      ${own.length ? `<div class="strong">修正${own.length > 1 ? `（${own.length} 层）` : ""}</div>${own.map(layerHtml).join("")}
+        ${own.length > 1 ? `<div class="row"><button class="small make" data-make-all="${own.map((ly) => esc(ly.id)).join(",")}">生成这 ${own.length} 层</button></div>` : ""}` : ""}
+      ${(own.length ? tips : (f.adjustments || [])).slice(0, 3).map((x) => `<div class="line">${own.length ? "另外：" : "调整："}${esc(x.tool)} · ${esc(x.instruction)}</div>`).join("")}
       <div class="muted">置信度 ${Math.round((f.confidence || 0) * 100)}%${(f.notes || []).length ? " · 注意：" + esc(f.notes[0]) : ""}</div>
-    </div>`));
-  if (!layers.length && !(r.findings || []).length) cards.push('<p class="hint">没有发现需要处理的问题。</p>');
+    </div>`);
+  });
+  const orphans = layers.filter((ly) => owner(ly) === null);
+  if (orphans.length) {
+    cards.push(`<div class="card"><div class="title"><span>${findings.length ? "其他调整" : "可生成的调整图层"}</span></div>${orphans.map(layerHtml).join("")}</div>`);
+  }
+  if (!layers.length && !findings.length) cards.push('<p class="hint">没有发现需要处理的问题。</p>');
   else if (!layers.length) {
     cards.push('<p class="hint">这些建议没有对应的调整图层：可以按文字手动调整，或打开下方「ACR 参数」导出预设 / 生成 Camera Raw 图层。</p>');
   }
   $("results").innerHTML = cards.join("");
   $("results").querySelectorAll("[data-make]").forEach((b) => b.addEventListener("click", () => generate([b.dataset.make], true)));
+  $("results").querySelectorAll("[data-make-all]").forEach((b) => b.addEventListener("click", () => generate(b.dataset.makeAll.split(","), true)));
   $("results").querySelectorAll("[data-sel]").forEach((b) => b.addEventListener("click", () => makeSelection(b.dataset.sel)));
   renderAcr(r.acr_params || {}, r.acr_calibrated);
   updateButtons();

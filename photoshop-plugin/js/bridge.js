@@ -64,6 +64,14 @@ async function uploadReference(px) {
   return (await res.json()).ref;
 }
 
+// 多点对比：points = [{name, lab: [L, a, b]}]，第一个是基准
+async function multipoint(points) {
+  const res = await call("/multipoint", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points }),
+  });
+  return res.json();
+}
+
 // 参考图文件本身（不用在 PS 里打开）：服务端解码 JPG / PNG / TIFF / WebP / 相机 RAW
 async function uploadReferenceFile(name, data) {
   const res = await call("/reference-file", {
@@ -129,6 +137,6 @@ async function calibrationFit(acrVersion) {
 }
 
 module.exports = {
-  BridgeError, health, options, analyze, uploadReference, uploadReferenceFile, fetchMask, acrPreset,
+  BridgeError, health, options, analyze, uploadReference, uploadReferenceFile, multipoint, fetchMask, acrPreset,
   calibrationChart, calibrationPlan, calibrationSample, calibrationFit,
 };

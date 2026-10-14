@@ -454,3 +454,16 @@ def test_reference_file_route(bridge):
     assert j["ref"] and j["name"] == "参考.png" and j["width"] == img.shape[1]
     code, _h, body = _req(bridge + "/reference-file", data=b"garbage", headers={"X-File-Name": "a.jpg"}, method="POST")
     assert code == 400 and "图片" in json.loads(body)["error"]
+
+
+def test_multipoint_route(bridge):
+    pts = {"points": [{"name": "额头", "lab": [71, 13.8, 19.6]}, {"name": "脖子", "lab": [67, 10.9, 24.9]}]}
+    code, _h, body = _req(bridge + "/multipoint", data=json.dumps(pts).encode(), headers={"Content-Type": "application/json"},
+                          method="POST")
+    assert code == 200
+    j = json.loads(body)
+    assert j["rows"][0]["judge"] == "基准" and j["rows"][1]["judge"] == "不均" and "额头" in j["summary"]
+    code, _h, body = _req(bridge + "/multipoint", data=b'{"points": [{"lab": [1, 2, 3]}]}', method="POST")
+    assert code == 400
+    code, _h, body = _req(bridge + "/multipoint", data=b'{"points": [{"lab": [1, 2]}, {"lab": "x"}]}', method="POST")
+    assert code == 400
