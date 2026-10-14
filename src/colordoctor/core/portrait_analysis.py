@@ -25,6 +25,9 @@ GREEN_A = 2.0
 SKIN_HUE_RANGE = (0.0, 110.0)
 MIXED_SHARE = 0.75
 NATURAL_SATURATION = (18.0 / 74.0, 30.0 / 62.0)
+SPECULAR_DL = 15.0  # 镜面反光：比皮肤中位明度亮这么多……
+SPECULAR_SAT = 0.5  # ……且饱和度 C*/L* 不到皮肤中位的一半
+BAND_MIN_DL = 4.0  # 高光 / 阴影段的平均明度与中间调至少差这么多才分段比较（皮肤明暗很平时没有“高光 / 阴影”可言）
 
 
 def ita_angle(L: float, b: float) -> float:
@@ -105,6 +108,7 @@ def analyze_skin(
     sub, step = grid_downsample(region, max_samples)
     vsub = ct.downsample_mask(valid, step, sub.shape[:2]).reshape(-1)
     lab = cs.srgb8_to_lab(sub).reshape(-1, 3)[vsub]
+    clip = cs.clipped(sub.reshape(-1, 3))[vsub]
     if lab.shape[0] == 0:
         raise SampleError("蒙版内没有皮肤像素")
     lch = cs.lab_to_lch(lab)
@@ -124,13 +128,25 @@ def analyze_skin(
     hue_range = tuple(preset.hue) if custom else NATURAL_HUE
     tendency, amount = tendency_of(float(mean[1]), float(mean[2]), hue_range)
 
-    Ls = sl[:, 0]
+    # 高光 / 阴影段的偏色：去掉被裁切的像素和镜面反光（比皮肤亮很多、颜色又淡很多的点，是光源的颜色不是皮肤的），
+    # 并且这一段要和中间调真的有明暗差，否则不算“高光 / 阴影”
+    sl_b = sl[~clip[skin]]
+    if sl_b.shape[0] >= 20:
+        s_b = np.hypot(sl_b[:, 1], sl_b[:, 2]) / np.maximum(sl_b[:, 0], 1.0)
+        spec = (sl_b[:, 0] >= np.median(sl_b[:, 0]) + SPECULAR_DL) & (s_b < SPECULAR_SAT * np.median(s_b))
+        if (~spec).sum() >= 20:
+            sl_b = sl_b[~spec]
+    else:
+        sl_b = sl
+    Ls = sl_b[:, 0]
     p15, p40, p60, p85 = np.percentile(Ls, [15, 40, 60, 85])
-    hi = _band_mean(sl, Ls >= p85)
-    lo = _band_mean(sl, Ls <= p15)
-    mid = _band_mean(sl, (Ls >= p40) & (Ls <= p60))
+    hi = _band_mean(sl_b, Ls >= p85)
+    lo = _band_mean(sl_b, Ls <= p15)
+    mid = _band_mean(sl_b, (Ls >= p40) & (Ls <= p60))
     if mid is None:
         mid = mean
+    hi = hi if hi is not None and hi[0] - mid[0] >= BAND_MIN_DL else None
+    lo = lo if lo is not None and mid[0] - lo[0] >= BAND_MIN_DL else None
 
     def shift(band):
         if band is None:

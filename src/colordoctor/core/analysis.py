@@ -69,11 +69,16 @@ def _blob_text(blobs, limit=3) -> list[str]:
     return out
 
 
+BAND_MIN_DL = 6.0  # 阴影 / 高光段的平均明度与中间调至少差这么多，才算“另一段”（明暗起伏很小的区域不分段比较）
+
+
 def _bands(region: np.ndarray, mask: np.ndarray | None) -> dict:
     sub, _ = grid_downsample(region, MAX_SAMPLES)
     lab = cs.srgb8_to_lab(sub).reshape(-1, 3)
+    keep = ~cs.clipped(sub.reshape(-1, 3))  # 被裁切的纯白 / 死黑没有颜色信息
     if mask is not None and mask.size == lab.shape[0]:
-        lab = lab[mask.reshape(-1) == ct_mod.MASK_NORMAL]
+        keep &= mask.reshape(-1) == ct_mod.MASK_NORMAL
+    lab = lab[keep]
     if lab.shape[0] < 20:
         return {}
     L = lab[:, 0]
@@ -82,6 +87,10 @@ def _bands(region: np.ndarray, mask: np.ndarray | None) -> dict:
     for key, sel in (("shadow", L <= p15), ("mid", (L >= p40) & (L <= p60)), ("highlight", L >= p85)):
         if sel.sum() >= 5:
             out[key] = lab[sel].mean(axis=0)
+    mid = out.get("mid")
+    for key in ("shadow", "highlight"):
+        if mid is not None and key in out and abs(out[key][0] - mid[0]) < BAND_MIN_DL:
+            del out[key]
     return out
 
 
@@ -687,6 +696,8 @@ def analyze_palette_report(
     style = pr.style
     lo, hi = style.colorfulness_range if style else (15.0, 200.0)
     mono = pl.is_monochrome(cf)
+    # 暗调 / 高调画面颜色少是常见的风格特点：没选风格、或选的不是鲜艳风格时不按“缺色”加饱和、加对比
+    keyed_soft = bool(pr.tone_key) and not mono and cf.value < lo and lo < COLOURFUL_STYLE_MIN
     if mono:  # 黑白作品：没有颜色可缺，不按“缺色/发灰”评估
         findings.append(Finding(
             problem="黑白作品，不评估缺色",
@@ -696,6 +707,18 @@ def analyze_palette_report(
             adjustments=(),
             confidence=conf,
             notes=("如果这是想要彩色的照片，检查是否误开了黑白/去色",),
+        ))
+        lo = min(lo, cf.value)
+    elif keyed_soft:
+        findings.append(Finding(
+            problem=f"{pl.KEY_NAME[pr.tone_key]}画面，颜色少不按缺色处理",
+            severity=Severity.NORMAL,
+            evidence=(f"色彩丰富度 {cf.value:.0f}（{cf.label}），中位明度 {pr.tone[2]:.0f}",
+                      f"有彩像素平均色度 C* {cf.mean_chroma:.1f}，P90 色度 {cf.p90_chroma:.1f}"),
+            causes=(),
+            adjustments=(),
+            confidence=conf,
+            notes=(f"{'暗' if pr.tone_key == 'low' else '亮'}调画面的颜色天然更少；想要更鲜艳时请选择对应的鲜艳风格再判断",),
         ))
         lo = min(lo, cf.value)
     elif cf.value < lo:
@@ -777,6 +800,7 @@ def analyze_palette_report(
 
 
 LOW_CONTRAST = 50.0  # 整图亮暗差（P95 − P5 明度）低于此值才算“对比偏低”
+COLOURFUL_STYLE_MIN = 28.0  # 风格的色彩丰富度下限不低于此值才算“鲜艳风格”（暗调 / 高调画面只有选了这种风格才按缺色处理）
 
 _NO_DESAT = ("橙", "黑/深灰", "白/浅灰", "灰")  # 不自动降饱和：肤色所在的橙、无彩色
 

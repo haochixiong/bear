@@ -1,5 +1,5 @@
 {
- "_comment": "整图风格模板。sectors 的 hue 是 CIE Lab(D50) 色相角（度），可跨 0°（如 [345, 30]）。channel_targets 说明每个 Camera Raw 混色器通道应该怎么处理：toward:<区段名> 往该区段移动色相，desat 降饱和，darken 压暗，keep 保持。colorfulness 为 Hasler-Süsstrunk 色彩丰富度目标范围。shadow_tint / highlight_tint 为阴影/高光的目标色调（Lab 色相角范围与色度范围）。recipe 是常见做法，数值仅为起点。 category 为分组（色彩风格 / 富士胶片 / 柯达胶片）。black_point_min：黑场抬起的下限（P5 明度 ≥）；contrast：亮暗差 P95−P5 明度的目标范围。胶片类模板是根据公开评测与厂商描述整理的“观感近似”，不是厂商算法；basis 记录依据，数值是起点，需要按自己的图校准。",
+ "_comment": "整图风格模板。sectors 的 hue 是 CIE Lab(D50) 色相角（度），可跨 0°（如 [345, 30]）。channel_targets 说明每个 Camera Raw 混色器通道应该怎么处理：toward:<区段名> 往该区段移动色相，desat 降饱和，darken 压暗，keep 保持。colorfulness 为 Hasler-Süsstrunk 色彩丰富度目标范围。shadow_tint / highlight_tint 为阴影/高光的目标色调（Lab 色相角范围与色度范围）。recipe 是常见做法，数值仅为起点。 category 为分组（色彩风格 / 富士胶片 / 柯达胶片）。black_point_min：黑场抬起的下限（P5 明度 ≥）；contrast：亮暗差 P95−P5 明度的目标范围。胶片类模板是根据公开评测与厂商描述整理的“观感近似”，不是厂商算法；basis 记录依据，数值是起点，需要按自己的图校准。 mood 为 \"dark\" 的是暗调/情绪类风格：暗调画面分析时提示保持暗部、不要提亮。",
  "styles": [
   {
    "key": "teal_orange",
@@ -85,6 +85,7 @@
    "key": "black_gold",
    "name": "黑金",
    "description": "暖色全部统一成金色，其余颜色降到接近黑灰；暗部压暗，金色提亮。",
+   "mood": "dark",
    "sectors": [
     {
      "name": "金",
@@ -667,6 +668,7 @@
    "name": "富士 · Classic Chrome",
    "category": "富士胶片",
    "description": "低饱和、偏冷的纪实感，暗部过渡偏硬，红色偏深、绿色和黄色收敛。",
+   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     14,
@@ -833,6 +835,7 @@
    "name": "富士 · Eterna 电影",
    "category": "富士胶片",
    "description": "电影负片感：低对比、低饱和，暗部和高光都留有层次，适合人物与叙事画面。",
+   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     10,
@@ -886,6 +889,7 @@
    "name": "富士 · Eterna 漂白",
    "category": "富士胶片",
    "description": "漂白效果：大幅去饱和，对比很硬，有金属感。",
+   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     4,
@@ -926,6 +930,7 @@
    "name": "富士 · Nostalgic Neg",
    "category": "富士胶片",
    "description": "1970 年代美国新彩色摄影的印象：高光琥珀色，暗部浓重，绿色偏暖（往黄）。",
+   "mood": "dark",
    "sectors": [
     {
      "name": "琥珀",
@@ -1458,6 +1463,7 @@
    "name": "柯达 · Kodachrome 64",
    "category": "柯达胶片",
    "description": "经典反转片印象：浓郁的红与黄，对比丰富，暗部厚重。",
+   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     40,

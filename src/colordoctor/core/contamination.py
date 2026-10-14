@@ -259,6 +259,7 @@ def analyze(
     chrom_frac = float(chromatic.sum() / n_total)
     gy, gx = np.gradient(L)
     edge = np.hypot(gx, gy) > EDGE_GRAD
+    edge |= cs.clipped(sub)  # 被裁切的亮部 / 死黑颜色被压淡，不是“发灰”：和边缘一样不参与发灰判断
 
     mask = np.where(chromatic, MASK_NORMAL, MASK_IGNORED).astype(np.uint8)
     mask[~vsub] = MASK_OUTSIDE

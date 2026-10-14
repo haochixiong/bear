@@ -118,6 +118,23 @@ def lab_to_srgb8(lab, white: str = "D50") -> np.ndarray:
     return float_to_srgb8(lab_to_srgb_float(lab, white))
 
 
+CLIP_WHITE = 254  # 任一通道 ≥ 这个值：亮部被裁切（那个通道的信息丢了，颜色被压向中性/变淡）
+CLIP_BLACK = 1  # 三个通道都 ≤ 这个值：死黑
+
+
+def clipped(rgb8) -> np.ndarray:
+    """亮部被裁切（任一通道到顶）或死黑的像素（布尔，形状去掉最后一维）。
+    估计偏色、阴影/高光色调、局部发灰时不能算进去：它们“中性”或“灰”只是因为被裁切。"""
+    mx = np.asarray(rgb8).max(axis=-1)
+    return (mx >= CLIP_WHITE) | (mx <= CLIP_BLACK)
+
+
+def neutral_chroma_limit(L, limit: float) -> np.ndarray:
+    """“接近中性”的色度上限在很暗的地方收紧：L* 5 附近 C* 8 已经是明显的颜色（深蓝、深绿的物体），
+    不能当成中性的黑；L* ≥ 约 10–18 起就是 limit 本身（阴影里调色加的色调一般 C* 3–12，仍然算）。"""
+    return np.minimum(float(limit), 4.0 + 0.6 * np.asarray(L, dtype=float))
+
+
 def lab_in_srgb_gamut(lab, white: str = "D50", tol: float = 0.5 / 255) -> np.ndarray:
     c = lab_to_srgb_float(lab, white)
     return np.all((c >= -tol) & (c <= 1 + tol), axis=-1)

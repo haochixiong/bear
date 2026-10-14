@@ -99,3 +99,21 @@ def lowkey_face_scene(h=220, w=200, skin_lab=(45.0, 12.0, 16.0), bg_lab=(14.0, 1
     lab[..., 1:] += rng.normal(0, 0.6, (h, w, 2))
     img[~face] = cs.lab_to_srgb8(lab)[~face]
     return img, truth
+
+
+def highkey_face_scene(h=220, w=200, skin_lab=(78.0, 9.0, 13.0), bg_lab=(92.0, -2.0, -4.0), clip=True,
+                       seed=0) -> tuple[np.ndarray, np.ndarray]:
+    """高调（日系）人像：很亮、略冷的背景（右上角一块被裁切成纯白），浅色皮肤，浅棕色头发。"""
+    img, truth = face_scene(h=h, w=w, skin_lab=skin_lab, seed=seed)
+    yy, xx = np.mgrid[0:h, 0:w]
+    face = ((xx - w / 2) / (w * 0.32)) ** 2 + ((yy - h * 0.55) / (h * 0.40)) ** 2 <= 1
+    rng = np.random.default_rng(seed)
+    lab = np.empty((h, w, 3))
+    lab[:] = bg_lab
+    lab[..., 0] += np.linspace(-8, 6, w)[None, :]
+    lab[..., 1:] += rng.normal(0, 0.6, (h, w, 2))
+    img[~face] = cs.lab_to_srgb8(lab)[~face]
+    img[(yy < h * 0.25) & face] = lch_color(40, 8, 60)
+    if clip:
+        img[: h // 6, w // 2:] = 255
+    return img, truth

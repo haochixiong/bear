@@ -285,15 +285,16 @@ def _band_tint_change(img, style_key):
     sub, _, lab, lch = pl._prep(img, pl.MAX_SAMPLES)
     L, C = lch[..., 0].ravel(), lch[..., 1].ravel()
     lab2 = lab.reshape(-1, 3)
-    p15, p85 = np.percentile(L, [15, 85])
+    bands = pl.tone_bands(L, sub)
     style = pl.get_style(style_key)
     out = []
-    for tone, band, key in (("shadows", L <= p15, "shadow_tint"), ("highlights", L >= p85, "highlight_tint")):
-        t = pl._band_tint(lab2, C, band)
+    for tone, band, key in (("shadows", bands["shadow"], "shadow_tint"), ("highlights", bands["highlight"], "highlight_tint")):
+        t = None if band is None else pl._band_tint(lab2, C, band, L)
         if t is None or not cb or not any(cb[0].params[tone]):
             out.append((tone, None, None))
             continue
-        neutral = pl.TINT_NEUTRAL_C if pl._tint(lab2, band & (C < pl.TINT_NEUTRAL_C), 0.05, band) else pl.TINT_MAX_C
+        lim8 = cs.neutral_chroma_limit(L, pl.TINT_NEUTRAL_C)
+        neutral = lim8 if pl._tint(lab2, band & (C < lim8), 0.05, band) else cs.neutral_chroma_limit(L, pl.TINT_MAX_C)
         sel = band & (C < neutral)
         lo, hi = style[key]["hue"]
         gh, gc = pl._center(lo, hi), float(np.mean(style[key]["chroma"]))
@@ -313,13 +314,14 @@ def test_style_color_balance_reaches_the_target_without_overshoot(img, style):
             assert 0.75 <= ratio <= 1.25, (tone, ratio, L)  # 以前 1.3–2.1 倍
 
 
-def test_style_color_balance_skips_a_band_it_cannot_reach():
-    img = morandi()  # 最暗 15% 的明度约 L* 55：色彩平衡的“阴影”管不到
+def test_style_shadow_tint_not_judged_without_real_shadows():
+    img = morandi()  # 最暗 15% 的明度约 L* 55：这是浅灰，不是阴影（以前按“阴影色调”给了一条曲线去染它）
     rep = an.analyze_palette_report(img, CTX, style_key="pink_blue")
     style = next(f for f in rep.findings if f.problem.startswith("与「"))
     cb = [a for a in style.adjustments if a.layer and a.layer["kind"] == "colorBalance"]
     assert not cb or not any(cb[0].layer["params"]["shadows"])
-    assert any("阴影（平均色）" in a.instruction and "色彩平衡的“阴影”范围之外" in a.instruction for a in style.adjustments)
+    assert not any(a.instruction.startswith("阴影") for a in style.adjustments if not a.tool.startswith("常用做法"))
+    assert any("几乎没有真正的阴影" in g for g in style.evidence)
 
 
 def _skin_band(base, where, da, db):
