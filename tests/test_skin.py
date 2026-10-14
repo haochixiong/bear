@@ -149,7 +149,7 @@ def test_compare_to_preset():
     p = sp.get_preset("japanese")
     r = pa.analyze_skin(skin_region(68, 14, 19))
     d = pa.compare_to_preset(r, p)
-    assert d.dL > 5  # 需要提亮
+    assert d.dL == pytest.approx(p.L[0] - r.mean_lab[0], abs=0.01) and d.dL > 3  # 需要提亮：只拉到「日系」明度区间的下沿
     assert d.db < -3  # 需要减黄
     assert d.delta_e00 > 5
 

@@ -1100,8 +1100,10 @@ class MainWindow(QMainWindow):
             delta = adjs = None
             # 只在肤色 / 单点模式下和目标肤色比较；颜色明显不是肤色时不给“调成肤色”的建议
             if preset is not None and item.mode in ("skin", "point") and _looks_like_skin(res.values.lab):
-                delta = pa.compare_lab(res.values.lab, preset.target_lab)
-                adjs = rec.skin_adjustments(item.region.reshape(-1, 3), preset.target_lab) if delta.delta_e00 >= 2 else ()
+                target = preset.target_for(res.values.lab)  # 明度：区间内不动，“自然通用”保持当前值
+                delta = pa.compare_lab(res.values.lab, target)
+                adjs = (rec.skin_adjustments(item.region.reshape(-1, 3), target, keep_lightness=preset.keeps_lightness)
+                        if delta.delta_e00 >= 2 else ())
             self.point_view.setHtml(point_html(res, preset if delta is not None else None, delta, adjs or ()))
             self.report_view.setHtml("<p>当前是单点取色，读数见「取色数值」页。</p>")
             self.result_view.clear()

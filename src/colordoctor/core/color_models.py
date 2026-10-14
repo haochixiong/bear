@@ -227,6 +227,20 @@ class SkinPreset:
             (self.b[0] + self.b[1]) / 2,
         )
 
+    @property
+    def keeps_lightness(self) -> bool:
+        """“自然通用”（默认）不按深浅判断肤色：只看色相和浓淡，明度保持当前值。"""
+        return self.key == "natural"
+
+    def target_for(self, lab) -> tuple[float, float, float]:
+        """针对当前肤色 lab 的调整目标：a*、b* 取风格中心；明度在风格区间内时不动，超出时只拉回到区间边缘
+        （例如「暗调」的皮肤已经够暗就保持，不往区间中心提亮）。默认的“自然通用”明度始终保持当前值。"""
+        L = float(lab[0])
+        if not self.keeps_lightness:
+            L = min(max(L, self.L[0]), self.L[1])
+        _, a, b = self.target_lab
+        return (L, a, b)
+
 
 @dataclass(frozen=True)
 class QuickRuleResult:

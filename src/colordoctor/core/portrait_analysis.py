@@ -227,8 +227,8 @@ def compare_lab(from_lab, to_lab, opposite_change: float = 0.0) -> Comparison:
 
 
 def compare_to_preset(report: SkinReport, preset: SkinPreset) -> Comparison:
-    """当前肤色 -> 目标风格中心值。"""
-    return compare_lab(report.mean_lab, preset.target_lab)
+    """当前肤色 -> 目标（风格中心的 a*、b*；明度见 SkinPreset.target_for：区间内不动，“自然通用”不比明度）。"""
+    return compare_lab(report.mean_lab, preset.target_for(report.mean_lab))
 
 
 def preset_fit(report: SkinReport, preset: SkinPreset) -> dict[str, str]:
@@ -253,6 +253,9 @@ def preset_fit(report: SkinReport, preset: SkinPreset) -> dict[str, str]:
                 out[key] = f"在范围内（{shown:.1f}°）"
             else:
                 out[key] = f"{'偏低' if d < 0 else '偏高'}（{shown:.1f}°，目标 {lo:g}–{hi:g}°）"
+            continue
+        if key.startswith("明度") and preset.keeps_lightness:
+            out[key] = f"{val:.1f}（「{preset.name}」不按深浅判断肤色，明度保持当前值）"
             continue
         if val < lo:
             out[key] = f"偏低（{val:.1f}{unit}，目标 {lo:g}–{hi:g}{unit}）"

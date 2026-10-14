@@ -85,3 +85,17 @@ def face_scene(h=200, w=200, skin_lab=(68.0, 14.0, 19.0), seed=0) -> tuple[np.nd
         img[eye] = lch_color(15, 3, 60)
         truth &= ~eye
     return img, truth
+
+
+def lowkey_face_scene(h=220, w=200, skin_lab=(45.0, 12.0, 16.0), bg_lab=(14.0, 1.0, -3.0), seed=0) -> tuple[np.ndarray, np.ndarray]:
+    """暗调（低调）人像：face_scene 的人脸放在很暗、接近中性的背景上（背景带一点左右明暗变化和噪点）。"""
+    img, truth = face_scene(h=h, w=w, skin_lab=skin_lab, seed=seed)
+    yy, xx = np.mgrid[0:h, 0:w]
+    face = ((xx - w / 2) / (w * 0.32)) ** 2 + ((yy - h * 0.55) / (h * 0.40)) ** 2 <= 1
+    rng = np.random.default_rng(seed)
+    lab = np.empty((h, w, 3))
+    lab[:] = bg_lab
+    lab[..., 0] += np.linspace(-6, 6, w)[None, :]
+    lab[..., 1:] += rng.normal(0, 0.6, (h, w, 2))
+    img[~face] = cs.lab_to_srgb8(lab)[~face]
+    return img, truth

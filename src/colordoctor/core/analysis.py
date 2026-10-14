@@ -401,7 +401,10 @@ def analyze_skin_region(
     if preset is not None:
         fit = pa.preset_fit(skin, preset)
         # 卡片说“基本一致”（ΔE00 < 2）时不给调整
-        adjustments = tuple(rec.skin_adjustments(skin_px, preset.target_lab)) if style_card else (rec.near_hint(cmp.delta_e00),)
+        # 目标的明度：风格区间内不动、超出才拉回区间边缘；“自然通用”保持当前明度（不因为画面暗就提亮皮肤）
+        adjustments = (tuple(rec.skin_adjustments(skin_px, preset.target_for(skin.mean_lab), keep_lightness=preset.keeps_lightness))
+                       if style_card
+                       else (rec.near_hint(cmp.delta_e00),))
         if style_card:
             findings.append(
                 Finding(
