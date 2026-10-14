@@ -69,6 +69,9 @@
 | P19 | 颜色取样器 | `ps.js` `readColorSamplers` | 用颜色取样器工具放 2–4 个点后点「多点对比」：`doc.colorSamplers[i].color.lab` 读得到，顺序与放置顺序一致 |
 | P20 | 选参考图文件 | `main.js` `chooseRefFile` | `getFileForOpening` + `file.read({format: binary})` 能读 JPG / PNG / TIFF / RAW；大文件（50 MB RAW）不卡死 |
 | P21 | 记住设置 | `main.js` `prefs` | 关闭再打开面板、重启 PS 后，上次的页面、分析对象、风格等恢复（UXP 的 localStorage） |
+| P22 | 自定义颜色范围 | `native_layers.py` 色相/饱和度 | 一层里有多个范围时，每个范围占一个槽位（如“黄色”槽位但范围对准 22° 或 210°），确认 PS 接受远离默认颜色的 begin/end ramp |
+| P23 | 调整幅度 | `native_layers.py` | 可选颜色约“每 1 Lab 单位 2.5%”（蜡黄肤色 → 红色 洋红 +21%）、颜色分级饱和度 30 ≈ 色彩平衡 18、白平衡 → 色彩平衡中间调，在真实照片上看是否过强 / 过弱 |
+| P24 | 颜色曲线 + 明度曲线 | 肤色对比类建议 | 颜色曲线和明度曲线分成两层叠放，效果是否符合卡片描述 |
 | P17 | 非 RGB 文档 | `main.js` `generate` | CMYK / Lab / 灰度文档里点「生成」给出“请先转换为 RGB”的提示，不建图层；`doc.mode` 的实际取值请打印确认 |
 
 ## 还没做 / 建议下一步（按优先级）
