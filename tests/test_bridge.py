@@ -500,3 +500,11 @@ def test_multipoint_rejects_out_of_range_lab():
     for bad in ([1e300, 0, 0], [50, 1e308, 1e308], "123", [150, 0, 0], [50, 300, 0]):
         with pytest.raises(ValueError):
             bs.multipoint_request({"points": [{"lab": [50, 10, 10]}, {"lab": bad}]})
+
+
+def test_skin_on_transparent_layer_without_skin_is_blocked_with_clear_message():
+    img = noisy(flat(lch_color(50, 50, 300), 150, 150), 4)
+    a = np.full((150, 150, 1), 255, np.uint8)
+    a[:, :40] = 0
+    with pytest.raises(bs.pixel_guard.BlockedError, match="没有在这个图层里找到皮肤"):
+        bs.analyze_request(np.concatenate([img, a], 2), "skin", {"seg": "color"}, bs.Store(), bs.Store(), layer_kind="pixel")

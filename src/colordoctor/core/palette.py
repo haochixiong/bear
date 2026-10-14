@@ -306,6 +306,7 @@ def family_unity(
                     (("色相", hs if abs(hs) >= 5 else 0), ("饱和度", ss if abs(ss) >= 8 else 0)),
                 )
             )
+    toward = False
     if target is not None and de is not None and de >= 3:
         cur = cs.lab_to_lch(mean)
         tl = cs.lab_to_lch(target)
@@ -324,7 +325,9 @@ def family_unity(
                 [(family, c0, float(cs.hue_diff(c0, ac.lab_hue_to_hsb_hue(tl[2]))), 0, ls)]):
             adjs.append(nl.adjustment("hueSaturation", params, f"往目标{family}靠：{words}（PS 做法，与“Camera Raw 混色器”那一条二选一）",
                                       "global", f"{family}往目标靠 · 色相/饱和度"))
-    adjs += _unity_native(family, mean, patches[:8], rows)
+            toward = True
+    # 有“往目标靠”那一层时，各通道收拢的那一层做的是同一件事（都往目标转），不再另给（否则同一批像素转两次）
+    adjs += _unity_native(family, mean, patches[:8], [] if toward else rows)
     if not adjs:
         adjs.append(Adjustment("提示", f"画面中的{family}已经比较统一", None, False))
     adjs.append(Adjustment("提示", "混色器调整会影响整张照片中同一通道的颜色；只想改局部时用蒙版", None, False))
@@ -400,6 +403,7 @@ def _center(lo: float, hi: float) -> float:
 # （任何风格要的色调都不超过 15；淡蓝的天空 C* 约 20，是有颜色的物体，不能当成高光色调）
 TINT_NEUTRAL_C = 8.0
 TINT_MAX_C = 15.0
+TONE_MIN_MOVE = 3  # 风格影调曲线最大移动不到这么多级（0–255）时不给曲线
 TONE_MOVE_CAP = 15.0  # 风格影调曲线一次最多把一个分位移动这么多 L*（更大的差距多半要从曝光/光线入手）
 GRADING_SAT_MAX = 30  # 颜色分级饱和度建议上限（常用做法 10–25）
 DESAT_SAT_FLOOR = 10.0  # 通道平均饱和度（HSB）已低于此值：不再建议降饱和
@@ -575,10 +579,10 @@ def _tone_curve(style, p5, p50, p95, contrast, ct, ct_ok, bp_min, bp_max) -> Adj
         if pts[x] > last:
             curve.append((x, pts[x]))
             last = pts[x]
+    if max((abs(y - x) for x, y in curve), default=0) < TONE_MIN_MOVE:
+        return None  # 差距换成曲线不到 3 级：看不出来，不给曲线
     p = nl.curves({"composite": curve})
     moved = nl.curves_text(p)
-    if not moved:
-        return Adjustment("曲线", "RGB 曲线：" + "；".join(reasons), "小幅", True)
     note = "（差得太多，先调这么多，重新分析后再看）" if capped else ""
     return nl.adjustment("curves", p, "RGB 曲线（风格影调）：" + "；".join(reasons) + f"。{moved}{note}", "global", "风格影调 · 曲线")
 
@@ -658,14 +662,19 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
         # 颜色分级是在现有色调上“加”一个色调：要加的是差值（目标 − 当前），不是目标本身
         gh, gs = ac.tint_to_grading(goal[0], goal[1] - cur[1], goal[2] - cur[2])
         gs = min(gs, GRADING_SAT_MAX)
-        grading["shadows" if label == "阴影" else "highlights"] = nl.grading_to_balance(gh, gs)
+        # PS 色彩平衡：在这一段的实际平均色上求滑块（这一段的明度决定色彩平衡的“阴影/高光”管不管得到）
+        lv = nl.balance_for_shift(goal[1] - cur[1], goal[2] - cur[2], "shadows" if label == "阴影" else "highlights", lab=cur)
+        if any(lv):
+            grading["shadows" if label == "阴影" else "highlights"] = lv
         out.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（目标 Lab 色调 a* {goal[1]:+.1f}、b* {goal[2]:+.1f}，当前 a* {cur[1]:+.1f}、b* {cur[2]:+.1f}）", "小幅", True,
                               (("色相", gh), ("饱和度", gs))))
         rgb_cur = cs.lab_to_srgb8(cur).astype(int)
         rgb_goal = cs.lab_to_srgb8(goal).astype(int)
         pts = "；".join(f"{n}通道 输入 {a} → 输出 {b}" for n, a, b in zip(("红", "绿", "蓝"), rgb_cur, rgb_goal) if a != b)
         if pts:
-            out.append(Adjustment("曲线", f"{label}（平均色）：{pts}（可代替色彩平衡，二选一）", "小幅", False))
+            alt = ("（可代替色彩平衡，二选一）" if any(lv) else
+                   f"（这一段的明度 L* {cur[0]:.0f} 在色彩平衡的“{label}”范围之外，PS 里用这条曲线，配合明亮度蒙版只作用于{label}）")
+            out.append(Adjustment("曲线", f"{label}（平均色）：{pts}{alt}", "小幅", False))
     for params, words in nl.mixer_rows_to_huesat(rows):
         out.append(nl.adjustment("hueSaturation", params, f"PS 做法（代替上面的 Camera Raw 混色器）：{words}",
                                  "global", f"「{style['name']}」颜色 · 色相/饱和度"))

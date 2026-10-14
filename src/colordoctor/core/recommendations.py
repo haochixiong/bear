@@ -105,13 +105,13 @@ def near_hint(de: float, skin: bool = True) -> Adjustment:
 
 
 def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool = False, skin: bool = True,
-                     scope: str | None = None) -> list[Adjustment]:
+                     scope: str | None = None, at: str | None = None) -> list[Adjustment]:
     """当前像素 -> 目标 Lab 的 Photoshop/Camera Raw 参数建议。
 
     skin=True：肤色（色相/饱和度、可选颜色只在红色 / 黄色范围里选）；
     skin=False：任意颜色，范围按像素本身的色相从六个范围里选。
     生成的调整图层用曲线（对平均色精确）：颜色一层、明度一层；色彩平衡等其余工具是同一件事的替代做法，不另建图层。
-    scope：图层作用范围（默认肤色用皮肤蒙版，其他颜色作用于全图）。
+    scope：图层作用范围（默认肤色用皮肤蒙版，其他颜色作用于全图）；at：scope 为 local 时的位置（例如 "region" = 整个分析区域）。
     """
     scope = scope or ("skin" if skin else "global")
     who = "肤色" if skin else "颜色"
@@ -148,7 +148,7 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
             strength_label(de),
             estimated=False,
             params=tuple((f"{ch}通道 {i}→", float(o)) for ch, (i, o) in pts.items()),
-            layer=nl.layer("curves", color_curve, scope, f"{who}拉向目标 · 曲线"),
+            layer=nl.layer("curves", color_curve, scope, f"{who}拉向目标 · 曲线", at),
         )
     )
 
@@ -164,7 +164,7 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
                 strength_label(dL),
                 estimated=True,
                 params=(("RGB 输入", float(g_in)), ("RGB 输出", float(g_out))),
-                layer=nl.layer("curves", nl.curves({"composite": [(g_in, g_out)]}), scope, f"{who}明度 · 曲线"),
+                layer=nl.layer("curves", nl.curves({"composite": [(g_in, g_out)]}), scope, f"{who}明度 · 曲线", at),
             )
         )
     color_tgt = np.array([cur_lab[0], tgt[1], tgt[2]])
@@ -323,16 +323,19 @@ def contrast_adjustment(scope: str = "global", at: str | None = None, where: str
                          scope, "加对比 · 曲线", at, strength="轻微")
 
 
-def graying_adjustments(base: str, depth: float = 0.0, at: str = "graying", skin_deficit: float | None = None) -> list[Adjustment]:
-    """局部发灰。skin_deficit 不为 None 时是肤色：用可选颜色（红色/黄色减黑），>0 表示整片皮肤饱和度偏低，作用于整个皮肤蒙版。"""
+def graying_adjustments(base: str, depth: float = 0.0, at: str = "graying", skin_deficit: float | None = None,
+                        skin_lab=None) -> list[Adjustment]:
+    """局部发灰。skin_deficit 不为 None 时是肤色：色相/饱和度在对准肤色的范围里提高饱和度（skin_lab = 皮肤平均色），
+    skin_deficit > 0 表示整片皮肤饱和度偏低，作用于整个皮肤蒙版；否则只作用于发灰位置。"""
     acr, _ = (f"“{n}”" for n in CHANNELS[base]) if base in CHANNELS else ("这种颜色所在通道", "这种颜色所在范围")
     out = [Adjustment("Camera Raw 混色器", f"局部提高{acr}的饱和度（只在发灰处用蒙版）", "小幅")]
     if skin_deficit is not None:
         whole = skin_deficit > 0
-        p = nl.skin_dull_selective(skin_deficit if whole else depth * 0.5)
+        p = nl.skin_dull_huesat(skin_deficit if whole else depth * 0.5, skin_lab if skin_lab is not None else (68.0, 14.0, 19.0))
         out.append(nl.adjustment(
-            "selectiveColor", p, f"方法“相对”：{nl.selective_text(p)}（肤色更干净透亮；{'用皮肤蒙版' if whole else '只作用于发灰位置'}）",
-            "skin" if whole else "local", "肤色发灰 · 可选颜色", None if whole else at))
+            "hueSaturation", p, f"{nl.huesat_text(p)}（范围对准肤色，只加肤色的饱和度、不改明暗；"
+            f"{'用皮肤蒙版' if whole else '只作用于发灰位置'}）",
+            "skin" if whole else "local", "肤色发灰 · 色相/饱和度", None if whole else at))
         out.append(Adjustment("曲线", "也可以用曲线小幅加对比，或检查去朦胧/清晰度/降噪是否过度", "轻微"))
         return out
     vib = graying_vibrance(depth)
@@ -352,25 +355,36 @@ _CURVE_FIX = {
 }
 
 
-def cast_adjustments(where: str, shift_name: str, shift=None, scope: str = "skin") -> list[Adjustment]:
+def cast_adjustments(where: str, shift_name: str, shift=None, scope: str = "skin", mid_lab=None) -> list[Adjustment]:
     """where: '高光' / '阴影'；shift_name: '黄' / '青' / '绿' / '洋红' / '红'。
 
     shift：该段相对中间调的 (ΔL*, Δa*, Δb*)。给出时色彩平衡给具体数值（并生成图层），把这一段拉回中间调的颜色。
+    mid_lab：中间调的平均色。给出时在这一段的实际颜色（mid_lab + shift）上求滑块，并扣除同一个滑块对中间调的影响；
+    色彩平衡的这个色调在这一段的明度上管不到（或分不开这一段和中间调）时不给数值、不生成图层。
     """
     opposite = {"黄": "蓝", "青": "红", "绿": "洋红", "洋红": "绿", "红": "青", "蓝": "黄"}.get(shift_name, "")
     tone = "highlights" if where == "高光" else "shadows"
-    lv = nl.balance_for_shift(-float(shift[1]), -float(shift[2]), tone, cap=25) if shift is not None else [0, 0, 0]
+    band = ref = None
+    if shift is not None and mid_lab is not None:
+        ref = np.asarray(mid_lab, dtype=float)[:3]
+        band = ref + np.asarray(shift, dtype=float)[:3]
+    lv = (nl.balance_for_shift(-float(shift[1]), -float(shift[2]), tone, cap=25, lab=band, ref_lab=ref)
+          if shift is not None else [0, 0, 0])
     if any(lv):
         p = nl.balance(**{tone: lv})
         cb = nl.adjustment("colorBalance", p, f"勾选“保留明度”：{nl.balance_text(p)}（把{where}拉回中间调的颜色，模型估算）",
                            scope, f"{where}偏{shift_name} · 色彩平衡", strength="轻微")
+    elif band is not None:
+        cb = Adjustment("色彩平衡", f"不建议用色彩平衡：这段皮肤的{where}明度 L* {band[0]:.0f} 和中间调 L* {ref[0]:.0f} 很接近，"
+                        f"色彩平衡的“{where}”要么管不到、要么会把中间调一起改掉。用下面的曲线，或颜色分级 → {where}"
+                        "配合明亮度蒙版", "轻微")
     else:
         cb = Adjustment("色彩平衡", f"色调选“{where}”，往“{opposite}”方向小幅移动（起步 ±5）", "轻微")
     return [
         Adjustment("Camera Raw", f"颜色分级 → {where}：往“{opposite}”方向加一点（色相选 {opposite}，饱和度从 5 起）", "轻微"),
         cb,
         Adjustment("曲线", f"{_CURVE_FIX.get(shift_name, '对应通道小幅修正')}：只在{'亮部' if where == '高光' else '暗部'}加一个点，幅度很小"
-                   "（替代做法，与色彩平衡二选一）", "轻微"),
+                   + ("（替代做法，与色彩平衡二选一）" if any(lv) else ""), "轻微"),
     ]
 
 

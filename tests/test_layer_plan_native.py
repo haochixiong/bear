@@ -100,13 +100,31 @@ def test_scan_gives_each_dirty_spot_its_own_masked_layer():
 
 
 def test_existing_layers_are_linked_not_duplicated():
-    rep, shape = CASES["skin_sallow_natural"]
+    rep, shape = CASES["skin_sallow"]
     plan = lp.plan_from_report(rep, shape)
     cast = next(i for i, f in enumerate(rep.findings) if f.problem.startswith("肤色整体"))
     own = plan.for_finding(cast)
     assert [ly.id for ly in own] == ["skin_cast"] and own[0].kind == "selectiveColor"
-    keys = [(ly.finding, ly.kind, json.dumps(ly.params, sort_keys=True)) for ly in plan.layers]
-    assert len(keys) == len(set(keys))
+    for name in CASES:
+        rep, shape = CASES[name]
+        keys = [(ly.finding, ly.kind, json.dumps(ly.params, sort_keys=True)) for ly in lp.plan_from_report(rep, shape).layers]
+        assert len(keys) == len(set(keys)), name
+
+
+def test_skin_cast_with_style_card_is_fixed_once():
+    """有目标风格时，“肤色整体偏黄”那一条不再给图层（风格那一条的曲线已经拉向同一个目标），文字指向那一条。"""
+    rep, shape = CASES["skin_sallow_natural"]
+    plan = lp.plan_from_report(rep, shape)
+    cast = next(i for i, f in enumerate(rep.findings) if f.problem.startswith("肤色整体"))
+    style = next(i for i, f in enumerate(rep.findings) if f.problem.startswith("与目标风格"))
+    assert not plan.for_finding(cast)
+    assert not any(a.layer for a in rep.findings[cast].adjustments)
+    assert any("“与目标风格「" in a.instruction and "只生成那一条的图层" in a.instruction for a in rep.findings[cast].adjustments)
+    assert any(ly.name == "肤色拉向目标 · 曲线" for ly in plan.for_finding(style))
+    # 整张图只有一层改肤色的颜色（不会叠加两次修过头）
+    color_layers = [ly for ly in plan.layers if ly.kind in ("selectiveColor", "hueSaturation", "colorBalance")
+                    or (ly.kind == "curves" and set(ly.params["channels"]) & {"red", "green", "blue"})]
+    assert len(color_layers) == 1
 
 
 # ------------------------------------------------------------------ (b) 图层数字 = 卡片数字
@@ -203,12 +221,12 @@ def test_mixer_rows_on_the_same_hue_are_merged_not_cancelled():
         nl.validate(nl.layer("hueSaturation", p))
 
 
-def test_grading_and_white_balance_translations():
-    assert nl.grading_to_balance(0, 30) == [18, -9, -9]  # 红：往红，少一点洋红/黄
-    cr, mg, yb = nl.grading_to_balance(210, 30)
-    assert cr < 0 and yb > 0  # 青蓝
+def test_white_balance_translation_directions():
     _, mg, yb = nl.balance_for_shift(da=-4.0, db=-10.0)  # 往绿、往蓝
     assert mg > 0 and yb > 0
+    cr, _, yb = nl.balance_for_shift(da=-6.0, db=-6.0, tone="shadows", lab=(25.0, 0.0, 0.0))  # 青蓝
+    assert cr < 0 and yb > 0
+    assert nl.balance_for_shift(da=0.2, db=-0.3) == [0, 0, 0]
 
 
 # ------------------------------------------------------------------ (d) 桥接 JSON

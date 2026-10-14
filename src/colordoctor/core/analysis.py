@@ -164,7 +164,8 @@ def _component_findings(components: list[RiskComponent], ct, conf, base_notes, s
                 severity=c.severity,
                 evidence=c.evidence + tuple(flat) + tuple(_blob_text([b for b in ct.blobs if b.kind == "graying"])),
                 causes=CAUSES_GRAY,
-                adjustments=tuple(rec.graying_adjustments("橙" if skin else ct.base_hue_name, ct.graying_depth, skin_deficit=deficit)),
+                adjustments=tuple(rec.graying_adjustments("橙" if skin else ct.base_hue_name, ct.graying_depth, skin_deficit=deficit,
+                                                         skin_lab=skin_report.mean_lab if skin_report is not None else None)),
                 confidence=conf,
                 notes=("低饱和本身不是错误；只有在你希望它更干净通透时才需要处理",) + tuple(base_notes),
             )
@@ -259,7 +260,7 @@ def _skin_cast_findings(skin, comp, conf, base_notes):
                     "颜色分级/分离色调作用到了皮肤",
                     "环境光：阴影里常有天空/绿植的反射，高光里常有暖光源",
                 ),
-                adjustments=tuple(rec.cast_adjustments(where, name, shift)),
+                adjustments=tuple(rec.cast_adjustments(where, name, shift, mid_lab=skin.mean_lab)),
                 confidence=conf,
                 notes=("如果是刻意的风格（例如高光暖、阴影冷），可以忽略",) + tuple(base_notes),
             )
@@ -357,16 +358,19 @@ def analyze_skin_region(
         target = cs.lch_to_lab(np.array([cur_lch[0], cur_lch[1], tgt_h]))
         adjs = []
         sc_params = nl.skin_selective(float(target[1] - skin.mean_lab[1]), float(target[2] - skin.mean_lab[2]))
-        if sc_params["colors"]:
+        if style_card:
+            # 风格那一条的“拉向目标”曲线已经把色相拉到同一个目标：这里再给一层会修两次（叠加后反而偏到另一边）
+            adjs.append(Adjustment(
+                "提示", f"这条偏色的修正已包含在“与目标风格「{preset.name}」”那一条的“肤色拉向目标 · 曲线”图层里（同一个目标）："
+                "只生成那一条的图层，不要再另加可选颜色或色相调整，否则会修两次", None, False))
+        elif sc_params["colors"]:
             adjs.append(nl.adjustment(
                 "selectiveColor", sc_params,
                 f"方法“相对”：{nl.selective_text(sc_params)}（把肤色色相拉回{skin.hue_ref}，明暗和浓淡基本不变；"
                 "用皮肤蒙版只作用于皮肤，生成的调整图层就是这一层）",
                 "skin", f"肤色整体{skin.tendency} · 可选颜色", "skin_cast",
                 strength=rec.strength_label(float(cs.hue_diff(cur_lch[2], tgt_h)) / 2.0)))
-        if style_card:  # 同一个目标，完整参数只在风格那一条给，避免两张卡强度标签对不上
-            adjs.append(Adjustment("提示", f"色温/色调、曲线等其余参数见“与目标风格「{preset.name}」”那一条（同一个目标）", None, False))
-        else:
+        if not style_card:
             adjs += [a for a in rec.skin_adjustments(skin_px, target, keep_lightness=True) if a.tool == "Camera Raw"]
         findings.append(
             Finding(
@@ -584,7 +588,9 @@ def compare_regions(
         parts.append(f"两个区域非常接近（ΔE00 {c.delta_e00:.1f}，{de_words(c.delta_e00)}）")
         adjustments = (rec.near_hint(c.delta_e00, skin),)
     else:
-        adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin))
+        # 图层只作用于问题区（分析的就是这块区域）
+        adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin,
+                                                 scope="local", at="region"))
     main = Finding(
         problem="问题区相对参考区：" + "；".join(parts),
         severity=severity_from_score(sev_score),
@@ -692,6 +698,16 @@ def analyze_palette_report(
     elif cf.value < lo:
         sev = Severity.NOTABLE if cf.value < lo * 0.6 else Severity.MILD
         vib = nl.clip(10 + 40 * (lo - cf.value) / lo, 10, 25)  # 缺得越多加得越多（+10 ~ +25）
+        # 加对比只在亮暗差确实偏小时建议；风格那一条已经有影调曲线时不再另加一条（两条曲线会叠加或互相抵消）
+        contrast = float(pr.tone[4] - pr.tone[0])
+        style_curve = style is not None and any(a.layer and a.layer["kind"] == "curves" for a in style.adjustments)
+        if contrast >= LOW_CONTRAST:
+            tone_adj = ()
+        elif style_curve:
+            tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}）：对比按“与「{style.name}」风格的差距”那一条的影调曲线调，"
+                                         "不要再另加一条 S 曲线", None, False),)
+        else:
+            tone_adj = (rec.contrast_adjustment("global", where=f"整体（亮暗差 P95−P5 明度 {contrast:.0f}）"),)
         findings.append(Finding(
             problem=f"整体缺色/发灰：色彩丰富度 {cf.value:.0f}（{cf.label}）" + (f"，低于「{style.name}」的 {lo:g}" if style else ""),
             severity=sev,
@@ -701,7 +717,7 @@ def analyze_palette_report(
                 nl.adjustment("vibrance", {"vibrance": vib, "saturation": 0},
                               f"自然饱和度 +{vib}，饱和度 0（比饱和度更保护肤色；Camera Raw 里同名滑块也可以）", "global",
                               "整体缺色 · 自然饱和度"),
-                rec.contrast_adjustment("global", where="整体"),
+                *tone_adj,
                 Adjustment("Camera Raw 混色器", "只提高主色所在通道的饱和度，其他颜色保持", "小幅"),
             ),
             confidence=conf,
@@ -722,7 +738,9 @@ def analyze_palette_report(
         evidence=tuple(f"{role}：{p.family} {p.share:.0%}（Lab {p.lab[0]:.0f}, {p.lab[1]:.0f}, {p.lab[2]:.0f}）"
                        for role, p in zip(("主色", "辅色", "点缀色"), r.roles)) + (f"其余颜色 {r.other_share:.0%}",),
         causes=(),
-        adjustments=tuple(Adjustment("构图/调色", t, None, True) for t in r.tips) + _ratio_layers(pr, r),
+        # 已经判定“整体缺色”时不再给“杂色降饱和”的图层（与加饱和度那一层方向相反）
+        adjustments=tuple(Adjustment("构图/调色", t, None, True) for t in r.tips)
+        + (() if any(f.problem.startswith("整体缺色") for f in findings) else _ratio_layers(pr, r)),
         confidence=conf,
         notes=("6:3:1 是设计和电影常用的经验比例，不是硬性规则；中性色（黑白灰）也算一种颜色",),
     ))
@@ -754,6 +772,8 @@ def analyze_palette_report(
     ]
     return _finalize("palette", context, stats, comps, findings, reasons, conf, palette=pr, region=rect)
 
+
+LOW_CONTRAST = 50.0  # 整图亮暗差（P95 − P5 明度）低于此值才算“对比偏低”
 
 _NO_DESAT = ("橙", "黑/深灰", "白/浅灰", "灰")  # 不自动降饱和：肤色所在的橙、无彩色
 

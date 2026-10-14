@@ -47,7 +47,6 @@ PS_SAT_CAP = 60
 PS_LIGHT_CAP = 30
 SC_CAP = 30  # 可选颜色单项上限（%）
 SC_PER_LAB = 2.5  # 可选颜色：约 2.5% 对应 1 个 Lab 单位（经验值）
-GRADING_TO_BALANCE = 0.6  # 颜色分级饱和度 30 ≈ 色彩平衡最强一项 18
 S_CURVE = ((64, 58), (192, 198))  # 小幅 S 形加对比
 MERGE_HSB = 12.0  # 两个混色器通道的颜色相距不到这么多度（HSB）时合成一个 PS 范围
 
@@ -130,6 +129,24 @@ def huesat_multi(items) -> dict:
     return {"master": {"hue": 0, "saturation": 0, "lightness": 0}, "ranges": ranges}
 
 
+def _span(r) -> tuple[int, int]:
+    return int(r["beginRamp"]), int((r["endRamp"] - r["beginRamp"]) % 360)
+
+
+def ranges_overlap(r1: dict, r2: dict) -> bool:
+    """两个色相/饱和度范围（含过渡带）在色相环上有没有重叠。"""
+    s1, w1 = _span(r1)
+    s2, w2 = _span(r2)
+    return (s2 - s1) % 360 < w1 or (s1 - s2) % 360 < w2
+
+
+def huesat_overlap(p1: dict, p2: dict) -> bool:
+    """两层色相/饱和度会不会改到同一批颜色（任一层有“全图”数值时一定会）。"""
+    if any(p1["master"].values()) or any(p2["master"].values()):
+        return True
+    return any(ranges_overlap(a, b) for a in p1["ranges"] for b in p2["ranges"])
+
+
 def _hsl_words(hue=0, sat=0, light=0) -> str:
     parts = [f"{n} {int(v):+d}" for n, v in (("色相", hue), ("饱和度", sat), ("明度", light)) if int(v)]
     return "，".join(parts)
@@ -207,40 +224,69 @@ def balance_text(params: dict) -> str:
     return "；".join(out)
 
 
-def grading_to_balance(hue: float, sat: float) -> list[int]:
-    """Camera Raw 颜色分级（HSB 色相 0–359，饱和度 0–100）-> 色彩平衡的 [青-红, 洋红-绿, 黄-蓝]。
-
-    方向取色相在 R/G/B 三个方向上的分量，强度按饱和度 30 ≈ 最强一项 18 换算（估算）。
-    """
-    if sat <= 0:
-        return [0, 0, 0]
-    comp = np.cos(np.radians([hue, hue - 120.0, hue - 240.0]))
-    comp = comp / max(1e-6, float(np.abs(comp).max()))
-    return [clip(v * sat * GRADING_TO_BALANCE, -100, 100) for v in comp]
-
-
 _TONE_L = {"shadows": 25.0, "midtones": 50.0, "highlights": 75.0}
+CB_MIN_EFFECT = 0.06  # 每格滑块至少改变这么多 a*/b*（Lab）才算“管得到”这个颜色；更弱时该色调不用色彩平衡
+CB_MIN_REACH = 0.5  # 限幅后至少能完成需要变化的一半，否则不给色彩平衡数值（改用其他做法）
+_CB_STEP = 10.0
 
 
-def balance_for_shift(da: float, db: float, tone: str = "midtones", cap: int = 40) -> list[int]:
-    """让 a*/b* 变化 (da, db) 需要的色彩平衡 [青-红, 洋红-绿, 黄-蓝]：只用洋红-绿（色调）和黄-蓝（色温）两个滑块。
+def _rgb01(lab) -> np.ndarray:
+    return np.clip(cs.lab_to_srgb_float(np.asarray(lab, dtype=float)[:3]), 0.0, 1.0)[None, :]
 
-    在该色调最典型明度的中性灰上用色彩平衡模型（ps_models，GIMP 算法）估算每个滑块每格改变多少 a*/b*，
-    两个滑块各管各的（不按模型里的相互影响去抵消，那部分和 PS 实际差别较大，会把数值放大），估算值。
+
+def balance_effect(lab, tone: str, levels, ref_lab=None) -> np.ndarray:
+    """色彩平衡（模型，勾选“保留明度”）作用在颜色 lab 上带来的 (Δa*, Δb*)；给出 ref_lab 时是相对 ref_lab 的变化。"""
+    def one(c):
+        x = _rgb01(c)
+        base = cs.srgb8_to_lab(x * 255.0)[0]
+        out = pm.color_balance(x, **{tone: tuple(float(v) for v in levels)})
+        return cs.srgb8_to_lab(np.clip(out, 0, 1) * 255.0)[0][1:] - base[1:]
+    d = one(lab)
+    return d - one(ref_lab) if ref_lab is not None else d
+
+
+def balance_jacobian(lab, tone: str, ref_lab=None) -> np.ndarray:
+    """2×3：三个滑块（青-红、洋红-绿、黄-蓝）每格改变多少 (a*, b*)，在 lab 这个颜色上（中心差分）。"""
+    cols = []
+    for i in range(3):
+        lv = [0.0, 0.0, 0.0]
+        lv[i] = _CB_STEP
+        up = balance_effect(lab, tone, lv, ref_lab)
+        lv[i] = -_CB_STEP
+        dn = balance_effect(lab, tone, lv, ref_lab)
+        cols.append((up - dn) / (2 * _CB_STEP))
+    return np.array(cols).T
+
+
+def balance_for_shift(da: float, db: float, tone: str = "midtones", cap: int = 40, lab=None, ref_lab=None) -> list[int]:
+    """让颜色 lab 的 a*/b* 变化 (da, db) 需要的色彩平衡 [青-红, 洋红-绿, 黄-蓝]（估算）。
+
+    lab：要改的那一段的平均色（默认是该色调典型明度的中性灰）；ref_lab：给出时求的是 lab 相对 ref_lab 的变化
+    （例如“把高光拉回中间调的颜色”：中间调也会被同一个滑块带动）。用色彩平衡模型（ps_models，GIMP 算法）
+    在这个颜色上求三个滑块的完整雅可比（洋红-绿也会改 b*、黄-蓝也会改 a*），带少量正则的最小二乘 + 两步迭代；
+    限幅时整体等比缩小（不改方向）。该色调在这个明度上几乎不起作用、或限幅后完成不到一半时返回全 0。
     """
-    if abs(da) < 0.5 and abs(db) < 0.5:
+    need = np.array([float(da), float(db)])
+    if np.hypot(*need) < 0.5:
         return [0, 0, 0]
-    gray = cs.lab_to_srgb8(np.array([_TONE_L[tone], 0.0, 0.0]))[None, :] / 255.0
-    base = cs.srgb8_to_lab(gray * 255.0)[0]
-    per = []
-    for i, axis in ((1, 1), (2, 2)):  # 洋红-绿 -> a*，黄-蓝 -> b*
-        lv = [0, 0, 0]
-        lv[i] = 20
-        out = pm.color_balance(gray, **{tone: lv})
-        per.append(float(cs.srgb8_to_lab(np.clip(out, 0, 1) * 255.0)[0][axis] - base[axis]) / 20.0)
-    mg = da / per[0] if abs(per[0]) > 1e-3 and abs(da) >= 0.5 else 0.0
-    yb = db / per[1] if abs(per[1]) > 1e-3 and abs(db) >= 0.5 else 0.0
-    return [0, clip(mg, -cap, cap), clip(yb, -cap, cap)]
+    base = np.array([_TONE_L[tone], 0.0, 0.0]) if lab is None else np.asarray(lab, dtype=float)[:3]
+    J = balance_jacobian(base, tone, ref_lab)
+    if float(np.linalg.norm(J, axis=0).max()) < CB_MIN_EFFECT:
+        return [0, 0, 0]
+    A = J.T @ J
+    A = A + np.eye(3) * (1e-3 * float(np.trace(A)) + 1e-9)
+    p = np.linalg.solve(A, J.T @ need)
+    for _ in range(2):  # 模型不是线性的：按实际效果再修正
+        r = need - balance_effect(base, tone, p, ref_lab)
+        p = p + np.linalg.solve(A, J.T @ r)
+    m = float(np.abs(p).max())
+    if m > cap:
+        p = p * (cap / m)
+    lv = [int(round(float(v))) for v in p]
+    got = balance_effect(base, tone, lv, ref_lab)
+    if float(got @ need) / float(need @ need) < CB_MIN_REACH:
+        return [0, 0, 0]
+    return lv
 
 
 # ---------------------------------------------------------------- 可选颜色
@@ -283,10 +329,16 @@ def skin_selective(da: float, db: float) -> dict:
     return selective({"reds": cap(reds), "yellows": cap(yellows)})
 
 
-def skin_dull_selective(deficit: float) -> dict:
-    """肤色发灰、不够透亮 -> 可选颜色：红色 / 黄色里减黑（红色再少一点青，颜色更干净）。deficit：低于下限的比例。"""
-    n = clip(deficit * 80, 5, 25)
-    return selective({"reds": {"c": -max(2, n // 2), "k": -n}, "yellows": {"k": -max(3, round(n * 0.6))}})
+def skin_dull_huesat(deficit: float, skin_lab) -> dict:
+    """肤色发灰、不够透亮 -> 色相/饱和度：范围对准肤色的饱和度提高。deficit：低于下限的比例（色度要乘 1/(1-deficit)）。
+
+    模型里这一层的色度倍数 ≈ 1 + 饱和度/100（明度、色相几乎不变）；可选颜色“减黑”主要是提亮，几乎不加色度，
+    自然饱和度在 PS 里会刻意少动肤色，都不适合。范围中心对准皮肤平均色，±15° 全量、±45° 过渡；上限 +30。
+    """
+    d = float(np.clip(deficit, 0.0, 0.9))
+    sat = clip((1.0 / (1.0 - d) - 1.0) * 100.0, 5, 30)
+    idx, ramps = custom_range(ps_hsb_of_lab(skin_lab), 15, 45)
+    return huesat(idx, ramps, sat=sat)
 
 
 # ---------------------------------------------------------------- 曲线

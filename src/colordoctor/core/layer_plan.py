@@ -53,6 +53,8 @@ class LayerPlan:
     width: int
     height: int
     layers: list[LayerSpec]
+    # 没有生成图层的建议：(问题序号, 建议原文, 原因)。例如作用范围是皮肤 / 问题位置，但没能单独选出来
+    skipped: list[tuple[int, str, str]] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {"group_name": self.group_name, "width": self.width, "height": self.height,
@@ -174,8 +176,9 @@ class _Masks:
 
     _FLAG = {"opposite": ct_mod.MASK_OPPOSITE, "graying": ct_mod.MASK_GRAYING}
 
-    def __init__(self, report: AnalysisReport, shape, offset):
+    def __init__(self, report: AnalysisReport, shape, offset, spots: dict[str, list[int]] | None = None):
         self.report, self.shape, self.offset = report, shape, offset
+        self.spots = spots or {}  # 整图扫描：每类问题位置用到了哪几处（蒙版要互不重叠）
         h, w = shape[:2]
         self.rad = _feather_radius(shape)
         self.k = max(1, int(np.ceil(np.sqrt(h * w / MASK_WORK_PIXELS))))  # 大图在缩小 k 倍的分辨率上做蒙版
@@ -199,13 +202,14 @@ class _Masks:
     def _small_skin(self):
         return None if self.skin is None else self._small("skin", lambda: _pool_max(self.skin, self.k))
 
-    def _small_boxes(self, boxes) -> np.ndarray:
-        """问题位置（源图坐标）的矩形 -> 工作分辨率上的布尔蒙版。"""
+    def _small_boxes(self, boxes, pad: int = 0) -> np.ndarray:
+        """问题位置（源图坐标）的矩形（四周再放宽 pad 像素）-> 工作分辨率上的布尔蒙版。"""
         h, w = self.shape[:2]
         k = self.k
         m = np.zeros((-(-h // k), -(-w // k)), bool)
         ox, oy = self.offset
         for x, y, bw, bh in boxes:
+            x, y, bw, bh = x - pad, y - pad, bw + 2 * pad, bh + 2 * pad
             x0, y0 = max(0, x - ox), max(0, y - oy)
             x1, y1 = min(w, x - ox + bw), min(h, y - oy + bh)
             if x1 > x0 and y1 > y0:
@@ -229,14 +233,29 @@ class _Masks:
             flags = self._small_flags(self._FLAG[stem])
             if flags is None:
                 return None
-            m = flags
-            if arg:  # 整图扫描：只作用于这一处问题位置里的杂色 / 发灰像素
-                blobs = rep.contamination.blobs if rep.contamination is not None else ()
-                j = int(arg)
-                if j >= len(blobs):
-                    return None
-                m = flags & self._small_boxes([blobs[j].bbox])
-            return _soft_small(m, self.rad, self.k, grow=True) if m.any() else None
+            if not arg:
+                return _soft_small(flags, self.rad, self.k, grow=True) if flags.any() else None
+            # 整图扫描：只作用于这一处问题位置里的杂色 / 发灰像素。几处位置的矩形可能套在一起（一大片里有一小块），
+            # 每个像素只归“包含它的最小那一处”，各处的蒙版（含羽化边）互不重叠，同一批像素不会被调两次
+            blobs = rep.contamination.blobs if rep.contamination is not None else ()
+            j = int(arg)
+            if j >= len(blobs):
+                return None
+            area = lambda i: blobs[i].bbox[2] * blobs[i].bbox[3]  # noqa: E731
+            order = sorted({i for i in self.spots.get(stem, [j]) if i < len(blobs)} | {j}, key=lambda i: (area(i), i))
+            smaller = [blobs[i].bbox for i in order[:order.index(j)]]
+            m = flags & self._small_boxes([blobs[j].bbox])
+            if smaller:
+                m &= ~self._small_boxes(smaller)
+            if not m.any():
+                return None
+            soft = _soft_small(m, self.rad, self.k, grow=True)
+            pad = 2 * self.rad
+            own = self._small_boxes([blobs[j].bbox], pad)
+            if smaller:
+                own &= ~self._small_boxes(smaller, pad)
+            soft[~own] = 0
+            return soft if soft.any() else None
         if stem == "skin" and arg:  # 肤色不均匀：这一类小块
             uni = getattr(rep, "uniformity", None)
             boxes = [p.bbox for p in (uni.patches if uni is not None else ()) if p.kind == arg]
@@ -247,6 +266,8 @@ class _Masks:
             if s is not None:
                 m &= s
             return _soft_small(m, self.rad, self.k)
+        if stem == "region":  # 整个分析区域（例如对比模式的问题区）
+            return self._small(("soft", "region"), lambda: np.full(self._small_boxes([]).shape, 255, np.uint8))
         if stem == "unity" and arg:  # 某种颜色不统一：偏离的这一块
             pal = getattr(rep, "palette", None)
             patches = pal.unity.patches if pal is not None and pal.unity is not None else ()
@@ -290,12 +311,22 @@ def _merge_pair(a: dict, b: dict) -> dict | None:
             return None
         if {r["localRange"] for r in pa["ranges"]} & {r["localRange"] for r in pb["ranges"]}:
             return None
+        if nl.huesat_overlap(pa, pb):
+            return None  # 范围有重叠：合成一层后重叠处的颜色会被转两次
         return {"master": dict(pa["master"]), "ranges": pa["ranges"] + pb["ranges"]}
     return None
 
 
-def _finding_layers(f) -> list[tuple[dict, list[str]]]:
-    """一张卡片上带图层的建议 -> [(图层字典, 对应的建议原文)]：完全相同的只留一个，能自然合并的合成一层。"""
+SKIP_SAME_PIXELS = "同一张卡片上已经有一层色相/饱和度改这些颜色（二选一），没有再生成一层"
+SKIP_NO_MASK = "没能单独选出要改的区域（皮肤或问题位置），直接生成会改到整张图，所以没有生成图层；可以先手动建选区或蒙版，再按这里的数值调"
+
+
+def _finding_layers(f, skipped: list | None = None) -> list[tuple[dict, list[str]]]:
+    """一张卡片上带图层的建议 -> [(图层字典, 对应的建议原文)]：完全相同的只留一个，能自然合并的合成一层。
+
+    同一张卡片上、同一作用范围的两层色相/饱和度改到同一批颜色时（例如两种二选一的做法），只生成第一层，
+    后一条记入 skipped：[(建议原文, 原因)]。
+    """
     out: list[tuple[dict, list[str]]] = []
     for a in f.adjustments:
         spec = getattr(a, "layer", None)
@@ -313,6 +344,13 @@ def _finding_layers(f) -> list[tuple[dict, list[str]]]:
                 out[i] = ({**o, "params": merged, "name": o["name"]}, [*texts, a.instruction])
                 break
         else:
+            clash = spec["kind"] == "hueSaturation" and any(
+                o["kind"] == "hueSaturation" and o["scope"] == spec["scope"] and o.get("_at") == spec.get("_at")
+                and nl.huesat_overlap(o["params"], spec["params"]) for o, _ in out)
+            if clash:
+                if skipped is not None:
+                    skipped.append((a.instruction, SKIP_SAME_PIXELS))
+                continue
             out.append((dict(spec), [a.instruction]))
     return out
 
@@ -342,15 +380,33 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     图层的 finding = i；蒙版按作用范围：skin = 皮肤蒙版，local = 这条问题的位置，global = 全图。
     """
     h, w = shape[:2]
-    masks = _Masks(report, shape, offset)
+    findings = list(getattr(report, "findings", ()) or ())
+    per_finding, skipped = [], []
+    for i, f in enumerate(findings):
+        sk: list = []
+        per_finding.append(_finding_layers(f, sk))
+        skipped += [(i, t, why) for t, why in sk]
+    spots: dict[str, list[int]] = {}
+    for specs in per_finding:
+        for spec, _ in specs:
+            stem, _, arg = (spec.get("_at") or "").partition("@")
+            if arg.isdigit():
+                spots.setdefault(stem, []).append(int(arg))
+    masks = _Masks(report, shape, offset, spots)
     layers: list[LayerSpec] = []
     used: set[str] = set()
-    for i, f in enumerate(getattr(report, "findings", ()) or ()):
-        for spec, texts in _finding_layers(f):
+    for i, specs in enumerate(per_finding):
+        for spec, texts in specs:
+            mask = masks.get(spec)
+            if mask is not None and not mask.any():
+                mask = None
+            if spec["scope"] != "global" and mask is None:
+                skipped += [(i, t, SKIP_NO_MASK) for t in texts]  # 作用范围选不出来：不能变成整张图的图层
+                continue
             at = spec.get("_at")
             stem = at.partition("@")[0] if at else _ID_STEM[spec["kind"]]
             layers.append(LayerSpec(_unique(stem, used), spec["name"], spec["kind"], spec["params"], "；".join(texts),
-                                    masks.get(spec), finding=i))
+                                    mask, finding=i))
     # 没有对应卡片的仿色曲线（例如只有 MatchReport 的报告）：仍给出，不挂在任何卡片上
     ref = getattr(report, "reference", None)
     if ref is not None and getattr(ref, "curve_points", None) and "ref_curve" not in used:
@@ -358,7 +414,22 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
         layers.append(curves_layer(_unique("ref_curve", used), "仿色影调 · 曲线", {"composite": pts},
                                    "把影调拉向参考：" + "；".join(f"{a}→{b}" for a, b in ref.curve_points)))
     name = group_name or f"ColorDoctor · {_MODE_NAME.get(report.mode, report.mode)}"
-    return LayerPlan(name, w, h, layers)
+    return LayerPlan(name, w, h, layers, skipped)
+
+
+def annotate_findings(findings_json: list[dict], plan: LayerPlan) -> list[dict]:
+    """问题卡片的 JSON（顺序与 report.findings 相同）加上 index 和修它的图层 id；
+    没有生成图层的建议去掉 layer（插件就把它当文字建议显示），并在文字后注明原因。"""
+    skip = {(i, t): why for i, t, why in plan.skipped}
+    for i, fj in enumerate(findings_json):
+        fj["index"] = i
+        fj["layers"] = [ly.id for ly in plan.layers if ly.finding == i]
+        for a in fj.get("adjustments") or ():
+            why = skip.get((i, a.get("instruction")))
+            if why and a.get("layer"):
+                a["layer"] = None
+                a["instruction"] = f"{a['instruction']}（{why}）"
+    return findings_json
 
 
 _MODE_NAME = {"region": "脏色", "scan": "脏色", "skin": "肤色均匀", "palette": "整图色彩", "compare": "对比", "point": "取色",

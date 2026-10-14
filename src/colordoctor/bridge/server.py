@@ -114,6 +114,8 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
             from colordoctor.core.skin_mask import skin_mask
 
             manual = skin_mask(rgb, within=valid)[0]
+            if int(manual.sum()) < 30:  # 透明图层里没找到皮肤：直接说清楚，而不是“蒙版内没有像素”
+                raise pixel_guard.BlockedError("没有在这个图层里找到皮肤。请确认选中的是人像图层，或把分析对象改为「合并可见图层」。")
         return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=part, manual_mask=manual)
     if mode == "palette":
         return analysis.analyze_palette_report(prep.filled_for_statistics(), ctx, style_key=q.get("style") or None,
@@ -222,10 +224,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
     sid = sessions.put(Session(plan, (h, w), prep.offset, doc_size or (w, h), opaque))
     plan_json = plan.to_json()
     # 每条问题带上序号和修它的图层 id（图层的 finding 就是这个序号，顺序与 report.findings 相同）
-    findings_json = to_jsonable(list(report.findings))
-    for i, fj in enumerate(findings_json):
-        fj["index"] = i
-        fj["layers"] = [ly.id for ly in plan.layers if ly.finding == i]
+    findings_json = layer_plan.annotate_findings(to_jsonable(list(report.findings)), plan)
     if opaque is not None:
         for ly in plan_json["layers"]:
             ly["has_mask"] = True  # 全图类的调整（如曲线）也要限制在这个图层的不透明范围内

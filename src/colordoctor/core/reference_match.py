@@ -20,6 +20,7 @@ from colordoctor.core import acr_channels as ac
 from colordoctor.core import color_spaces as cs
 from colordoctor.core import native_layers as nl
 from colordoctor.core import palette as pl
+from colordoctor.core import ps_models as pm_mod
 from colordoctor.core.color_models import Adjustment
 from colordoctor.core.perception import de_words
 
@@ -66,6 +67,38 @@ def _neutral_cast(lab: np.ndarray, sel: np.ndarray | None = None) -> tuple[float
     if m.sum() < 20:
         return None
     return (float(lab[m, 1].mean()), float(lab[m, 2].mean()))
+
+
+def _neutral_lab(lab: np.ndarray, sel: np.ndarray | None = None):
+    """接近中性的像素的平均 Lab（含明度）；太少时为 None。"""
+    C = np.hypot(lab[:, 1], lab[:, 2])
+    m = C < NEUTRAL_C
+    if sel is not None:
+        m &= sel
+    if m.sum() < 20:
+        return None
+    return lab[m].mean(axis=0)
+
+
+def _huesat_rows(ch_m: dict, ch_r: dict) -> list[tuple]:
+    """PS 色相/饱和度用的混色器行 (通道, HSB 中心, 色相度数, 饱和度, 明亮度)，取舍规则与 Camera Raw 混色器建议相同。"""
+    rows = []
+    for name in ac.NAMES:
+        a, b = ch_m[name], ch_r[name]
+        if b.share < 0.03 and a.share < 0.03:
+            continue
+        if b.share < 0.01 <= a.share:
+            rows.append((name, a.mean_hue if a.mean_hue is not None else a.center, 0.0, -ac.SLIDER_CAP, 0))
+            continue
+        if a.mean_hue is None or b.mean_hue is None:
+            continue
+        hs = ac.cap_slider(ac.hue_slider(a.mean_hue, b.mean_hue, channel=name))[0]
+        ss = ac.cap_slider(ac.sat_slider(a.mean_sat, b.mean_sat, channel=name))[0]
+        ls = ac.cap_slider(ac.lum_slider((b.mean_lab[0] - a.mean_lab[0]) if (a.mean_lab and b.mean_lab) else 0.0, channel=name))[0]
+        if abs(hs) >= 8 or abs(ss) >= 10 or abs(ls) >= 10:
+            rows.append((name, a.mean_hue, float(cs.hue_diff(a.mean_hue, b.mean_hue)) if abs(hs) >= 8 else 0.0,
+                         ss if abs(ss) >= 10 else 0, ls if abs(ls) >= 10 else 0))
+    return rows
 
 
 def _gray(L: float) -> int:
@@ -177,7 +210,10 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
                                      "PS 做法：色相/饱和度 全图 饱和度 -100（转黑白；想控制各颜色转成多亮的灰，改用 PS「黑白」调整图层）",
                                      "global", "转黑白 · 色相/饱和度", strength=None))
     da, db = (cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]) if both_cast else (0.0, 0.0)
-    balance = {"midtones": nl.balance_for_shift(da, db, "midtones") if max(abs(da), abs(db)) >= 1.5 else [0, 0, 0]}
+    # PS 色彩平衡：中间调在“我的”中性色的实际平均色上求（白平衡）
+    n_m = _neutral_lab(lm)
+    balance = {"midtones": nl.balance_for_shift(da, db, "midtones", lab=n_m)
+               if max(abs(da), abs(db)) >= 1.5 and n_m is not None else [0, 0, 0]}
     if abs(db) >= 1.5:
         adjs.append(Adjustment("Camera Raw", f"色温往{'黄' if db > 0 else '蓝'}（中性区域 b* 需要 {db:+.1f}）", "小幅"))
     if abs(da) >= 1.5:
@@ -191,14 +227,17 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
             continue  # 这一段没有可比较的中性色
         if np.hypot(tr_[0] - tm_[0], tr_[1] - tm_[1]) >= 2:
             gh, gs = ac.tint_to_grading(60.0, tr_[0] - tm_[0], tr_[1] - tm_[1])  # 要加的是差值
-            # PS 色彩平衡：中间调已经按色温/色调修了整体偏色，阴影/高光只补剩下的差别（否则同一个偏色修两次）
-            wb = (da, db) if any(balance["midtones"]) else (0.0, 0.0)
-            ra, rb = tr_[0] - tm_[0] - wb[0], tr_[1] - tm_[1] - wb[1]
+            # PS 色彩平衡：阴影/高光只补中间调那一层在这一段上没修到的部分（按模型算中间调那一层对这一段实际改了多少）
+            band = _neutral_lab(lm, sel_fn(lm[:, 0], pm))
+            done = nl.balance_effect(band, "midtones", balance["midtones"]) if any(balance["midtones"]) else np.zeros(2)
+            ra, rb = tr_[0] - tm_[0] - float(done[0]), tr_[1] - tm_[1] - float(done[1])
+            tone = "shadows" if label == "阴影" else "highlights"
             if np.hypot(ra, rb) >= 2:
-                balance["shadows" if label == "阴影" else "highlights"] = nl.grading_to_balance(*ac.tint_to_grading(60.0, ra, rb))
+                lv = nl.balance_for_shift(ra, rb, tone, lab=band)
+                if any(lv):
+                    balance[tone] = lv
             adjs.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（参考{label}色调 a* {tr_[0]:+.1f}、b* {tr_[1]:+.1f}，我的 a* {tm_[0]:+.1f}、b* {tm_[1]:+.1f}）", "小幅",
                                    True, (("色相", gh), ("饱和度", gs))))
-    rows = []  # PS 色相/饱和度：(通道, HSB 中心, 色相度数, 饱和度, 明亮度)
     for d in diffs:
         parts = []
         (hs, hn), (ss, sn), (ls, ln) = (ac.cap_slider(v) for v in (d.hue_slider, d.sat_slider, d.lum_slider))
@@ -209,19 +248,24 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         if abs(ls) >= 10:
             parts.append(f"明亮度 {ls:+d}{ln}")
         if parts:
-            a_, b_ = ch_m[d.name], ch_r[d.name]
-            center = a_.mean_hue if a_.mean_hue is not None else a_.center
-            deg = float(cs.hue_diff(a_.mean_hue, b_.mean_hue)) if abs(hs) >= 8 and a_.mean_hue is not None and b_.mean_hue is not None else 0.0
-            rows.append((d.name, center, deg, ss if abs(ss) >= 10 else 0, ls if abs(ls) >= 10 else 0))
             adjs.append(Adjustment("Camera Raw 混色器", f"{d.name}（参考占 {d.ref_share:.0%}，我的占 {d.my_share:.0%}）：" + "，".join(parts),
                                    ac.slider_strength(max(abs(hs), abs(ss), abs(ls))), True,
                                    (("色相", hs), ("饱和度", ss), ("明亮度", ls))))
-    if any(any(v) for v in balance.values()):
+    has_balance = any(any(v) for v in balance.values())
+    if has_balance:
         p = nl.balance(**balance)
         adjs.append(nl.adjustment("colorBalance", p, f"PS 做法（代替上面的色温/色调和颜色分级），勾选“保留明度”：{nl.balance_text(p)}",
                                   "global", "仿色色调 · 色彩平衡"))
+    # PS 色相/饱和度：按“色彩平衡那一层之后”的颜色和参考比（否则整体偏色会被色彩平衡和混色器各修一次）
+    ch_after = ch_m
+    if has_balance:
+        x = s_m.reshape(-1, 3).astype(float) / 255.0
+        after = np.clip(np.rint(pm_mod.color_balance(x, **{k: v for k, v in balance.items()}) * 255.0), 0, 255).astype(np.uint8)
+        ch_after = {c.name: c for c in ac.channel_stats(after.reshape(s_m.shape))}
+    rows = [] if ref_bw else _huesat_rows(ch_after, ch_r)
     for params, words in nl.mixer_rows_to_huesat(rows):
-        adjs.append(nl.adjustment("hueSaturation", params, f"PS 做法（代替上面的 Camera Raw 混色器）：{words}",
+        note = "；数值是做完色彩平衡那一层以后还差的部分，放在它上方" if has_balance else ""
+        adjs.append(nl.adjustment("hueSaturation", params, f"PS 做法（代替上面的 Camera Raw 混色器{note}）：{words}",
                                   "global", "仿色颜色 · 色相/饱和度"))
     adjs.append(Adjustment("提示", "建议顺序：先曲线定影调 → 再色温/色调 → 混色器 → 颜色分级；每一步后重新对比", None, False))
     return MatchReport(
