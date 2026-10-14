@@ -296,7 +296,7 @@ def contamination_adjustments(contaminant: str, base: str, skin: bool, chroma: f
         ),
         Adjustment("色相/饱和度", f"编辑范围选“{ps}”，饱和度 {sat}（与生成的调整图层相同，只作用于杂色位置），用吸管确认范围只覆盖杂色",
                    "小幅" if sat > -40 else "中等", params=(("饱和度", float(sat)),), layer=spec),
-        Adjustment("可选颜色", f"（替代做法，与上一条二选一）颜色选“{ps}”，减少该颜色自身的成分（方法“相对”，起步 10%）", "轻微"),
+        Adjustment("可选颜色", f"（替代做法，与“色相/饱和度”那一条二选一）颜色选“{ps}”，减少该颜色自身的成分（方法“相对”，起步 10%）", "轻微"),
     ]
     if skin:
         out.append(

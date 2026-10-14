@@ -170,12 +170,19 @@ function readColorSamplers() {
   const n = list ? list.length : 0;
   if (n < 2) throw new Error("请先用「颜色取样器工具」（吸管工具组里，快捷键 Shift+I 切换）在画面上点至少两个点。");
   const out = [];
+  const skipped = [];
   for (let i = 0; i < n; i++) {
-    const s = list[i];
-    const lab = s.color.lab;
-    const pos = s.position || {};
+    let lab = null;
+    try { lab = list[i].color && list[i].color.lab; } catch (_) { lab = null; }
+    // 取样点在画布外（例如裁剪后）时读不到颜色：跳过并说明
+    if (!lab || ![lab.l, lab.a, lab.b].every((v) => Number.isFinite(v))) { skipped.push(i + 1); continue; }
+    const pos = list[i].position || {};
     out.push({ name: `取样点 ${i + 1}`, lab: [lab.l, lab.a, lab.b], x: Math.round(pos.x || 0), y: Math.round(pos.y || 0) });
   }
+  if (out.length < 2) {
+    throw new Error(`能读到颜色的取样点不足两个${skipped.length ? `（取样点 ${skipped.join("、")} 读不到颜色，可能在画布外）` : ""}。`);
+  }
+  out.skipped = skipped;
   return out;
 }
 
@@ -304,6 +311,16 @@ async function groupLayers(doc, layerIds, name) {
   if (!layers.length) return null;
   const g = await doc.createLayerGroup({ name, fromLayers: layers });
   return g ? g.id : null;
+}
+
+// 把图层（或组）从所在的组里挪出来，放到它最外层祖先的上方。UXP 的 Layer.move + ElementPlacement。
+async function liftOutOfGroups(doc, layerId) {
+  const layer = findLayer(doc, layerId);
+  if (!layer || !layer.parent) return;
+  let outer = layer.parent;
+  while (outer.parent) outer = outer.parent;
+  const before = (constants && constants.ElementPlacement && constants.ElementPlacement.PLACEBEFORE) || "placeBefore";
+  await layer.move(outer, before);
 }
 
 function collect(layers, out = []) {
@@ -474,7 +491,7 @@ async function selectLayer(id) {
 }
 
 module.exports = {
-  selectLayer, selectTopLayer, withoutSelection, findLayer, findDocument, isCancel, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
+  selectLayer, selectTopLayer, withoutSelection, liftOutOfGroups, findLayer, findDocument, isCancel, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
   constants, inspectTarget, historyStateId, readPixels, readSelectionPixels, readColorSamplers, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,
   _descriptors: { hueSatDescriptor, colorBalanceDescriptor, vibranceDescriptor, curvesDescriptor, selectiveColorDescriptor },

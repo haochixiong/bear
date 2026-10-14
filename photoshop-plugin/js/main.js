@@ -23,8 +23,12 @@ const state = {
 // 用户的选择（页面、分析对象、风格、肤色风格、抠皮肤方式、部位、统一色）在面板重开 / PS 重启后保留
 const PREF_KEY = "colordoctor.prefs";
 const prefs = (() => {
-  try { return JSON.parse(localStorage.getItem(PREF_KEY) || "{}") || {}; } catch (_) { return {}; }
+  try {
+    const v = JSON.parse(localStorage.getItem(PREF_KEY) || "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};  // 存坏了（数字、数组）就当没有
+  } catch (_) { return {}; }
 })();
+const hasOwn = (obj, k) => typeof k === "string" && Object.prototype.hasOwnProperty.call(obj, k);
 function savePref(k, v) {
   prefs[k] = v;
   try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) { /* 存不了就算了 */ }
@@ -33,7 +37,8 @@ function savePref(k, v) {
 function remember(id) {
   const el = document.getElementById(id);
   if (!el) return;
-  if (prefs[id] != null && [...el.options].some((o) => o.value === prefs[id])) el.value = prefs[id];
+  const opts = Array.from(el.querySelectorAll("option"));
+  if (prefs[id] != null && opts.some((o) => o.value === prefs[id])) el.value = prefs[id];
   el.addEventListener("change", () => savePref(id, el.value));
 }
 
@@ -105,6 +110,7 @@ function renderNav() {
   $("subs").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
     if (state.busy) return;
     state.sub = b.dataset.sub;
+    savePref("cat", state.cat);
     savePref("sub", state.sub);
     renderNav();
   }));
@@ -164,7 +170,12 @@ function renderControls() {
 function refreshRefDocs() {
   const sel = $("refDoc");
   if (!sel) return;
-  const keep = sel.value;
+  // 用户的选择单独记下：列表每次重建（换页、服务后启动、文档开关）都按它恢复，而不是跳回第一项
+  if (!sel.dataset.bound) {
+    sel.dataset.bound = "1";
+    sel.addEventListener("change", () => { state.refChoice = sel.value; });
+  }
+  const keep = state.refChoice || sel.value;
   const active = app.activeDocument;
   const docs = app.documents.filter((d) => !active || d.id !== active.id);
   const file = state.refFile ? `<option value="file">文件：${esc(state.refFile.name)}</option>` : "";
@@ -188,11 +199,12 @@ async function chooseRefFile() {
   setBusy(true, `正在读取参考图「${file.name}」…`);
   try {
     const data = await file.read({ format: uxp.storage.formats.binary });
+    if (data.byteLength > 380 * 1024 * 1024) throw new Error("参考图文件太大（超过 380 MB），请另存为较小的 JPG / TIFF 再选。");
     const res = await bridge.uploadReferenceFile(file.name, data);  // 先读一次：格式不对马上提示
     state.refFile = { name: file.name, data };
     setBusy(false);
+    state.refChoice = "file";
     refreshRefDocs();
-    $("refDoc").value = "file";
     $("status").className = "status ok";
     $("status").textContent = `已选参考图「${file.name}」（${res.width}×${res.height}）${(res.notes || []).length ? "：" + res.notes[0] : ""}`;
   } catch (e) {
@@ -319,7 +331,7 @@ async function readSamplers() {
     setBusy(false);
     if (state.sub === sub) renderResult();
     $("status").className = "status ok";
-    $("status").textContent = res.summary;
+    $("status").textContent = res.summary + ((pts.skipped || []).length ? `（取样点 ${pts.skipped.join("、")} 读不到颜色，已跳过）` : "");
   } catch (err) {
     setBusy(false);
     statusError(err);
@@ -366,7 +378,7 @@ function updateButtons() {
   } else {
     $("generateAll").textContent = "一键生成全部（带蒙版）";
   }
-  document.querySelectorAll("[data-make],[data-make-all],[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc; });
+  document.querySelectorAll("[data-make],[data-make-all],[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc || b.dataset.done === "1"; });
   const acrOk = !busy && hasAcrSource();
   $("acrExport").disabled = !acrOk;
   $("acrLayer").disabled = !acrOk;
@@ -436,7 +448,11 @@ function renderResult() {
       ${(f.evidence || []).slice(0, 3).map((x) => `<div class="line">证据：${esc(x)}</div>`).join("")}
       ${(f.causes || []).slice(0, 2).map((x) => `<div class="line">可能原因：${esc(x)}</div>`).join("")}
       ${own.length ? `<div class="strong">修正${own.length > 1 ? `（${own.length} 层）` : ""}</div>${own.map(layerHtml).join("")}
-        ${own.length > 1 ? `<div class="row"><button class="small make" data-make-all="${own.map((ly) => esc(ly.id)).join(",")}">生成这 ${own.length} 层</button></div>` : ""}` : ""}
+        ${own.length > 1 ? (() => {
+          const left = own.filter((ly) => !e.made.has(ly.id)).length;
+          const label = left === 0 ? `这 ${own.length} 层都已生成 ✓` : (left < own.length ? `生成其余 ${left} 层` : `生成这 ${own.length} 层`);
+          return `<div class="row"><button class="small make" data-make-all="${own.map((ly) => esc(ly.id)).join(",")}" data-finding="${i}"${left === 0 ? " data-done=\"1\"" : ""}>${label}</button></div>`;
+        })() : ""}` : ""}
       ${(own.length ? tips : (f.adjustments || [])).slice(0, 3).map((x) => `<div class="line">${own.length ? "另外：" : "调整："}${esc(x.tool)} · ${esc(x.instruction)}</div>`).join("")}
       <div class="muted">置信度 ${Math.round((f.confidence || 0) * 100)}%${(f.notes || []).length ? " · 注意：" + esc(f.notes[0]) : ""}</div>
     </div>`);
@@ -451,7 +467,9 @@ function renderResult() {
   }
   $("results").innerHTML = cards.join("");
   $("results").querySelectorAll("[data-make]").forEach((b) => b.addEventListener("click", () => generate([b.dataset.make], true)));
-  $("results").querySelectorAll("[data-make-all]").forEach((b) => b.addEventListener("click", () => generate(b.dataset.makeAll.split(","), true)));
+  // 卡片的“生成这 N 层”：只补还没生成的（单层按钮才是“再生成一次”）
+  $("results").querySelectorAll("[data-make-all]").forEach((b) => b.addEventListener("click",
+    () => generate(b.dataset.makeAll.split(","), false, Number(b.dataset.finding))));
   $("results").querySelectorAll("[data-sel]").forEach((b) => b.addEventListener("click", () => makeSelection(b.dataset.sel)));
   renderAcr(r.acr_params || {}, r.acr_calibrated);
   updateButtons();
@@ -509,7 +527,7 @@ function markMade(e, ids, text) {
   a.justMadeText = text;
 }
 
-async function generate(ids, single) {
+async function generate(ids, single, findingIndex) {
   const e = cur();
   if (!e || !e.analyzed || state.busy) return;
   const r = e.result;
@@ -538,6 +556,9 @@ async function generate(ids, single) {
   const todo = single ? ids : ids.filter((id) => !e.made.has(id));
   if (!todo.length) { statusError(new Error("全部已经生成过了。如需重新生成，请点各层的「再生成一次」。")); updateButtons(); return; }
   const specs = r.plan.layers.filter((l) => todo.includes(l.id));
+  // 一张卡片的几层：组名用这个问题的名字，几次生成的组在图层面板里分得清
+  const f = Number.isInteger(findingIndex) ? (r.findings || [])[findingIndex] : null;
+  const groupName = f ? `ColorDoctor · ${String(f.problem).replace(/[：:（(].*$/, "").slice(0, 24)}` : r.plan.group_name;
   setBusy(true, "正在生成调整图层…");
   const madeIds = {};
   try {
@@ -559,12 +580,15 @@ async function generate(ids, single) {
           made.push(id);
           madeIds[spec.id] = [id];
         }
-        if (made.length > 1) await ps.groupLayers(d, made, r.plan.group_name);
+        let top = made.length ? made[made.length - 1] : null;
+        if (made.length > 1) top = (await ps.groupLayers(d, made, groupName)) || top;
+        // 合并画面：最顶层可能是上次生成的组，新图层会被建进那个组里 —— 挪到组外的最顶层
+        if (a.layerId == null && top != null) await ps.liftOutOfGroups(d, top);
       });
     }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
     e.madeLayers = { ...(e.madeLayers || {}), ...madeIds };
     setBusy(false);
-    markMade(e, specs.map((s) => s.id), `已生成 ${specs.length} 个调整图层${specs.length > 1 ? `，放在「${r.plan.group_name}」组里` : ""}（Ctrl+Z 可一次撤销）`);
+    markMade(e, specs.map((s) => s.id), `已生成 ${specs.length} 个调整图层${specs.length > 1 ? `，放在「${groupName}」组里` : ""}（Ctrl+Z 可一次撤销）`);
     if (state.sub === r.sub) renderResult();
     $("status").className = "status ok";
     $("status").textContent = a.justMadeText;
@@ -784,7 +808,7 @@ async function init() {
     renderNav();
   }));
   // 恢复上次的大类 / 子页 / 分析对象
-  if (SUBS[prefs.cat]) {
+  if (hasOwn(SUBS, prefs.cat)) {
     state.cat = prefs.cat;
     state.sub = SUBS[state.cat].some(([k]) => k === prefs.sub) ? prefs.sub : SUBS[state.cat][0][0];
   }

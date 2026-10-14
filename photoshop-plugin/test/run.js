@@ -237,6 +237,22 @@ function dirtySky(w, h) {
   doc.colorSamplers = [];
   assert.throws(() => ps.readColorSamplers(), /颜色取样器/);
 
+  // 5l. 取样点读不到颜色（画布外）时跳过；能读到的不足两个时给出中文原因
+  doc.colorSamplers = [{ color: {}, position: {} }, { color: { lab: { l: 60, a: 10, b: 10 } } }, { color: { lab: { l: 62, a: 12, b: 15 } } }];
+  const pts2 = ps.readColorSamplers();
+  assert.strictEqual(pts2.length, 2);
+  assert.deepStrictEqual(pts2.skipped, [1]);
+  doc.colorSamplers = [{ color: {} }, { color: { lab: { l: 60, a: 10, b: 10 } } }];
+  assert.throws(() => ps.readColorSamplers(), /不足两个/);
+  doc.colorSamplers = [];
+  // 5m. 合并画面：新建的组在上次的组里面时挪到最外层
+  const moved = [];
+  const outer = { id: 500, parent: null };
+  const innerGroup = { id: 501, parent: outer, move: async (rel, where) => moved.push([rel.id, where]) };
+  outer.layers = [innerGroup];
+  await ps.liftOutOfGroups({ layers: [outer] }, 501);
+  assert.deepStrictEqual(moved, [[500, "placeBefore"]]);
+
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
   fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };

@@ -322,7 +322,7 @@ def family_unity(
         c0 = ac.lab_hue_to_hsb_hue(cur[2])
         for params, words in nl.mixer_rows_to_huesat(
                 [(family, c0, float(cs.hue_diff(c0, ac.lab_hue_to_hsb_hue(tl[2]))), 0, ls)]):
-            adjs.append(nl.adjustment("hueSaturation", params, f"往目标{family}靠：{words}（PS 做法，与上一条二选一）",
+            adjs.append(nl.adjustment("hueSaturation", params, f"往目标{family}靠：{words}（PS 做法，与“Camera Raw 混色器”那一条二选一）",
                                       "global", f"{family}往目标靠 · 色相/饱和度"))
     adjs += _unity_native(family, mean, patches[:8], rows)
     if not adjs:
