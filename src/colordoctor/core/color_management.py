@@ -103,23 +103,77 @@ def load_jpeg(path: str | os.PathLike) -> SourceImage:
     return _decode_jpeg(lambda: Image.open(path), path.name)
 
 
-def _decode_jpeg(opener, name: str) -> SourceImage:
+# 除 JPG 外还能读的普通图片（参考图常是 PNG / TIFF / WebP）
+OTHER_EXTS = {".png", ".tif", ".tiff", ".webp"}
+IMAGE_FORMATS = ("JPEG", "PNG", "TIFF", "WEBP")
+
+
+def load_picture(path: str | os.PathLike) -> SourceImage:
+    """JPG / PNG / TIFF / WebP（8 位或 16 位；16 位按 8 位分析）。"""
+    path = Path(path)
+    if not path.exists():
+        raise ImageLoadError(f"找不到文件：{path}")
+    if path.stat().st_size == 0:
+        raise ImageLoadError("文件为空，无法读取")
+    return _decode_jpeg(lambda: Image.open(path), path.name, IMAGE_FORMATS)
+
+
+def load_image_bytes(data: bytes, name: str, use_raw_preview: bool = False) -> SourceImage:
+    """从文件内容读取（PS 插件选的参考图）。name 只用来判断格式和显示。"""
+    if not data:
+        raise ImageLoadError("文件为空，无法读取")
+    suffix = Path(name).suffix.lower()
+    if suffix in RAW_EXTS:
+        import tempfile
+
+        # rawpy 只能从文件读：写到临时文件，读完删除
+        fd, tmp = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            src = load_raw(tmp, use_raw_preview)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return SourceImage(src.pixels, dataclasses.replace(src.context, device=name), src.original_size)
+    return _decode_jpeg(lambda: Image.open(io.BytesIO(data)), name, IMAGE_FORMATS)
+
+
+def _to_8bit(im: Image.Image) -> Image.Image:
+    """16 / 32 位灰度（PNG / TIFF 常见）转 8 位；Pillow 的 convert("RGB") 会把它们直接截断成白色。"""
+    if im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
+        a = np.asarray(im).astype(np.float64)
+        top = 65535.0 if im.mode != "I" or a.max() > 255 else 255.0
+        return Image.fromarray(np.clip(np.rint(a / top * 255.0), 0, 255).astype(np.uint8), mode="L")
+    if im.mode == "F":
+        a = np.asarray(im, dtype=np.float64)
+        return Image.fromarray(np.clip(np.rint(a * 255.0), 0, 255).astype(np.uint8), mode="L")
+    if im.mode in ("RGBA", "LA", "P", "PA", "1"):
+        return im.convert("RGB")  # 参考图只看颜色：透明部分按原色处理
+    return im
+
+
+def _decode_jpeg(opener, name: str, formats: tuple[str, ...] = ("JPEG",)) -> SourceImage:
+    kinds = "/".join("JPG" if f == "JPEG" else f for f in formats)
     try:
         with opener() as im:
-            if im.format != "JPEG":
-                raise ImageLoadError(f"只支持 JPG 图片（当前为 {im.format or '未知格式'}）")
+            if im.format not in formats:
+                raise ImageLoadError(f"只支持 {kinds} 图片（当前为 {im.format or '未知格式'}）")
             w, h = im.size
             if w * h > MAX_PIXELS:
                 raise ImageLoadError(f"图片过大（{w}×{h}），超过 {MAX_PIXELS // 1_000_000} MP 上限")
             icc = im.info.get("icc_profile")
             im.load()
             im = ImageOps.exif_transpose(im)
+            im = _to_8bit(im)
     except ImageLoadError:
         raise
     except UnidentifiedImageError as e:
-        raise ImageLoadError("无法识别的图片文件（不是有效的 JPG）") from e
+        raise ImageLoadError(f"无法识别的图片文件（不是有效的 {kinds}）") from e
     except (OSError, SyntaxError, ValueError) as e:
-        raise ImageLoadError(f"JPG 文件已损坏或不完整：{e}") from e
+        raise ImageLoadError(f"图片文件已损坏、不完整或格式不支持（例如 16 位彩色 TIFF，请另存为 8 位）：{e}") from e
 
     warnings: list[str] = []
     mode = im.mode
@@ -220,8 +274,12 @@ def load_raw(path: str | os.PathLike, use_preview: bool = False) -> SourceImage:
 
 
 def load_image(path: str | os.PathLike, use_raw_preview: bool = False) -> SourceImage:
-    """按扩展名选择：RAW 用 load_raw，其余按 JPG 读取。"""
-    return load_raw(path, use_raw_preview) if is_raw(path) else load_jpeg(path)
+    """按扩展名选择：RAW 用 load_raw，PNG / TIFF / WebP 用 load_picture，其余按 JPG 读取。"""
+    if is_raw(path):
+        return load_raw(path, use_raw_preview)
+    if Path(path).suffix.lower() in OTHER_EXTS:
+        return load_picture(path)
+    return load_jpeg(path)
 
 
 def screen_pixels_to_srgb(

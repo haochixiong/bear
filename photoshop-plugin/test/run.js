@@ -217,6 +217,9 @@ function dirtySky(w, h) {
   }), /boom/);
   assert.deepStrictEqual(calls.batchPlay.map((c) => c._obj), ["duplicate", "set", "set", "delete"]);  // 失败也恢复
 
+  // 5j. 直接选参考图文件：不是图片时给出中文原因
+  await assert.rejects(bridge.uploadReferenceFile("参考.jpg", new Uint8Array([1, 2, 3])), (e) => e.status === 400 && /图片/.test(e.message));
+
   // 6. 校准用的色卡文档；Camera Raw 描述符未录制时应明确报错
   fakePs.app.createDocument = async (o) => ({ id: 2, ...o, createPixelLayer: async (lo) => ({ id: 55, ...lo }) });
   fakePs.imaging.putPixels = async (o) => { calls.putPixels = o; };

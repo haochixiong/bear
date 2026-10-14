@@ -64,6 +64,16 @@ async function uploadReference(px) {
   return (await res.json()).ref;
 }
 
+// 参考图文件本身（不用在 PS 里打开）：服务端解码 JPG / PNG / TIFF / WebP / 相机 RAW
+async function uploadReferenceFile(name, data) {
+  const res = await call("/reference-file", {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent(name) },
+    body: data,
+  });
+  return res.json();
+}
+
 // 返回整幅文档大小的蒙版：分析范围（bounds）以外为 0，写到文档 (0, 0) 即可
 async function fetchMask(session, layerId, bounds, docWidth, docHeight) {
   const w = bounds.right - bounds.left;
@@ -119,6 +129,6 @@ async function calibrationFit(acrVersion) {
 }
 
 module.exports = {
-  BridgeError, health, options, analyze, uploadReference, fetchMask, acrPreset,
+  BridgeError, health, options, analyze, uploadReference, uploadReferenceFile, fetchMask, acrPreset,
   calibrationChart, calibrationPlan, calibrationSample, calibrationFit,
 };

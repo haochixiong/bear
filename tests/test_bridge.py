@@ -405,3 +405,52 @@ def test_layer_masks_are_zero_where_layer_is_transparent():
         data, w, h = bs.mask_bytes(sess, ly["id"], 300, 200)
         m = np.frombuffer(data, np.uint8).reshape(h, w)
         assert m[:, :95].max() == 0, ly["id"]
+
+
+def _encode(img, fmt, **kw):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(img).save(buf, format=fmt, **kw)  # 测试里生成图片文件内容
+    return buf.getvalue()
+
+
+def test_reference_from_file_formats_and_errors():
+    img = noisy(flat(BLUE), 2)
+    img[:, :, 0] = np.linspace(20, 200, img.shape[1]).astype(np.uint8)  # 有颜色变化（JPG 会抹平细小噪声）
+    refs = bs.Store()
+    for fmt, name in (("JPEG", "ref.jpg"), ("PNG", "ref.png"), ("TIFF", "ref.tif"), ("WEBP", "ref.webp")):
+        res = bs.reference_from_file(_encode(img, fmt), name, refs)
+        assert res["width"] == img.shape[1] and res["name"] == name
+        assert refs.get(res["ref"]).shape == img.shape
+    # 16 位灰度 PNG：不能被截断成全白
+    g16 = (np.linspace(0, 65535, 64 * 48).reshape(48, 64)).astype(np.uint16)
+    res = bs.reference_from_file(_encode(g16, "PNG"), "g16.png", refs)
+    ref = refs.get(res["ref"])
+    assert ref[0, 0, 0] < 10 and ref[-1, -1, 0] > 245
+    # 大图按长边 2048 缩小保存
+    big = np.random.default_rng(0).integers(0, 256, (1200, 4800, 3)).astype(np.uint8)
+    res = bs.reference_from_file(_encode(big, "PNG"), "big.png", refs)
+    assert res["width"] == 4800 and refs.get(res["ref"]).shape[1] == 2048
+    with pytest.raises(ValueError):
+        bs.reference_from_file(b"not an image", "x.jpg", refs)
+    with pytest.raises(ValueError):
+        bs.reference_from_file(_encode(img, "BMP"), "x.bmp", refs)
+    # 选文件得到的参考图能直接用于仿色
+    rep = bs.analyze_request(noisy(flat(BLUE), 2), "reference", {"ref": bs.reference_from_file(_encode(img, "PNG"), "r.png", refs)["ref"]},
+                             bs.Store(), refs, layer_kind="pixel")
+    assert rep["summary"]
+
+
+def test_reference_file_route(bridge):
+    img = noisy(flat(BLUE), 2)
+    img[:, :, 0] = np.linspace(20, 200, img.shape[1]).astype(np.uint8)
+    code, _h, body = _req(bridge + "/reference-file", data=_encode(img, "PNG"),
+                      headers={"X-File-Name": urllib.parse.quote("参考.png")}, method="POST")
+    assert code == 200
+    j = json.loads(body)
+    assert j["ref"] and j["name"] == "参考.png" and j["width"] == img.shape[1]
+    code, _h, body = _req(bridge + "/reference-file", data=b"garbage", headers={"X-File-Name": "a.jpg"}, method="POST")
+    assert code == 400 and "图片" in json.loads(body)["error"]

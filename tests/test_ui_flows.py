@@ -140,3 +140,30 @@ def test_mask_editor_brackets_change_brush_and_small_mask_keeps_dialog_open(qtbo
     dlg.accept()
     assert warned and dlg.isVisible()  # 不关闭，修改还在
     assert dlg.result() == 0
+
+
+def test_user_choices_are_restored_after_restart(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "keep.ini"), QSettings.Format.IniFormat)
+    w = MainWindow(settings=settings)
+    qtbot.addWidget(w)
+    w.part_box.setCurrentText("身体")
+    w.lasso_check.setChecked(True)
+    w.scan_check.setChecked(True)
+    w.skin_compare_check.setChecked(False)
+    w.details_check.setChecked(True)
+    w.style_box.setCurrentIndex(w.style_box.findData("teal_orange"))
+    w.family_box.setCurrentIndex(w.family_box.findData("绿"))
+    w.close()
+    settings.sync()
+    w2 = MainWindow(settings=QSettings(str(tmp_path / "keep.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(w2)
+    assert w2.part_box.currentText() == "身体" and w2.session.part == "身体"
+    assert w2.lasso_check.isChecked() and w2.scan_check.isChecked() and w2.session.scan_whole
+    assert not w2.skin_compare_check.isChecked() and w2.details_check.isChecked()
+    assert w2.style_box.currentData() == "teal_orange" and w2.session.style_key == "teal_orange"
+    assert w2.family_box.currentData() == "绿" and w2.session.family == "绿"
+    w2.style_box.setCurrentIndex(0)  # “（不比较风格）”也要能存回去
+    w2.close()
+    w3 = MainWindow(settings=QSettings(str(tmp_path / "keep.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(w3)
+    assert w3.style_box.currentData() is None

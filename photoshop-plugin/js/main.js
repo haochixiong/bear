@@ -17,7 +17,25 @@ const state = {
   // 每个子页各保留自己最近一次的结果：切到别的页再切回来还在，不会把脏色的结果显示在皮肤页下
   // bySub[sub] = { result, analyzed, made: Set<图层方案 id>, stale: 已提醒过的历史状态 }
   bySub: {},
+  refFile: null,  // 直接选的参考图文件 {name, data}
 };
+
+// 用户的选择（页面、分析对象、风格、肤色风格、抠皮肤方式、部位、统一色）在面板重开 / PS 重启后保留
+const PREF_KEY = "colordoctor.prefs";
+const prefs = (() => {
+  try { return JSON.parse(localStorage.getItem(PREF_KEY) || "{}") || {}; } catch (_) { return {}; }
+})();
+function savePref(k, v) {
+  prefs[k] = v;
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) { /* 存不了就算了 */ }
+}
+// 控件建好后：恢复上次的值，并在改动时记下
+function remember(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (prefs[id] != null && [...el.options].some((o) => o.value === prefs[id])) el.value = prefs[id];
+  el.addEventListener("change", () => savePref(id, el.value));
+}
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -87,6 +105,7 @@ function renderNav() {
   $("subs").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
     if (state.busy) return;
     state.sub = b.dataset.sub;
+    savePref("sub", state.sub);
     renderNav();
   }));
   renderControls();
@@ -107,9 +126,11 @@ function renderControls() {
     o.styles.forEach((s) => (groups[s.category] = groups[s.category] || []).push(s));
     c.innerHTML = `<div class="row"><label>目标风格</label><select id="style">${Object.entries(groups).map(([g, ss]) =>
       `<optgroup label="${esc(g)}">${ss.map((s) => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("")}</optgroup>`).join("")}</select></div>`;
+    remember("style");
   } else if (state.sub === "ratio") {
     c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>
       <div class="muted">看主色 / 辅色 / 点缀色的面积是否接近 6:3:1；选一个色系时还会生成把杂色往它统一的调整图层。</div>`;
+    remember("family");
   } else if (state.sub === "skin") {
     c.innerHTML = `<div class="row"><label>抠皮肤</label><select id="seg"><option value="ai">AI 人像分割（显卡）</option><option value="color">肤色规则（不分脸和身体）</option></select></div>
       <div class="row"><label>肤色风格</label>${select("preset", o.presets)}</div>
@@ -119,6 +140,7 @@ function renderControls() {
       if (color) $("part").value = "";
       $("part").disabled = color;  // 肤色规则分不出脸和身体
     };
+    ["seg", "preset", "part"].forEach(remember);
     $("seg").addEventListener("change", syncPart);
     syncPart();
   } else if (MODE_OF[state.sub] === "patch") {
@@ -127,7 +149,9 @@ function renderControls() {
     $("fg").addEventListener("click", readForeground);
   } else if (state.sub === "reference") {
     c.innerHTML = `<div class="row"><label>参考图</label><select id="refDoc"></select></div>
-      <div class="muted">参考图要先在 PS 里打开（作为另一个文档）；当前文档是“要调的图”。</div>`;
+      <div class="row"><button id="refFile">选择文件…</button></div>
+      <div class="muted">直接选参考图文件（JPG / PNG / TIFF / WebP / 相机 RAW），或者在 PS 里另外打开它后从上面的列表选（PSD 请用这种方式）。当前文档是“要调的图”。</div>`;
+    $("refFile").addEventListener("click", chooseRefFile);
     refreshRefDocs();
   } else {
     c.innerHTML = "";
@@ -141,9 +165,38 @@ function refreshRefDocs() {
   const keep = sel.value;
   const active = app.activeDocument;
   const docs = app.documents.filter((d) => !active || d.id !== active.id);
-  sel.innerHTML = docs.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join("")
-    || '<option value="">（先在 PS 里打开参考图）</option>';
-  if (docs.some((d) => String(d.id) === keep)) sel.value = keep;
+  const file = state.refFile ? `<option value="file">文件：${esc(state.refFile.name)}</option>` : "";
+  sel.innerHTML = file + docs.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join("")
+    || '<option value="">（选择文件，或先在 PS 里打开参考图）</option>';
+  if (keep === "file" && state.refFile) sel.value = "file";
+  else if (docs.some((d) => String(d.id) === keep)) sel.value = keep;
+}
+
+const REF_TYPES = ["jpg", "jpeg", "png", "tif", "tiff", "webp", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2",
+  "raf", "orf", "rw2", "dng", "pef", "srw", "3fr", "iiq", "erf", "kdc", "mos", "mrw", "x3f"];
+
+// 直接选参考图文件：内容交给本机服务解码，不在 PS 里打开
+async function chooseRefFile() {
+  if (state.busy) return;
+  let file;
+  try {
+    file = await uxp.storage.localFileSystem.getFileForOpening({ types: REF_TYPES });
+  } catch (e) { statusError(e); return; }
+  if (!file) return;
+  setBusy(true, `正在读取参考图「${file.name}」…`);
+  try {
+    const data = await file.read({ format: uxp.storage.formats.binary });
+    const res = await bridge.uploadReferenceFile(file.name, data);  // 先读一次：格式不对马上提示
+    state.refFile = { name: file.name, data };
+    setBusy(false);
+    refreshRefDocs();
+    $("refDoc").value = "file";
+    $("status").className = "status ok";
+    $("status").textContent = `已选参考图「${file.name}」（${res.width}×${res.height}）${(res.notes || []).length ? "：" + res.notes[0] : ""}`;
+  } catch (e) {
+    setBusy(false);
+    statusError(e);
+  }
 }
 
 function query(sub) {
@@ -180,17 +233,25 @@ async function runAnalyze() {
     return;
   }
   let refDoc = null;
+  let refFile = null;
   if (mode === "reference") {
-    refDoc = app.documents.find((d) => String(d.id) === ($("refDoc") || {}).value);
-    if (!refDoc) { statusError(new Error("请先在 PS 里打开参考图，并在上面的「参考图」里选择它。")); return; }
-    if (refDoc.id === info.doc.id) { statusError(new Error("参考图不能是当前文档：请切到要调的图，再选参考图。")); return; }
+    const v = ($("refDoc") || {}).value;
+    if (v === "file" && state.refFile) refFile = state.refFile;
+    else {
+      refDoc = app.documents.find((d) => String(d.id) === v);
+      if (!refDoc) { statusError(new Error("请先选择参考图：点「选择文件…」，或在 PS 里打开参考图后从列表里选。")); return; }
+      if (refDoc.id === info.doc.id) { statusError(new Error("参考图不能是当前文档：请切到要调的图，再选参考图。")); return; }
+    }
   }
   setBusy(true, mode === "patch" ? "正在读取…" : "正在分析…");
   // 在读像素之前记下历史状态：分析过程中如果有改动，会被正确判为“可能过期”
   const historyBefore = ps.historyStateId(info.doc);
   try {
     const px = await ps.readModal(() => (mode === "patch" ? ps.readSelectionPixels(info) : ps.readPixels(info)));
-    if (mode === "reference") {
+    if (refFile) {
+      // 每次分析都重新交给服务（服务只暂存最近几张参考图）
+      q.ref = (await bridge.uploadReferenceFile(refFile.name, refFile.data)).ref;
+    } else if (mode === "reference") {
       const refInfo = { ok: true, doc: refDoc, layer: null, bounds: { left: 0, top: 0, right: refDoc.width, bottom: refDoc.height } };
       const refPx = await ps.readModal(() => ps.readPixels(refInfo));
       q.ref = await bridge.uploadReference(refPx);
@@ -206,7 +267,7 @@ async function runAnalyze() {
         docId: info.doc.id, docName: info.doc.name, layerId: info.layer ? info.layer.id : null,
         layerName: info.layer ? info.label : "合并可见图层", okHistory: new Set([historyBefore]), bounds: sb,
         docWidth: info.doc.width, docHeight: info.doc.height, depth: String(info.doc.bitsPerChannel || ""),
-        refName: refDoc ? refDoc.name : null,
+        refName: refFile ? refFile.name : (refDoc ? refDoc.name : null),
       },
     };
   } catch (e) {
@@ -666,9 +727,17 @@ async function init() {
     if (state.busy) return;
     state.cat = b.dataset.cat;
     state.sub = SUBS[state.cat][0][0];
+    savePref("cat", state.cat);
+    savePref("sub", state.sub);
     renderNav();
   }));
-  $("target").addEventListener("change", refreshTarget);
+  // 恢复上次的大类 / 子页 / 分析对象
+  if (SUBS[prefs.cat]) {
+    state.cat = prefs.cat;
+    state.sub = SUBS[state.cat].some(([k]) => k === prefs.sub) ? prefs.sub : SUBS[state.cat][0][0];
+  }
+  if (prefs.target === "layer" || prefs.target === "merged") $("target").value = prefs.target;
+  $("target").addEventListener("change", () => { savePref("target", $("target").value); refreshTarget(); });
   $("analyze").addEventListener("click", runAnalyze);
   $("generateAll").addEventListener("click", () => {
     const e = cur();

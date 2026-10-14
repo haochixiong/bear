@@ -56,7 +56,7 @@ python -m colordoctor
 
 - **实时取色**：鼠标在 PS 画面上移动，工具实时显示颜色；按 **Ctrl+Alt+Shift+Z** 锁定当前读数。
 - **框选屏幕**：按 **Ctrl+Alt+Shift+X**，先冻结所有屏幕，然后单击取点或拖动框选；人像肤色模式下还可以用套索圈选。
-- **打开 JPG**：直接读取文件，最精确。
+- **打开图片**：直接读取 JPG / PNG / TIFF / WebP / 相机 RAW 文件，最精确。
 
 ### 人像肤色：精准选中皮肤
 
@@ -219,7 +219,7 @@ colordoctor styles       （列出整图风格）
 | Ctrl+Alt+Shift+Z | 锁定实时取色读数（全局） |
 | Ctrl+Alt+Shift+X | 冻结屏幕并框选（全局） |
 | `[` / `]` | 在框选层中切换取样大小 |
-| Ctrl+O | 打开 JPG |
+| Ctrl+O | 打开图片 |
 | Esc | 取消框选 |
 | Ctrl+Z | 蒙版编辑中撤销 |
 
@@ -238,7 +238,7 @@ colordoctor styles       （列出整图风格）
 
 ## 测试
 
-`python -m pytest -q`，目前共 454 个测试（其中 1 个需要真实模型，默认跳过；插件 JS 测试需要 Node.js），覆盖以下方面：
+`python -m pytest -q`，目前共 457 个测试（其中 1 个需要真实模型，默认跳过；插件 JS 测试需要 Node.js），覆盖以下方面：
 
 - **色彩换算**：使用 ΔE00 的 Sharma 标准数据校验。
 - **色彩管理**：sRGB、无 ICC、Adobe RGB、P3 显示器。
@@ -252,7 +252,8 @@ colordoctor styles       （列出整图风格）
 - 肤色风格区间、风格模板和诊断阈值都是经验值，**尚未用真实样片校准**。
 - 默认的抠皮肤基于颜色规则：与皮肤颜色非常接近的木头、沙发等可能被误选，可以用“编辑皮肤蒙版”修正。装了 `onnxruntime` 和模型时可以勾选“AI 抠皮肤”（MediaPipe 多类人像分割），脸和身体分开，误选少很多。
 - Windows 专属部分只能在 Windows 上验证，见 `docs/WINDOWS_HANDOFF.md`：显示器 ICC、全局快捷键、多显示器，以及 `claude -p` / `codex exec` 的实际调用参数。
-- 文件只读 8 位 JPG 和相机 RAW（RAW 需要 `rawpy`）。RAW 由 LibRaw 解码，颜色与 ACR 的相机配置文件不同，数值只作参考；要与 ACR 一致，请在 PS 插件里分析。PNG / TIFF / PSD 请在 PS 里打开后用插件或屏幕取色分析。
+- 文件可读 JPG、PNG、TIFF、WebP（16 位按 8 位分析；16 位彩色 TIFF 需另存为 8 位）和相机 RAW（RAW 需要 `rawpy`）。RAW 由 LibRaw 解码，颜色与 ACR 的相机配置文件不同，数值只作参考；要与 ACR 一致，请在 PS 插件里分析。PSD 请在 PS 里打开后用插件或屏幕取色分析。
+- 界面上的选择（模式、取样大小、肤色目标、部位、套索、整图扫描、风格模板、统一色、置顶、窗口位置等）会自动保存，下次启动恢复。
 - “AI 点评”的 API Key 以明文保存在本机设置（Windows 注册表 `HKCU\Software\ColorDoctor`）里；介意的话留空，改用环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY`。
 
 ## 致谢

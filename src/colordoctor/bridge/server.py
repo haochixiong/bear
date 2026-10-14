@@ -18,6 +18,7 @@
   GET  /calibration/chart  色卡像素（RGB）；GET /calibration/plan 要测的 (通道, 滑块, 数值) 列表
   POST /calibration/sample?slider=base | ?channel=&slider=&value=  上传色卡像素（未调整 / 调整后）
   POST /calibration/fit  拟合并保存换算表
+  POST /reference-file（X-File-Name）  参考图文件本身（JPG / PNG / TIFF / WebP / RAW），返回 ref
 """
 
 from __future__ import annotations
@@ -122,6 +123,28 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
             raise ValueError("找不到参考图，请重新选择参考图")
         return analysis.compare_reference(prep.filled_for_statistics(), ref, ctx)
     raise ValueError(f"未知模式：{mode}")
+
+
+REF_SIDE = 2048  # 参考图按与插件读像素相同的长边缩小后保存（只用来统计颜色）
+
+
+def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
+    from PIL import Image
+
+    from colordoctor.core.color_management import ImageLoadError, load_image_bytes
+
+    try:
+        src = load_image_bytes(data, name)
+    except ImageLoadError as e:
+        raise ValueError(str(e)) from e
+    px = src.pixels
+    h, w = px.shape[:2]
+    if max(h, w) > REF_SIDE:
+        k = REF_SIDE / max(h, w)
+        px = np.asarray(Image.fromarray(np.ascontiguousarray(px)).resize((max(1, round(w * k)), max(1, round(h * k))), Image.BILINEAR))
+    prep = pixel_guard.prepare(px)
+    notes = [*src.context.warnings, *prep.notes]
+    return {"ref": refs.put(prep.filled_for_statistics()), "name": name, "width": int(w), "height": int(h), "notes": notes}
 
 
 def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, refs: Store,
@@ -398,6 +421,10 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/reference":
             prep = pixel_guard.prepare(self._pixels())
             return self._send(200, {"ref": self.refs.put(prep.filled_for_statistics()), "notes": list(prep.notes)})
+        if url.path == "/reference-file":
+            # 插件直接选的参考图文件（JPG / PNG / TIFF / WebP / 相机 RAW），不用先在 PS 里打开
+            name = _header_text(self.headers.get("X-File-Name", "")) or "参考图"
+            return self._send(200, reference_from_file(self._body(), name, self.refs))
         if url.path == "/calibration/sample":
             from colordoctor.core import acr_calibration as cal
 

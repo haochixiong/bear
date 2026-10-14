@@ -261,7 +261,8 @@ class MainWindow(QMainWindow):
         self.live_btn.toggled.connect(self.set_live)
         self.capture_btn = QPushButton("▭ 框选屏幕")
         self.capture_btn.clicked.connect(self.start_capture)
-        self.jpg_btn = QPushButton("打开 JPG / RAW")
+        self.jpg_btn = QPushButton("打开图片")
+        self.jpg_btn.setToolTip("JPG / PNG / TIFF / WebP / 相机 RAW（Ctrl+O，也可以把文件拖进窗口）")
         self.jpg_btn.clicked.connect(lambda: self.open_jpg())
         self.reselect_btn = QPushButton("在图片上重选")
         self.reselect_btn.setToolTip("在已打开的 JPG / RAW 上重新框选或取点")
@@ -475,12 +476,44 @@ class MainWindow(QMainWindow):
             self.preset_box.setCurrentIndex(idx)
         managed = str(self.settings.value("managed", "true")).lower() == "true"
         self.source_box.setCurrentIndex(0 if managed else 1)
+        # 其余界面选择：改动时立即保存，下次启动恢复
+        for w, key in ((self.top_check, "on_top"), (self.auto_mask_check, "auto_mask"), (self.lasso_check, "lasso"),
+                       (self.scan_check, "scan_whole"), (self.skin_compare_check, "skin_compare"),
+                       (self.details_check, "details"), (self.part_box, "part"), (self.style_box, "style"),
+                       (self.family_box, "family")):
+            self._persist(w, f"ui/{key}")
+        geo = self.settings.value("ui/geometry")
+        if geo:
+            self.restoreGeometry(geo)
+
+    def _persist(self, w, key: str):
+        """恢复一个控件上次的值，并在用户改动时立即保存（程序意外退出也不丢）。"""
+        v = self.settings.value(key)
+        if isinstance(w, QCheckBox):
+            if v is not None:
+                w.setChecked(str(v).lower() == "true")
+            w.toggled.connect(lambda on: self.settings.setValue(key, "true" if on else "false"))
+            return
+        # 下拉框：有数据的（风格、统一色）按数据保存，“（不比较风格）”这类空选项存 ""；只有文字的（部位）按文字保存
+        by_text = all(w.itemData(i) is None for i in range(w.count()))
+        if v is not None:
+            v = str(v)
+            idx = w.findText(v) if by_text else (0 if v == "" and w.itemData(0) is None else w.findData(v))
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+
+        def save(_i):
+            d = w.currentData()
+            self.settings.setValue(key, w.currentText() if by_text else ("" if d is None else str(d)))
+
+        w.currentIndexChanged.connect(save)
 
     def closeEvent(self, ev):
         self.settings.setValue("mode", self.session.mode)
         self.settings.setValue("radius", self.session.radius)
         self.settings.setValue("preset", self.session.preset_key if self.session.preset_key != "custom" else sp.DEFAULT_KEY)
         self.settings.setValue("managed", "true" if self._managed() else "false")
+        self.settings.setValue("ui/geometry", self.saveGeometry())
         self.live_timer.stop()
         self.hotkeys.unregister_all()
         super().closeEvent(ev)
@@ -774,8 +807,10 @@ class MainWindow(QMainWindow):
     def open_jpg(self, path: str | None = None):
         if path is None:
             raw = " ".join(f"*{e} *{e.upper()}" for e in sorted(RAW_EXTS))
-            path, _ = QFileDialog.getOpenFileName(self, "打开 JPG / RAW（只读取，不会修改原图）", "",
-                                                  f"图片 (*.jpg *.jpeg *.JPG *.JPEG {raw});;JPG (*.jpg *.jpeg *.JPG *.JPEG);;相机 RAW ({raw})")
+            other = "*.png *.PNG *.tif *.tiff *.TIF *.TIFF *.webp *.WEBP"
+            path, _ = QFileDialog.getOpenFileName(self, "打开图片（只读取，不会修改原图）", "",
+                                                  f"图片 (*.jpg *.jpeg *.JPG *.JPEG {other} {raw});;JPG (*.jpg *.jpeg *.JPG *.JPEG);;"
+                                                  f"PNG / TIFF / WebP ({other});;相机 RAW ({raw})")
             if not path:
                 return
         try:
