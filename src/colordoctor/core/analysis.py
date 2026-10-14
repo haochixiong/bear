@@ -683,15 +683,24 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
 # ------------------------------------------------------------------ 整图色彩
 def analyze_palette_report(
     image: np.ndarray, context: ColorContext, style_key: str | None = None, family: str | None = None,
-    family_target_lab=None, rect=None,
+    family_target_lab=None, rect=None, tone_intent: str = "auto",
 ) -> AnalysisReport:
-    """整图色彩：缺色/丰富度、6:3:1、颜色统一、与风格模板的差距。"""
+    """整图色彩：缺色/丰富度、6:3:1、颜色统一、与风格模板的差距。
+
+    tone_intent：影调（auto 自动判断 / low 刻意暗调 / normal 正常曝光 / high 刻意高调，见 exposure.py）。
+    """
+    from colordoctor.core import exposure as ex
     from colordoctor.core import palette as pl
 
     stats = rs.compute_stats(image, with_clusters=False)
-    pr = pl.analyze_palette(image, style_key, family, family_target_lab, offset=_offset(rect))
+    pr = pl.analyze_palette(image, style_key, family, family_target_lab, offset=_offset(rect), tone_intent=tone_intent)
     conf, reasons = dr.confidence(stats, context)
     findings: list[Finding] = []
+    # 暗调还是欠曝：自动判断时只说明、不提亮；用户选「正常曝光」时才按欠曝 / 过曝修正
+    sub, _ = grid_downsample(image, MAX_SAMPLES)
+    exp = ex.exposure_finding(cs.srgb8_to_lab(sub.reshape(-1, 3)[:, :3])[:, 0], pr.detected_key, tone_intent, conf)
+    if exp is not None:
+        findings.append(exp)
     cf = pr.colorfulness
     style = pr.style
     lo, hi = style.colorfulness_range if style else (15.0, 200.0)

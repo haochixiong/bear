@@ -390,7 +390,18 @@ class MainWindow(QMainWindow):
             self.family_box.addItem(f"统一：{fam}", fam)
         self.family_box.setToolTip("检查画面里某一种颜色（例如所有绿色）是不是同一种")
         self.family_box.currentIndexChanged.connect(self._palette_option_changed)
-        for wdg in (QLabel("风格模板"), self.style_box, QLabel("统一色"), self.family_box):
+        from colordoctor.core.exposure import TONE_INTENTS
+
+        self.tone_box = QComboBox()
+        for k, name in TONE_INTENTS.items():
+            self.tone_box.addItem(name, k)
+        self.tone_box.setToolTip(
+            "画面很暗 / 很亮时怎么处理：\n"
+            "自动判断：按刻意的暗调 / 高调处理（不提亮、不压暗），并说明判断依据，看起来像欠曝时会提醒\n"
+            "刻意暗调 / 刻意高调：情绪人像、日系高调等，保持基调\n"
+            "正常曝光：暗了就是欠曝、亮了就是过曝，给出带曲线的修正")
+        self.tone_box.currentIndexChanged.connect(self._palette_option_changed)
+        for wdg in (QLabel("风格模板"), self.style_box, QLabel("统一色"), self.family_box, QLabel("影调"), self.tone_box):
             r.addWidget(wdg)
         lay.addWidget(self.palette_row)
         # 仿色：更换参考作品
@@ -508,7 +519,7 @@ class MainWindow(QMainWindow):
         for w, key in ((self.top_check, "on_top"), (self.auto_mask_check, "auto_mask"), (self.lasso_check, "lasso"),
                        (self.scan_check, "scan_whole"), (self.skin_compare_check, "skin_compare"),
                        (self.details_check, "details"), (self.part_box, "part"), (self.style_box, "style"),
-                       (self.family_box, "family")):
+                       (self.family_box, "family"), (self.tone_box, "tone")):
             self._persist(w, f"ui/{key}")
         geo = self.settings.value("ui/geometry")
         if isinstance(geo, (QByteArray, bytes, bytearray)) and geo:  # 设置文件损坏时不能让程序起不来
@@ -591,6 +602,7 @@ class MainWindow(QMainWindow):
     def _palette_option_changed(self, _i=None):
         self.session.style_key = self.style_box.currentData()
         self.session.family = self.family_box.currentData()
+        self.session.tone_intent = self.tone_box.currentData() or "auto"
         cur = self._current
         # 当前显示的是整图色彩结果：按新的风格 / 统一色重新计算（和改肤色目标的行为一致）
         if cur is not None and isinstance(cur.result, AnalysisReport) and cur.result.mode == "palette" \

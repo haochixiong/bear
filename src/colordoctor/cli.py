@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--no-auto-mask", action="store_true", help="不自动抠皮肤")
     a.add_argument("--style", help="整图风格模板 key，例如 teal_orange / black_gold / pink_blue")
     a.add_argument("--family", help="检查哪种颜色是否统一：红/橙/黄/绿/青/蓝/紫/品红")
+    a.add_argument("--tone", choices=("auto", "low", "normal", "high"), default="auto",
+                   help="影调：auto 自动判断 / low 刻意暗调 / normal 正常曝光（暗了就按欠曝修正）/ high 刻意高调")
     a.add_argument("--reference", help="仿色参考图（reference 模式）")
     a.add_argument("--json", action="store_true", help="输出完整 JSON")
     a.add_argument("--raw-preview", action="store_true", help="RAW 文件改用内嵌的 JPG 预览（相机直出的颜色）")
@@ -112,7 +114,8 @@ def run(argv: list[str]) -> int:
         elif args.mode == "scan":
             report = an.scan_image(region, ctx, rect=rect)
         elif args.mode == "palette":
-            report = an.analyze_palette_report(region, ctx, style_key=args.style, family=args.family, rect=rect)
+            report = an.analyze_palette_report(region, ctx, style_key=args.style, family=args.family, rect=rect,
+                                               tone_intent=getattr(args, "tone", "auto"))
         elif args.mode == "reference":
             if not args.reference:
                 raise SampleError("reference 模式需要 --reference 参考图.jpg")

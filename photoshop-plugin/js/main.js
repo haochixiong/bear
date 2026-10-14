@@ -128,6 +128,11 @@ function select(id, items, withNone) {
   return `<select id="${id}">${opts.join("")}</select>`;
 }
 
+// 影调：画面很暗 / 很亮时，是刻意的暗调 / 高调，还是欠曝 / 过曝（单看像素分不出，由用户决定；默认自动判断并说明）
+const TONE_SELECT = `<div class="row"><label>影调</label><select id="tone" title="自动判断：很暗 / 很亮的画面按刻意的暗调 / 高调处理（不提亮、不压暗），并说明依据，像欠曝时会提醒。正常曝光：暗了按欠曝、亮了按过曝给出曲线修正。">
+  <option value="auto">自动判断</option><option value="low">刻意暗调（情绪 / 低调人像）</option>
+  <option value="normal">正常曝光（暗了就是欠曝）</option><option value="high">刻意高调（日系 / 明亮）</option></select></div>`;
+
 function renderControls() {
   const o = state.options || { styles: [], presets: [], families: [] };
   const c = $("controls");
@@ -135,12 +140,15 @@ function renderControls() {
     const groups = {};
     o.styles.forEach((s) => (groups[s.category] = groups[s.category] || []).push(s));
     c.innerHTML = `<div class="row"><label>目标风格</label><select id="style">${Object.entries(groups).map(([g, ss]) =>
-      `<optgroup label="${esc(g)}">${ss.map((s) => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("")}</optgroup>`).join("")}</select></div>`;
+      `<optgroup label="${esc(g)}">${ss.map((s) => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("")}</optgroup>`).join("")}</select></div>${TONE_SELECT}`;
     remember("style");
+    remember("tone");
   } else if (state.sub === "ratio") {
     c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>
+      ${TONE_SELECT}
       <div class="muted">看主色 / 辅色 / 点缀色的面积是否接近 6:3:1；选一个色系时还会生成把杂色往它统一的调整图层。</div>`;
     remember("family");
+    remember("tone");
   } else if (state.sub === "skin") {
     c.innerHTML = `<div class="row"><label>抠皮肤</label><select id="seg"><option value="ai">AI 人像分割（显卡）</option><option value="color">肤色规则（不分脸和身体）</option></select></div>
       <div class="row"><label>肤色风格</label>${select("preset", o.presets)}</div>
@@ -222,6 +230,7 @@ function query(sub) {
   const v = (id) => ($(id) ? $(id).value : "");
   if (sub === "style") q.style = v("style");
   if (sub === "ratio" && v("family")) q.family = v("family");
+  if ((sub === "style" || sub === "ratio") && v("tone")) q.tone = v("tone");
   if (sub === "skin") {
     q.preset = v("preset"); q.seg = v("seg");
     q.part = q.seg === "ai" ? v("part") : "";  // 肤色规则分不出脸和身体：不标部位

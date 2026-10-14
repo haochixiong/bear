@@ -126,7 +126,9 @@ class PaletteReport:
     tone: tuple[float, float, float, float, float]  # L* 的 P5/P25/P50/P75/P95
     unity: FamilyUnity | None = None
     style: StyleMatch | None = None
-    tone_key: str = ""  # 画面影调基调："low"（暗调）/ "high"（高调）/ ""（见 tone_key()）
+    tone_key: str = ""  # 按哪种基调处理："low"（暗调）/ "high"（高调）/ ""（自动判断结果，或用户在「影调」里选的）
+    detected_key: str = ""  # 自动判断的基调（tone_key()）
+    tone_intent: str = "auto"  # 用户选的影调：auto / low / normal / high（见 exposure.TONE_INTENTS）
 
 
 # ================================================================ 基础
@@ -489,7 +491,7 @@ def _tint_ok(t, spec) -> bool | None:
     return bool(hue_ok and lo - 0.5 <= c <= hi + 0.5)
 
 
-def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) -> StyleMatch:
+def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, tone_intent: str = "auto") -> StyleMatch:
     sub, _, lab, lch = _prep(image, max_samples)
     L, C, h = lch[..., 0].ravel(), lch[..., 1].ravel(), lch[..., 2].ravel()
     lab2 = lab.reshape(-1, 3)
@@ -524,7 +526,9 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES) 
     cf_ok = cr[0] <= cf.value <= cr[1]
     p5, p15, p50, p85, p95 = np.percentile(L, [5, 15, 50, 85, 95])
     contrast = float(p95 - p5)
-    tk = tone_key(L)
+    from colordoctor.core.exposure import resolve_key
+
+    tk = resolve_key(tone_key(L), tone_intent)  # 用户选了「刻意暗调 / 正常曝光 …」时按用户的
     # 调色加在阴影/高光上的色调，主要体现在“接近中性”的像素上（灰墙、白衣、暗部），
     # 本身就很鲜艳的物体（绿叶、蓝天）不能代表色调。
     bands = tone_bands(L, sub)
@@ -790,11 +794,15 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
 
 # ================================================================ 汇总
 def analyze_palette(image: np.ndarray, style_key: str | None = None, family: str | None = None,
-                    family_target_lab=None, offset=(0, 0)) -> PaletteReport:
+                    family_target_lab=None, offset=(0, 0), tone_intent: str = "auto") -> PaletteReport:
+    from colordoctor.core.exposure import resolve_key
+
     sub, _, lab, lch = _prep(image)
     cf = colorfulness(sub, lch)
     palette, ratio = ratio_631(lab)
     tone = tuple(round(float(v), 1) for v in np.percentile(lch[..., 0], [5, 25, 50, 75, 95]))
     unity = family_unity(image, family, family_target_lab, offset) if family else None
-    style = style_match(image, get_style(style_key)) if style_key else None
-    return PaletteReport(cf, palette, ratio, tuple(ac.channel_stats(sub)), tone, unity, style, tone_key=tone_key(lch[..., 0]))
+    style = style_match(image, get_style(style_key), tone_intent=tone_intent) if style_key else None
+    detected = tone_key(lch[..., 0])
+    return PaletteReport(cf, palette, ratio, tuple(ac.channel_stats(sub)), tone, unity, style,
+                         tone_key=resolve_key(detected, tone_intent), detected_key=detected, tone_intent=tone_intent)

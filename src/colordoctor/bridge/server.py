@@ -118,8 +118,11 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
                 raise pixel_guard.BlockedError("没有在这个图层里找到皮肤。请确认选中的是人像图层，或把分析对象改为「合并可见图层」。")
         return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=part, manual_mask=manual)
     if mode == "palette":
+        tone = q.get("tone") or "auto"
+        if tone not in ("auto", "low", "normal", "high"):
+            raise ValueError("影调应为 auto / low / normal / high")
         return analysis.analyze_palette_report(prep.filled_for_statistics(), ctx, style_key=q.get("style") or None,
-                                               family=q.get("family") or None)
+                                               family=q.get("family") or None, tone_intent=tone)
     if mode == "reference":
         ref = refs.get(q.get("ref", ""))
         if ref is None:

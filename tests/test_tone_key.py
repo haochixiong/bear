@@ -140,7 +140,8 @@ def test_no_style_desaturated_low_key_gets_a_neutral_note_not_a_vibrance_push():
     assert not any(f.problem.startswith("整体缺色") for f in rep.findings)
     assert any("颜色少不按缺色处理" in f.problem for f in rep.findings)
     assert not _vibrance_up(_layers(rep, img)) and not _composite_lifts(_layers(rep, img))
-    assert rep.overall_risk == 0
+    # 唯一不是“正常”的只能是曝光说明卡（这张合成图没有任何高光，会提醒“更像欠曝”，但不提亮）
+    assert all(f.severity.value == "正常" for f in rep.findings if not f.problem.startswith("画面整体很暗"))
     # 选了鲜艳风格时仍按缺色处理
     rep2 = an.analyze_palette_report(img, CTX, style_key="fuji_velvia")
     assert any(f.problem.startswith("整体缺色") for f in rep2.findings)
