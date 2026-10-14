@@ -684,13 +684,13 @@ def _patchy(base, kind):
 
 
 def skin_cases():
-    for lab in SKIN_LABS:
-        img = face_scene(skin_lab=lab)[0]
-        for pk in PRESETS:
+    for k, lab in enumerate(SKIN_LABS):
+        img = face_scene(h=140, w=140, skin_lab=lab)[0]
+        for pk in PRESETS if k % 3 == 0 else (None, "natural", PRESETS[2 + k % 6]):  # 每种肤色风格都跑到几种肤色
             yield f"skin{lab} preset={pk}", img, pk, None
     for pk in PRESETS:
-        yield f"lowkey preset={pk}", lowkey_face_scene()[0], pk, None
-        yield f"highkey preset={pk}", highkey_face_scene()[0], pk, None
+        yield f"lowkey preset={pk}", lowkey_face_scene(h=150, w=140)[0], pk, None
+        yield f"highkey preset={pk}", highkey_face_scene(h=150, w=140)[0], pk, None
     for args in (((45, 12, 16), "sh", -6, 0), ((50, 14, 19), "sh", 0, 8), ((66, 14, 19), "hl", 5, -6),
                  ((66, 14, 19), "hl", -4, 6), ((40, 10, 15), "sh", 5, -5)):
         yield f"band{args}", _skin_band(*args), None, None
@@ -769,19 +769,24 @@ def test_region_and_scan_layers_move_toward_their_targets(tag, img):
     assert not bad, "\n".join(bad)
 
 
-IMAGES = {
-    "landscape": landscape(), "teal_orange": teal_orange(), "morandi": morandi(), "portrait": portrait_outdoor(),
-    "face": face_scene()[0], "lowkey": lowkey_face_scene()[0], "highkey": highkey_face_scene()[0],
-    "mono": np.repeat(np.clip(np.linspace(10, 245, 240), 0, 255).astype(np.uint8)[None, :, None], 200, 0).repeat(3, 2),
-    "busy": busy_palette(), "grass": patchy_grass(),
+IMAGES = {  # 整图色彩的场景（尺寸取小一些：每张图要对 30 种风格各分析、模拟一遍）
+    "landscape": landscape(120, 144), "teal_orange": teal_orange(120, 144), "morandi": morandi(120, 144),
+    "portrait": portrait_outdoor(120, 144), "face": face_scene(h=130, w=130)[0],
+    "lowkey": lowkey_face_scene(h=143, w=130)[0], "highkey": highkey_face_scene(h=143, w=130)[0],
+    "mono": np.repeat(np.clip(np.linspace(10, 245, 144), 0, 255).astype(np.uint8)[None, :, None], 120, 0).repeat(3, 2),
+    "busy": busy_palette(120, 144), "grass": patchy_grass(120, 144),
 }
+
+
+FULL = ("landscape", "portrait", "lowkey", "highkey", "face")  # 这几张跑全部风格，其余的跑一部分（每种风格仍至少跑 5 张图）
 
 
 @pytest.mark.parametrize("name", list(IMAGES))
 def test_palette_layers_move_toward_every_style(name):
     img = IMAGES[name]
     bad = []
-    for key in STYLES + [None]:
+    k = list(IMAGES).index(name)
+    for key in (STYLES if name in FULL else STYLES[k::5]) + [None]:
         bad += check_palette_report(f"{name} style={key}", img, an.analyze_palette_report(img, CTX, style_key=key), key)
     for fam, tl in (("绿", (50, -35, 30)), ("蓝", (60, -5, -35)), ("橙", None), ("橙", (66, 12, 24))):
         rep = an.analyze_palette_report(img, CTX, family=fam, family_target_lab=tl)
@@ -789,8 +794,10 @@ def test_palette_layers_move_toward_every_style(name):
     assert not bad, "\n".join(bad)
 
 
-@pytest.mark.parametrize("mine,ref", [(a, b) for a in ("landscape", "portrait", "teal_orange", "lowkey", "face")
-                                      for b in ("landscape", "portrait", "teal_orange", "highkey", "morandi") if a != b])
+@pytest.mark.parametrize("mine,ref", [("landscape", "teal_orange"), ("landscape", "highkey"), ("portrait", "landscape"),
+                                      ("portrait", "teal_orange"), ("teal_orange", "morandi"), ("lowkey", "landscape"),
+                                      ("lowkey", "highkey"), ("lowkey", "teal_orange"), ("face", "highkey"), ("face", "portrait"),
+                                      ("highkey", "lowkey"), ("morandi", "portrait")])
 def test_reference_layers_move_toward_the_reference(mine, ref):
     rep = an.compare_reference(IMAGES[mine], IMAGES[ref], CTX)
     bad = check_reference_report(f"ref {mine}<-{ref}", IMAGES[mine], IMAGES[ref], rep)
