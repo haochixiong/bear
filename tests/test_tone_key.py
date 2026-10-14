@@ -173,6 +173,7 @@ def test_clipped_whites_do_not_dilute_the_highlight_tint():
 def test_dark_tinted_pixels_are_not_neutral_blacks():
     assert cs.neutral_chroma_limit(5.0, 15.0) < 8.0  # L* 5 的深蓝 C* 8 不算“中性的黑”
     assert cs.neutral_chroma_limit(30.0, 15.0) == 15.0
+    assert pl.family_of(5.0, 7.0, 260.0) != "黑/深灰" and pl.family_of(20.0, 7.0, 260.0) == "黑/深灰"
     assert cs.clipped(np.array([[255, 250, 240], [0, 0, 1], [128, 128, 128], [10, 0, 0]])).tolist() == [True, True, False, False]
 
 

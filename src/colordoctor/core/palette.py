@@ -185,7 +185,8 @@ def is_monochrome(cf: Colorfulness) -> bool:
 
 
 def family_of(L: float, C: float, h: float) -> str:
-    if C < CHROMA_MIN:
+    """无彩色（黑 / 灰 / 白）要色度低；很暗的地方门槛更低（L* 5 的深蓝 C* 7 是深蓝，不是黑，见 cs.neutral_chroma_limit）。"""
+    if C < float(cs.neutral_chroma_limit(L, CHROMA_MIN)):
         if L < 30:
             return "黑/深灰"
         if L > 78:
