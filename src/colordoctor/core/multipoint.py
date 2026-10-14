@@ -73,10 +73,13 @@ def _summary(rows: list[PointRow]) -> str:
         worst = max(others, key=lambda r: r.de or 0)
         return f"{n} 个点颜色一致：和「{base.name}」相比，最大的差别也只是{worst.words}。"
     parts = []
+    def why(r):
+        return f"（{r.direction}）" if r.direction and r.direction != "—" else ""
+
     if off:
-        parts.append("、".join(f"「{r.name}」{r.words}（{r.direction}）" for r in off))
+        parts.append("、".join(f"「{r.name}」{r.words}{why(r)}" for r in off))
     if slight:
-        parts.append("、".join(f"「{r.name}」略有差别（{r.direction}）" for r in slight))
+        parts.append("、".join(f"「{r.name}」略有差别{why(r)}" for r in slight))
     text = f"{n} 个点里，和「{base.name}」相比：" + "；".join(parts) + "。"
     dirs = {r.direction for r in off if r.direction != "—"}
     if len(off) >= 2 and len(dirs) == 1:

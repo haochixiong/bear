@@ -6,7 +6,7 @@ import dataclasses
 import os
 
 import numpy as np
-from PyQt6.QtCore import QSettings, Qt, QTimer, QUrl
+from PyQt6.QtCore import QByteArray, QSettings, Qt, QTimer, QUrl
 from PyQt6.QtGui import QAction, QCursor, QDesktopServices, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -84,7 +84,7 @@ class JpgSelectDialog(QDialog):
                  labels: list[str] | None = None, allow_point: bool = True, multi_point: bool = False):
         super().__init__(parent)
         self.labels = labels or (["参考区", "问题区"] if len(steps) > 1 else ["选区"])
-        self.setWindowTitle("在图片上选择（滚轮缩放，右键拖动平移，Esc 取消）")
+        self.setWindowTitle("在图片上选择（滚轮缩放，右键拖动平移；连续取点时回车或 Esc 结束，其余 Esc 取消）")
         self.resize(1100, 760)
         self.steps = steps
         self.step = 0
@@ -121,7 +121,7 @@ class JpgSelectDialog(QDialog):
             self.reject()
 
     def _enter(self):
-        if self.results:
+        if self.multi_point and self.results:  # 两步框选时回车不能把对话框关掉
             self.accept()
 
     def _got(self, kind, coords):
@@ -421,7 +421,10 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(2, 2, 2, 2)
         top = QHBoxLayout()
         self.details_check = QCheckBox("显示详细数据")
-        self.details_check.toggled.connect(lambda _v: self._show_item(self._current, switch_tab=False))
+        # 只有区域结论受“详细数据”影响；当前是取色 / 多点对比时不重画，避免把多点对比表冲掉
+        self.details_check.toggled.connect(
+            lambda _v: isinstance(getattr(self._current, "result", None), AnalysisReport)
+            and self._show_item(self._current, switch_tab=False))
         top.addWidget(self.details_check, 1)
         self.ai_btn = QPushButton("AI 点评")
         self.ai_btn.setToolTip("把分析数值发给你在设置中选择的 AI（Claude Code / Codex / DeepSeek / Claude API）")
@@ -508,8 +511,8 @@ class MainWindow(QMainWindow):
                        (self.family_box, "family")):
             self._persist(w, f"ui/{key}")
         geo = self.settings.value("ui/geometry")
-        if geo:
-            self.restoreGeometry(geo)
+        if isinstance(geo, (QByteArray, bytes, bytearray)) and geo:  # 设置文件损坏时不能让程序起不来
+            self.restoreGeometry(QByteArray(geo))
 
     def _persist(self, w, key: str):
         """恢复一个控件上次的值，并在用户改动时立即保存（程序意外退出也不丢）。"""
@@ -698,8 +701,10 @@ class MainWindow(QMainWindow):
                     part=rep.part if mode == "skin" else None, on_done=done)
 
     def set_on_top(self, on: bool):
+        visible = self.isVisible()
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
-        self.show()
+        if visible:  # 改窗口标志会把窗口藏起来；启动时恢复设置还没显示，不能提前弹出
+            self.show()
 
     # ================================================================ 实时取色
     def set_live(self, on: bool):
@@ -921,13 +926,15 @@ class MainWindow(QMainWindow):
         item = self.session.add_point(patch, s, label)
         if getattr(self, "_batch_points", None) is not None:
             self._batch_points.append(item)
-            item.label = f"点 {len(self._batch_points)}  {item.label}"
         self._after_add(item)
 
     def _finish_batch(self):
         """连续取了两个点以上：自动对比，显示在“取色数值”页。"""
         items, self._batch_points = getattr(self, "_batch_points", None) or [], None
         if len(items) >= 2:
+            for i, h in enumerate(items):  # 只在真的取了多个点时编号，历史里能对上表格
+                h.label = f"点 {i + 1}  {h.label}"
+            self._after_add(None, quiet=True)
             self.show_multipoint(items)
 
     def show_multipoint(self, items: list[HistoryItem]):
@@ -938,7 +945,8 @@ class MainWindow(QMainWindow):
         if len(pts) < 2:
             self.statusBar().showMessage("至少选两个取色点才能对比", 4000)
             return
-        names = [h.label.split("  ")[0] if h.label.startswith("点 ") else f"点 {i + 1}" for i, h in enumerate(pts)]
+        # 按位置编号，再附上取样时间，避免两批都叫“点 1”
+        names = [f"点 {i + 1}（{h.time_text}）" for i, h in enumerate(pts)]
         res = compare_points([h.result.values.lab for h in pts], names)
         self.point_view.setHtml(multipoint_html(res))
         self.tabs.setCurrentWidget(self.point_view)
@@ -976,7 +984,6 @@ class MainWindow(QMainWindow):
             item.label = f"区域平均 {rect[2]}×{rect[3]} {vals.hex}"
             if getattr(self, "_batch_points", None) is not None:  # 连续取点时也算一个点
                 self._batch_points.append(item)
-                item.label = f"点 {len(self._batch_points)}  {item.label}"
             self._after_add(item)
             return
         if mode == "compare":

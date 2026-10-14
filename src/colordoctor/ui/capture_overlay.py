@@ -124,6 +124,11 @@ class CaptureSession(QObject):
 
     def _on_rect(self, i, x, y, w, h):
         self.selected.emit(self.captures[i], "rect", (x, y, w, h), self.step)
+        if self.multi_point:  # 连续取点时拖框 = 一个“框内平均”的点，继续取
+            self.points += 1
+            self.overlays[i].view.add_mark((x, y, w, h), f"点 {self.points}")
+            self._update_text()
+            return
         self._advance(i, (x, y, w, h))
 
     def _advance(self, i, rect):

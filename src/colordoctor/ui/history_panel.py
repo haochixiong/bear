@@ -44,7 +44,11 @@ class HistoryPanel(QListWidget):
         self.blockSignals(False)
 
     def highlight(self, item_id: int | None):
-        """让列表的选中项跟着当前显示的结果走（不触发重新显示）。"""
+        """让列表的选中项跟着当前显示的结果走（不触发重新显示）。
+        当前项已经是它时什么都不做：否则会把用户 Ctrl / Shift 多选的结果清掉。"""
+        cur = self.currentItem()
+        if cur is not None and item_id is not None and int(cur.data(Qt.ItemDataRole.UserRole)) == item_id:
+            return
         self.blockSignals(True)
         self.setCurrentRow(-1)
         for i in range(self.count()):
@@ -54,9 +58,12 @@ class HistoryPanel(QListWidget):
         self.blockSignals(False)
 
     def keyPressEvent(self, ev):
-        it = self.currentItem()
-        if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and it is not None:
-            self.remove_item.emit(int(it.data(Qt.ItemDataRole.UserRole)))
+        if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            ids = [int(i.data(Qt.ItemDataRole.UserRole)) for i in self.selectedItems()]
+            if not ids and self.currentItem() is not None:
+                ids = [int(self.currentItem().data(Qt.ItemDataRole.UserRole))]
+            for hid in ids:  # 多选时全部删除
+                self.remove_item.emit(hid)
             return
         super().keyPressEvent(ev)
 

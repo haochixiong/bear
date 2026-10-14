@@ -20,3 +20,8 @@ def test_all_consistent_and_errors():
     assert res.rows[1].judge == "一致" and "一致" in res.summary
     with pytest.raises(ValueError):
         mp.compare_points([(60, 10, 10)])
+
+
+def test_summary_has_no_empty_direction():
+    res = mp.compare_points([(87.3, 2.2, 0.4), (86.7, 1.2, 1.8)])
+    assert "（—）" not in res.summary and "（）" not in res.summary

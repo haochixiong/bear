@@ -12,7 +12,15 @@ def test_de_words_levels():
 
 
 def test_direction_words():
-    assert pc.direction_words((70, 14, 20), (68, 12, 25)) == "偏黄、偏暗"
-    assert pc.direction_words((70, 14, 20), (70, 18, 20)) == "偏红"
+    assert pc.direction_words((71, 13.8, 19.6), (68, 12.0, 23.8)) == "偏黄、偏暗"  # 肤色往黄转、变暗
+    assert pc.direction_words((70, 14, 20), (70, 18, 20)).startswith("偏红")
     assert pc.direction_words((70, 14, 20), (70.5, 14.3, 20.2)) == ""
     assert pc.direction_words((60, 0, 0), (60, 0, 0)) == ""
+    assert pc.direction_words((60, 0, 0), (60, 3, 0)) == "偏红"  # 中性灰：按变化本身的方向
+
+
+def test_greyer_skin_is_not_called_blue_or_green():
+    # 同一色相、色度变小：是“更灰”，不能说成“偏蓝、偏绿”
+    assert pc.direction_words((65, 14.3, 20.5), (65, 11.5, 16.4)) == "更灰"
+    assert pc.direction_words((40, 14, 17), (40, 11, 13)) == "更灰"
+    assert pc.direction_words((55, -5, -40), (55, -12, -38)) == "偏青"  # 蓝天往青转

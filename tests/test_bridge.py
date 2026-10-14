@@ -467,3 +467,36 @@ def test_multipoint_route(bridge):
     assert code == 400
     code, _h, body = _req(bridge + "/multipoint", data=b'{"points": [{"lab": [1, 2]}, {"lab": "x"}]}', method="POST")
     assert code == 400
+
+
+def test_reference_file_respects_transparency_and_limits():
+    import io
+
+    from PIL import Image
+
+    rgba = np.zeros((100, 100, 4), np.uint8)
+    rgba[25:75, 25:75, :3] = (200, 150, 120)
+    rgba[25:75, 25:75, 0] += np.arange(50, dtype=np.uint8)[None, :] // 10  # 有一点变化，不是纯色
+    rgba[25:75, 25:75, 3] = 255
+    refs = bs.Store()
+    res = bs.reference_from_file(_encode(rgba, "PNG"), "cut.png", refs)
+    ref = refs.get(res["ref"])
+    assert ref.reshape(-1, 3).mean(axis=0)[1] > 140  # 透明的黑色没有算进去
+    assert any("透明" in n for n in res["notes"])
+    # 同一个文件再上传：直接复用，不再解码
+    assert bs.reference_from_file(_encode(rgba, "PNG"), "cut.png", refs)["ref"] == res["ref"]
+    # 超过 Pillow 的“解压炸弹”上限：中文提示，不是 500
+    big = Image.new("L", (14000, 14000))
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    with pytest.raises(ValueError, match="过大"):
+        bs.reference_from_file(buf.getvalue(), "huge.png", refs)
+    # 纯色文件：说“参考图”，不说“图层”
+    with pytest.raises(bs.pixel_guard.BlockedError, match="参考图"):
+        bs.reference_from_file(_encode(np.full((50, 50, 3), 128, np.uint8), "PNG"), "flat.png", refs)
+
+
+def test_multipoint_rejects_out_of_range_lab():
+    for bad in ([1e300, 0, 0], [50, 1e308, 1e308], "123", [150, 0, 0], [50, 300, 0]):
+        with pytest.raises(ValueError):
+            bs.multipoint_request({"points": [{"lab": [50, 10, 10]}, {"lab": bad}]})

@@ -100,7 +100,8 @@ def load_jpeg(path: str | os.PathLike) -> SourceImage:
         raise ImageLoadError(f"找不到文件：{path}")
     if path.stat().st_size == 0:
         raise ImageLoadError("文件为空，无法读取")
-    return _decode_jpeg(lambda: Image.open(path), path.name)
+    # 扩展名是 .jpg 但内容是 PNG 等（常见于网上下载的图）：按实际格式读
+    return _decode_jpeg(lambda: Image.open(path), path.name, IMAGE_FORMATS)
 
 
 # 除 JPG 外还能读的普通图片（参考图常是 PNG / TIFF / WebP）
@@ -133,25 +134,61 @@ def load_image_bytes(data: bytes, name: str, use_raw_preview: bool = False) -> S
                 f.write(data)
             src = load_raw(tmp, use_raw_preview)
         finally:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            _remove_later(tmp)
         return SourceImage(src.pixels, dataclasses.replace(src.context, device=name), src.original_size)
     return _decode_jpeg(lambda: Image.open(io.BytesIO(data)), name, IMAGE_FORMATS)
+
+
+_pending_removal: list[str] = []
+
+
+def _remove_later(path: str) -> None:
+    """删除临时文件；Windows 上杀毒软件 / 索引可能暂时占用，删不掉就在程序退出时再删一次。"""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        if not _pending_removal:
+            import atexit
+
+            atexit.register(lambda: [_try_remove(p) for p in list(_pending_removal)])
+        _pending_removal.append(path)
+
+
+def _try_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def alpha_of_bytes(data: bytes) -> np.ndarray | None:
+    """图片文件的透明度（与解码后的像素同方向、同尺寸）；没有透明通道返回 None。"""
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            if im.mode not in ("RGBA", "LA", "PA") and not (im.mode == "P" and "transparency" in im.info):
+                return None
+            im = ImageOps.exif_transpose(im)
+            return np.asarray(im.convert("RGBA").getchannel("A"))
+    except Exception:
+        return None
 
 
 def _to_8bit(im: Image.Image) -> Image.Image:
     """16 / 32 位灰度（PNG / TIFF 常见）转 8 位；Pillow 的 convert("RGB") 会把它们直接截断成白色。"""
     if im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
-        a = np.asarray(im).astype(np.float64)
-        top = 65535.0 if im.mode != "I" or a.max() > 255 else 255.0
-        return Image.fromarray(np.clip(np.rint(a / top * 255.0), 0, 255).astype(np.uint8), mode="L")
+        a = np.asarray(im)
+        if im.mode != "I" or int(a.max()) > 255:
+            a = np.right_shift(a.astype(np.uint16, copy=False), 8)  # 0–65535 → 0–255，不做大块浮点拷贝
+        return Image.fromarray(np.asarray(a, dtype=np.uint8), mode="L")
     if im.mode == "F":
-        a = np.asarray(im, dtype=np.float64)
+        a = np.asarray(im, dtype=np.float32)
         return Image.fromarray(np.clip(np.rint(a * 255.0), 0, 255).astype(np.uint8), mode="L")
-    if im.mode in ("RGBA", "LA", "P", "PA", "1"):
-        return im.convert("RGB")  # 参考图只看颜色：透明部分按原色处理
+    if im.mode == "LA":
+        return im.convert("L")  # 保留灰度，灰度 ICC 才能用；透明度另外读（alpha_of_bytes）
+    if im.mode in ("RGBA", "P", "PA", "1"):
+        return im.convert("RGB")
     return im
 
 
@@ -170,10 +207,12 @@ def _decode_jpeg(opener, name: str, formats: tuple[str, ...] = ("JPEG",)) -> Sou
             im = _to_8bit(im)
     except ImageLoadError:
         raise
+    except Image.DecompressionBombError as e:
+        raise ImageLoadError(f"图片过大，超过 {MAX_PIXELS // 1_000_000} MP 上限") from e
     except UnidentifiedImageError as e:
         raise ImageLoadError(f"无法识别的图片文件（不是有效的 {kinds}）") from e
     except (OSError, SyntaxError, ValueError) as e:
-        raise ImageLoadError(f"图片文件已损坏、不完整或格式不支持（例如 16 位彩色 TIFF，请另存为 8 位）：{e}") from e
+        raise ImageLoadError(f"图片文件已损坏、不完整，或是不支持的格式（详细：{e}）") from e
 
     warnings: list[str] = []
     mode = im.mode
@@ -265,7 +304,10 @@ def load_raw(path: str | os.PathLike, use_preview: bool = False) -> SourceImage:
     except ImageLoadError:
         raise
     except Exception as e:  # rawpy 的错误类型较多（LibRawFileUnsupportedError 等）
-        raise ImageLoadError(f"无法读取 RAW 文件：{e}") from e
+        detail = e.args[0] if e.args else e
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", "replace")
+        raise ImageLoadError(f"无法读取 RAW 文件（不是相机 RAW，或相机型号还不支持）：{detail}") from e
     ctx = ColorContext(source="file", analysis_space=ANALYSIS_SPACE, source_profile="相机 RAW（LibRaw 解码）",
                        converted=True, device=path.name, warnings=(RAW_WARNING,))
     pixels = np.ascontiguousarray(rgb, dtype=np.uint8)
@@ -277,9 +319,7 @@ def load_image(path: str | os.PathLike, use_raw_preview: bool = False) -> Source
     """按扩展名选择：RAW 用 load_raw，PNG / TIFF / WebP 用 load_picture，其余按 JPG 读取。"""
     if is_raw(path):
         return load_raw(path, use_raw_preview)
-    if Path(path).suffix.lower() in OTHER_EXTS:
-        return load_picture(path)
-    return load_jpeg(path)
+    return load_picture(path)
 
 
 def screen_pixels_to_srgb(

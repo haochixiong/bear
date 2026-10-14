@@ -224,3 +224,45 @@ def test_history_multi_select_compares_points(win):
     ids = [h.id for h in win.session.history if isinstance(h.result, PointSample)]
     win.history_panel.compare_points.emit(ids)
     assert "多点对比" in win.point_view.toPlainText()
+
+
+def test_history_ctrl_click_keeps_multi_selection(win, qtbot):
+    win.set_mode("point")
+    for c in (BLUE, (40, 80, 210), (200, 170, 40)):
+        win._run_rect(noisy(flat(c), 1)[:20, :20], (0, 0, 20, 20), CTX, "t", 0)
+    hp = win.history_panel
+    rects = [hp.visualItemRect(hp.item(i)).center() for i in range(3)]
+    qtbot.mouseClick(hp.viewport(), Qt.MouseButton.LeftButton, pos=rects[0])
+    for p in rects[1:]:
+        qtbot.mouseClick(hp.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos=p)
+    assert len(hp.selectedItems()) == 3
+    qtbot.keyClick(hp, Qt.Key.Key_Delete)
+    assert not win.session.history  # 多选时 Delete 全部删除
+
+
+def test_corrupted_geometry_setting_does_not_crash(qtbot, tmp_path):
+    ini = tmp_path / "bad.ini"
+    ini.write_text("[ui]\ngeometry=garbage\non_top=true\n", encoding="utf-8")
+    w = MainWindow(settings=QSettings(str(ini), QSettings.Format.IniFormat))
+    qtbot.addWidget(w)
+    assert not w.isVisible()  # 恢复“置顶”时不会在构造时就弹出窗口
+
+
+def test_capture_multi_point_drag_counts_as_point(qtbot):
+    from colordoctor.capture.geometry import ScreenInfo
+    from colordoctor.capture.screen_capture import ScreenCapture
+    from colordoctor.ui.capture_overlay import CaptureSession
+
+    info = ScreenInfo("FAKE", 0, 0, 200, 150, 1.0)
+    s = CaptureSession([ScreenCapture(info=info, pixels=flat((1, 2, 3), 150, 200))], ["单击"], multi_point=True)
+    done = []
+    s.finished.connect(lambda: done.append(1))
+    s.show()
+    v = s.overlays[0].view
+    qtbot.waitExposed(s.overlays[0])
+    qtbot.mouseClick(v, Qt.MouseButton.LeftButton, pos=v.to_view(20, 20).toPoint())
+    a, b = v.to_view(60, 40).toPoint(), v.to_view(120, 90).toPoint()
+    qtbot.mousePress(v, Qt.MouseButton.LeftButton, pos=a)
+    qtbot.mouseMove(v, b)
+    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, pos=b)
+    assert s.points == 2 and not done and s.overlays  # 拖框算一个点，会话继续

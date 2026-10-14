@@ -138,12 +138,16 @@ def multipoint_request(req: dict) -> dict:
         raise ValueError(f"需要 2–{MAX_POINTS} 个点")
     labs, names = [], []
     for i, p in enumerate(pts):
+        raw = p.get("lab") if isinstance(p, dict) else None
         try:
-            lab = [float(v) for v in p["lab"]][:3]
-        except (KeyError, TypeError, ValueError) as e:
-            raise ValueError(f"第 {i + 1} 个点的 Lab 无效") from e
-        if len(lab) != 3 or not all(np.isfinite(lab)):
-            raise ValueError(f"第 {i + 1} 个点的 Lab 无效")
+            if not isinstance(raw, list) or len(raw) != 3:
+                raise TypeError
+            lab = [float(v) for v in raw]
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"第 {i + 1} 个点的 Lab 无效（应为 [L, a, b]）") from e
+        # L 0–100，a / b 在 ±200 内（PS 的 Lab 范围是 ±128）
+        if not all(np.isfinite(lab)) or not 0 <= lab[0] <= 100 or abs(lab[1]) > 200 or abs(lab[2]) > 200:
+            raise ValueError(f"第 {i + 1} 个点的 Lab 超出范围")
         labs.append(lab)
         names.append(str(p.get("name") or f"点 {i + 1}")[:40])
     res = compare_points(labs, names)
@@ -153,23 +157,50 @@ def multipoint_request(req: dict) -> dict:
 REF_SIDE = 2048  # 参考图按与插件读像素相同的长边缩小后保存（只用来统计颜色）
 
 
+_ref_cache: OrderedDict[str, tuple[str, dict]] = OrderedDict()  # 文件内容 → (ref id, 结果)：同一张参考图不重复解码
+_ref_cache_lock = threading.Lock()
+
+
 def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
+    import hashlib
+
     from PIL import Image
 
-    from colordoctor.core.color_management import ImageLoadError, load_image_bytes
+    from colordoctor.core.color_management import ImageLoadError, alpha_of_bytes, load_image_bytes
 
+    key = hashlib.sha1(data).hexdigest() + "|" + name
+    with _ref_cache_lock:
+        hit = _ref_cache.get(key)
+        if hit is not None and refs.get(hit[0]) is not None:  # 插件每次分析都会重新上传，RAW 不必每次都解码
+            return {**hit[1], "ref": hit[0]}
     try:
         src = load_image_bytes(data, name)
     except ImageLoadError as e:
         raise ValueError(str(e)) from e
     px = src.pixels
+    alpha = alpha_of_bytes(data)
+    if alpha is not None and alpha.shape == px.shape[:2]:
+        px = np.dstack([px, alpha])  # 透明的地方不算进参考图（与从 PS 图层读取一致）
     h, w = px.shape[:2]
     if max(h, w) > REF_SIDE:
         k = REF_SIDE / max(h, w)
-        px = np.asarray(Image.fromarray(np.ascontiguousarray(px)).resize((max(1, round(w * k)), max(1, round(h * k))), Image.BILINEAR))
-    prep = pixel_guard.prepare(px)
+        mode = "RGBA" if px.shape[2] == 4 else "RGB"
+        px = np.asarray(Image.fromarray(np.ascontiguousarray(px), mode=mode).resize(
+            (max(1, round(w * k)), max(1, round(h * k))), Image.BILINEAR))
+    try:
+        prep = pixel_guard.prepare(px)
+    except pixel_guard.BlockedError as e:
+        # pixel_guard 的说法针对图层；这里是文件
+        msg = str(e).replace("当前图层是", "这张参考图是").replace("（图层为空或尺寸为 0）", "（图片太小）")
+        raise pixel_guard.BlockedError(msg) from e
     notes = [*src.context.warnings, *prep.notes]
-    return {"ref": refs.put(prep.filled_for_statistics()), "name": name, "width": int(w), "height": int(h), "notes": notes}
+    out = {"name": name, "width": int(w), "height": int(h), "notes": notes}
+    ref = refs.put(prep.filled_for_statistics())
+    with _ref_cache_lock:
+        _ref_cache[key] = (ref, out)
+        while len(_ref_cache) > MAX_SESSIONS:
+            _ref_cache.popitem(last=False)
+    return {**out, "ref": ref}
 
 
 def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, refs: Store,
