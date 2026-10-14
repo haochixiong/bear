@@ -233,10 +233,8 @@ def check_skin_report(tag, img, rep, preset=None, other_lab=None):
                 s1 = pa.analyze_skin(after, valid=valid).saturation_ab
                 c.up("肤色饱和度 C*/L*", s0, s1, cap=rep.skin.expected_saturation[1])
             elif p.startswith(("肤色高光", "肤色阴影")):
-                key = "highlight_shift" if p.startswith("肤色高光") else "shadow_shift"
-                r0 = getattr(rep.skin, key)
-                r1 = getattr(pa.analyze_skin(after, valid=valid), key)
-                c.toward_vec(f"{p[2:4]}相对中间调的 (a*, b*)", r0[1:], r1[1:], (0.0, 0.0), slack=1.5)
+                r0, r1 = _band_rel(img, after, valid, p.startswith("肤色高光"))
+                c.toward_vec(f"{p[2:4]}相对中间调的 (a*, b*)", r0, r1, (0.0, 0.0), slack=1.5)
             elif p.startswith("肤色不均匀"):
                 check_patch(c, img, after, rep, ly)
             elif p.startswith(("与目标风格", "问题区相对参考区")) or "的肤色差异" in p:
@@ -251,6 +249,16 @@ def check_skin_report(tag, img, rep, preset=None, other_lab=None):
                 c.fail("没有对应的检查（新的问题类型？）")
             chk.bad += c.bad
     return chk.bad
+
+
+def _band_rel(before, after, valid, highlight):
+    """皮肤最亮 / 最暗 15% 相对中间调（40–60%）的 (a*, b*)：分段按调整前的明度定，前后用同一批像素。"""
+    lab0, lab1 = mean_lab(before, valid), mean_lab(after, valid)
+    L = lab0[:, 0]
+    p15, p40, p60, p85 = np.percentile(L, [15, 40, 60, 85])
+    band = L >= p85 if highlight else L <= p15
+    mid = (L >= p40) & (L <= p60)
+    return (lab0[band, 1:].mean(0) - lab0[mid, 1:].mean(0), lab1[band, 1:].mean(0) - lab1[mid, 1:].mean(0))
 
 
 def check_toward_lab(c: Check, cur, new, tgt, ly):
@@ -695,6 +703,13 @@ def skin_cases():
         dirty[~truth] = img[~truth]
         yield f"dirty-skin{col}", dirty, None, None
     yield "face-vs-body", face_scene(skin_lab=(66, 18, 16))[0], None, ("身体", (64.0, 13.0, 20.0))
+    img, truth = face_scene(skin_lab=(66, 14, 19))
+    lab = lab_of(img)
+    rng = np.random.default_rng(5)
+    jitter = np.radians(np.where(rng.random(truth.shape) < 0.5, -25.0, 25.0) * (rng.random(truth.shape) < 0.5))
+    C, h = np.hypot(lab[..., 1], lab[..., 2]), np.arctan2(lab[..., 2], lab[..., 1]) + jitter
+    lab[truth, 1], lab[truth, 2] = (C * np.cos(h))[truth], (C * np.sin(h))[truth]
+    yield "skin-hue-spread", cs.lab_to_srgb8(lab), None, None
     yield "face-vs-body-dark", lowkey_face_scene()[0], None, ("身体", (40.0, 11.0, 16.0))
 
 
@@ -716,6 +731,35 @@ def region_cases():
     sky = np.clip(np.rint(cs.lab_to_srgb_float(np.stack(np.broadcast_arrays(
         np.linspace(50, 80, 150)[:, None], np.full((1, 150), -8.0), np.full((1, 150), -30.0)), -1)) * 255), 0, 255).astype(np.uint8)
     yield "sky-spread", sprinkle(sky, lab_color(65, 10, -30), 0.08, seed=2)
+    for h0 in (55, 140, 250):  # 同一块颜色里色相分散（一半像素往两侧各偏 ±32°）：色相收拢
+        yield f"hue-spread{h0}", _hue_spread(h0)
+
+
+def _hue_spread(h0, H=120, W=160, seed=4):
+    rng = np.random.default_rng(seed)
+    h = h0 + np.where(rng.random((H, W)) < 0.5, -32.0, 32.0) * (rng.random((H, W)) < 0.5) + rng.normal(0, 2, (H, W))
+    lab = np.stack([np.full((H, W), 60.0), 30 * np.cos(np.radians(h)), 30 * np.sin(np.radians(h))], -1)
+    return cs.lab_to_srgb8(lab)
+
+
+def busy_palette(H=200, W=240):
+    """主色 45%、辅色 25%，另有 5 种颜色各约 6%：6:3:1 里“其余颜色偏杂”。"""
+    lab = np.zeros((H, W, 3))
+    lab[:] = (55, -25, 30)
+    lab[:, int(W * 0.45):int(W * 0.7)] = (60, 10, -35)
+    for i, hh in enumerate((20, 75, 300, 180, 340)):
+        x0 = int(W * 0.7) + i * int(W * 0.06)
+        lab[:, x0:x0 + int(W * 0.06)] = (58, 35 * np.cos(np.radians(hh)), 35 * np.sin(np.radians(hh)))
+    lab[..., 0] += np.linspace(-8, 8, H)[:, None]
+    return cs.lab_to_srgb8(lab)
+
+
+def patchy_grass(H=200, W=240):
+    """一片草地，其中一块偏黄绿（色相 +16°）：“绿”统一度里的偏离小块。"""
+    hh = np.full((H, W), 135.0)
+    hh[60:120, 40:110] = 119.0
+    L = 50 + np.linspace(-6, 6, H)[:, None] + np.zeros((1, W))
+    return cs.lab_to_srgb8(np.stack([L, 35 * np.cos(np.radians(hh)), 35 * np.sin(np.radians(hh))], -1))
 
 
 @pytest.mark.parametrize("tag,img", list(region_cases()), ids=lambda v: v if isinstance(v, str) else "")
@@ -729,6 +773,7 @@ IMAGES = {
     "landscape": landscape(), "teal_orange": teal_orange(), "morandi": morandi(), "portrait": portrait_outdoor(),
     "face": face_scene()[0], "lowkey": lowkey_face_scene()[0], "highkey": highkey_face_scene()[0],
     "mono": np.repeat(np.clip(np.linspace(10, 245, 240), 0, 255).astype(np.uint8)[None, :, None], 200, 0).repeat(3, 2),
+    "busy": busy_palette(), "grass": patchy_grass(),
 }
 
 
