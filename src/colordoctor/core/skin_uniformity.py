@@ -34,6 +34,9 @@ class UniformPatch:
     sat_shift: float  # 相对同明度皮肤（比例）
     lab: tuple[float, float, float]
     severity: str
+    # 真正偏离的那些小块（源图坐标的矩形）：外接框 bbox 里还有正常的皮肤，修正图层只能作用于这些小块，
+    # 否则正常皮肤会被往反方向推（例如偏黄那块往红转时，框里本来正常的皮肤也被转红）
+    cells: tuple[tuple[int, int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +154,9 @@ def analyze_uniformity(
                     sat_shift=round(mds, 3),
                     lab=tuple(round(float(v), 2) for v in mlab),
                     severity=sev,
+                    cells=tuple((int(offset[0] + c[1] * ts * step), int(offset[1] + c[0] * ts * step),
+                                 int((min(ww, (c[1] + 1) * ts) - c[1] * ts) * step), int((min(hh, (c[0] + 1) * ts) - c[0] * ts) * step))
+                                for c in comp if c in tile_index),
                 )
             )
     patches.sort(key=lambda p: -(p.area_fraction * (abs(p.hue_shift) + 30 * abs(p.sat_shift))))

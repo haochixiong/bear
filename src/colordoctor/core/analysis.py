@@ -729,6 +729,9 @@ def analyze_palette_report(
         style_curve = style is not None and any(a.layer and a.layer["kind"] == "curves" for a in style.adjustments)
         if contrast >= LOW_CONTRAST:
             tone_adj = ()
+        elif pr.tone_key:  # 暗调 / 高调的亮暗差天然偏小：S 曲线会改变基调（高调更容易过曝，暗调亮部被提亮）
+            tone_adj = (Adjustment("提示", f"亮暗差（P95−P5 明度 {contrast:.0f}）偏小是{pl.KEY_NAME[pr.tone_key]}画面的特点，不另加对比曲线",
+                                   None, False),)
         elif style_curve:
             tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}）：对比按“与「{style.name}」风格的差距”那一条的影调曲线调，"
                                          "不要再另加一条 S 曲线", None, False),)

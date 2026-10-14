@@ -318,7 +318,7 @@ def family_unity(
             parts.append(f"饱和度 {ss:+d}{s_note}")
         if parts:
             rows.append((c.name, c.mean_hue, float(cs.hue_diff(c.mean_hue, goal)) if abs(hs) >= 5 else 0.0,
-                         ss if abs(ss) >= 8 else 0, 0))
+                         ss if abs(ss) >= 8 else 0, 0, c.share))
             adjs.append(
                 Adjustment(
                     "Camera Raw 混色器",
@@ -332,19 +332,24 @@ def family_unity(
     if target is not None and de is not None and de >= 3:
         cur = cs.lab_to_lch(mean)
         tl = cs.lab_to_lch(target)
-        hs, h_note = ac.cap_slider(ac.hue_slider(ac.lab_hue_to_hsb_hue(cur[2]), ac.lab_hue_to_hsb_hue(tl[2])))
+        # 色相按这种颜色自己的明度、色度换成 HSB；目标的色度（浓淡）也要靠过去，否则差距主要在色度时这一层几乎没用
+        c0 = ac.lab_hue_to_hsb_hue(cur[2], L=cur[0], C=max(cur[1], 8.0))
+        c1 = ac.lab_hue_to_hsb_hue(tl[2], L=cur[0], C=max(cur[1], 8.0))
+        hs, h_note = ac.cap_slider(ac.hue_slider(c0, c1))
+        s0, s1 = (float(cs.srgb8_to_hsb(cs.lab_to_srgb8(np.asarray(v, float)))[1]) for v in (mean, target))
+        ss, s_note = ac.cap_slider(ac.sat_slider(s0, s1))
+        ss = ss if abs(ss) >= 5 else 0
         ls, l_note = ac.cap_slider(ac.lum_slider(tl[0] - cur[0]))
         adjs.append(
             Adjustment(
                 "Camera Raw 混色器",
-                f"整体往目标{family}靠：色相 {hs:+d}{h_note}，明亮度 {ls:+d}{l_note}（当前与目标相差 ΔE00 {de:.1f}，{de_words(de)}）",
-                ac.slider_strength(max(abs(hs), abs(ls))),
+                f"整体往目标{family}靠：色相 {hs:+d}{h_note}，" + (f"饱和度 {ss:+d}{s_note}，" if ss else "")
+                + f"明亮度 {ls:+d}{l_note}（当前与目标相差 ΔE00 {de:.1f}，{de_words(de)}）",
+                ac.slider_strength(max(abs(hs), abs(ss), abs(ls))),
                 True,
             )
         )
-        c0 = ac.lab_hue_to_hsb_hue(cur[2])
-        for params, words in nl.mixer_rows_to_huesat(
-                [(family, c0, float(cs.hue_diff(c0, ac.lab_hue_to_hsb_hue(tl[2]))), 0, ls)]):
+        for params, words in nl.mixer_rows_to_huesat([(family, c0, float(cs.hue_diff(c0, c1)), ss, ls)]):
             adjs.append(nl.adjustment("hueSaturation", params, f"往目标{family}靠：{words}（PS 做法，与“Camera Raw 混色器”那一条二选一）",
                                       "global", f"{family}往目标靠 · 色相/饱和度"))
             toward = True
@@ -707,7 +712,7 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
             hs, note = ac.cap_slider(hs)
             if abs(hs) >= 8:
                 text = f"{c.name}（占画面颜色 {c.share:.0%}）：色相 {hs:+d}，往“{sec}”靠{note}"
-                rows.append((c.name, c.mean_hue, float(cs.hue_diff(c.mean_hue, ac.lab_hue_to_hsb_hue(goal_h))), 0, 0))
+                rows.append((c.name, c.mean_hue, float(cs.hue_diff(c.mean_hue, ac.lab_hue_to_hsb_hue(goal_h))), 0, 0, c.share))
                 out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(hs), True, (("色相", hs),)))
         elif act.startswith("desat"):
             if c.mean_sat <= DESAT_SAT_FLOOR:
@@ -731,7 +736,7 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
                 lum = -int(np.clip(20 + 100 * c.share, 20, ac.SLIDER_CAP))
                 text += f"，明亮度 {lum:+d}"
                 prm.append(("明亮度", lum))
-            rows.append((c.name, c.mean_hue, 0.0, amount, lum))
+            rows.append((c.name, c.mean_hue, 0.0, amount, lum, c.share))
             out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(amount), True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
     for key, label, t, ok in (("shadow_tint", "阴影", sh, sh_ok), ("highlight_tint", "高光", hl, hl_ok)):

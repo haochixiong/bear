@@ -258,7 +258,8 @@ class _Masks:
             return soft if soft.any() else None
         if stem == "skin" and arg:  # 肤色不均匀：这一类小块
             uni = getattr(rep, "uniformity", None)
-            boxes = [p.bbox for p in (uni.patches if uni is not None else ()) if p.kind == arg]
+            # 只作用于真正偏离的小块（不是外接框：框里还有正常的皮肤）
+            boxes = [b for p in (uni.patches if uni is not None else ()) if p.kind == arg for b in (p.cells or (p.bbox,))]
             if not boxes:
                 return None
             m = self._small_boxes(boxes)

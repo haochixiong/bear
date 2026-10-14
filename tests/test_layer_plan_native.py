@@ -254,11 +254,12 @@ def test_acr_params_unchanged():
     rep, _ = CASES["style_teal_orange"]
     assert ap.params_for_report(rep) == {"hsl": {"黄色": {"hue": -40}, "绿色": {"hue": 40}, "浅绿色": {"hue": -40}, "蓝色": {"hue": -40}}}
     rep, _ = CASES["reference"]
+    # 混色器按“影调曲线之后”的颜色和参考比（建议顺序：先曲线）：橙色的明亮度已由曲线对齐，不再另调；
+    # 我的图里几乎没有的红色（< 1%）不给建议
     assert ap.params_for_report(rep) == {
         "curve": {"composite": [[98, 67], [113, 95], [138, 163], [186, 203]]},
-        "hsl": {"橙色": {"hue": 15, "lum": 21, "sat": 40}, "浅绿色": {"hue": -40, "lum": -40, "sat": 40},
-                "红色": {"hue": 10, "lum": 14, "sat": 30}, "绿色": {"sat": -40}, "蓝色": {"hue": -40, "lum": -40, "sat": 40},
-                "黄色": {"sat": -40}},
+        "hsl": {"橙色": {"hue": -18, "sat": 38}, "浅绿色": {"hue": -40, "lum": -40, "sat": 40},
+                "绿色": {"sat": -40}, "蓝色": {"hue": -40, "lum": -40, "sat": 40}, "黄色": {"sat": -40}},
     }
 
 

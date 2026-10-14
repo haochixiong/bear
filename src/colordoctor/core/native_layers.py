@@ -164,28 +164,35 @@ def _acr_gap(name: str) -> float:
 def mixer_rows_to_huesat(rows) -> list[tuple[dict, str]]:
     """Camera Raw 混色器 -> PS 色相/饱和度（每个通道一个对准该颜色的自定义范围）。
 
-    rows：[(通道名, HSB 中心, 色相度数, ACR 饱和度滑块, ACR 明亮度滑块)]。色相用真实要转的度数（不从滑块反推）；
+    rows：[(通道名, HSB 中心, 色相度数, ACR 饱和度滑块, ACR 明亮度滑块[, 权重])]。色相用真实要转的度数（不从滑块反推）；
     饱和度 ±100 与 PS 大致相当（上限 ±60）；明亮度在 PS 里会同时变灰，按一半换算、上限 ±30。
+    权重（一般是该通道的颜色占比）用于合并：几乎没有像素的通道不能把同一范围里大片颜色往它的方向拉。
+    PS 的明度是往白 / 往黑混合，颜色会按 1 − |明度| 变淡（Camera Raw 的明亮度不会）：饱和度相应补回来，
+    否则“饱和度 +40、明度 +20”的结果反而更灰。
     返回 [(参数, 卡片文字)]，超过 6 个范围时分成多层。
     """
-    # 两个通道的颜色实际落在几乎同一个色相上时，PS 的一个范围没法把它往两边拉：合成一个范围，数值取平均
+    # 两个通道的颜色实际落在几乎同一个色相上时，PS 的一个范围没法把它往两边拉：合成一个范围，数值按权重平均
     merged: list[list] = []
-    for name, center, hue_deg, sat, lum in sorted(rows, key=lambda r: float(r[1]) % 360):
+    for row in sorted(rows, key=lambda r: float(r[1]) % 360):
+        name, center, hue_deg, sat, lum = row[:5]
+        wt = max(float(row[5]), 1e-6) if len(row) > 5 else 1.0
         c = float(center) % 360
         near = next((m for m in merged if abs(((c - m[1] + 180) % 360) - 180) < MERGE_HSB), None)
         if near is None:
-            merged.append([[name], c, [hue_deg], [sat], [lum or 0], _acr_gap(name)])
+            merged.append([[name], c, [hue_deg], [sat], [lum or 0], _acr_gap(name), [wt]])
         else:
             near[0].append(name)
             near[2].append(hue_deg)
             near[3].append(sat)
             near[4].append(lum or 0)
             near[5] = min(near[5], _acr_gap(name))
+            near[6].append(wt)
     items, words = [], []
-    for names, c, hues, sats, lums, gap in merged:
-        h = clip(np.mean(hues), -PS_HUE_CAP, PS_HUE_CAP)
-        s = clip(np.mean(sats), -PS_SAT_CAP, PS_SAT_CAP)
-        li = clip(np.mean(lums) * 0.5, -PS_LIGHT_CAP, PS_LIGHT_CAP)
+    for names, c, hues, sats, lums, gap, wts in merged:
+        h = clip(np.average(hues, weights=wts), -PS_HUE_CAP, PS_HUE_CAP)
+        li = clip(np.average(lums, weights=wts) * 0.5, -PS_LIGHT_CAP, PS_LIGHT_CAP)
+        k = 1.0 + float(np.average(sats, weights=wts)) / 100.0  # 想要的色度倍数
+        s = clip(((k / (1.0 - abs(li) / 100.0)) - 1.0) * 100.0, -PS_SAT_CAP, PS_SAT_CAP)
         if not (h or s or li):
             continue
         others = [abs(((c - m[1] + 180) % 360) - 180) for m in merged if m[1] != c]
@@ -397,14 +404,18 @@ def skin_patch_layer(kind: str, dh: float, ds: float, lab=(68.0, 14.0, 19.0)):
             return ("hueSaturation", huesat(idx, ramps, hue=hue, sat=sat),
                     f"{rname}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）" + (f"，饱和度 {sat:+d}" if sat else ""))
         return "hueSaturation", huesat(idx, ramps, hue=hue), f"{rname}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）"
-    if kind == "偏红橙":
-        cr = -clip(abs(dh) / 2, 2, 15)
-        yb = -clip(abs(dh) / 3, 1, 10)  # 负值 = 往黄
-        return "colorBalance", balance(midtones=(cr, 0, yb)), f"中间调 青-红 {cr}（往青），黄-蓝 {yb}（往黄）"
-    if kind == "偏青绿":
-        cr = clip(abs(dh) / 2, 3, 15)
-        mg = -clip(cr / 2, 1, 8)
-        return "colorBalance", balance(midtones=(cr, mg, 0)), f"中间调 青-红 +{cr}（往红），洋红-绿 {mg}（往洋红）"
+    if kind in ("偏红橙", "偏青绿"):
+        # 色彩平衡（中间调）在这块皮肤的实际颜色上求：色度不变、色相转回整体（以前按经验值给，暗皮肤上会转过头一倍）
+        goal = np.radians(hp - dh)
+        lv = balance_for_shift(C * np.cos(goal) - a, C * np.sin(goal) - b, "midtones", cap=15, lab=lab)
+        if any(lv):
+            p = balance(midtones=lv)
+            return "colorBalance", p, balance_text(p)
+        shift = hsb_shift(hp, hp - dh, L, C)  # 中间调管不到（很暗 / 很亮的皮肤）：改用色相/饱和度转色相
+        hue = int(np.sign(shift) or (1 if kind == "偏红橙" else -1)) * clip(abs(shift), 2, 15)
+        idx, ramps = custom_range(ac.lab_hue_to_hsb_hue(hp, L=L, C=max(C, 8.0)))
+        return ("hueSaturation", huesat(idx, ramps, hue=hue),
+                f"{PS_RANGES[idx - 1][1]}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）")
     if kind == "缺色发灰":
         vib = clip(abs(ds) * 60, 8, 30)
         return "vibrance", {"vibrance": vib, "saturation": 0}, f"自然饱和度 +{vib}"

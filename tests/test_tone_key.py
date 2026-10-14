@@ -183,7 +183,7 @@ def test_reference_white_balance_ignores_clipped_whites():
         if clip:
             img[:, :120] = 255  # 60% 死白
         return img
-    m = rm.match_reference(scene(-5.0, True), scene(0.0, False))
+    m = rm.match_reference(scene(-5.0, True), scene(0.0, True))  # 两张影调相同（没有曲线），只差白平衡
     assert m.cast_mine is not None and m.cast_mine[1] == pytest.approx(-5.0, abs=0.7)  # 以前被死白冲淡到约 −2
     cb = [a for a in m.adjustments if a.layer and a.layer["kind"] == "colorBalance"]
     assert cb and cb[0].layer["params"]["midtones"][2] < 0  # 往黄
