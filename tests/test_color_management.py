@@ -73,10 +73,15 @@ def test_exif_orientation_is_applied(tmp_path):
     assert src.original_size == (30, 40)
 
 
-def test_png_is_rejected(tmp_path):
+def test_png_named_jpg_is_read_and_other_formats_rejected(tmp_path):
+    # 扩展名是 .jpg、内容是 PNG：按实际格式读（网上下载的图常这样）
     p = _save(tmp_path, "f.png", _flat((1, 2, 3)))
+    renamed = tmp_path / "renamed.jpg"
+    renamed.write_bytes(p.read_bytes())
+    assert cm.load_jpeg(renamed).pixels.shape[2] == 3
+    g = _save(tmp_path, "f.gif", _flat((1, 2, 3)))
     with pytest.raises(cm.ImageLoadError, match="JPG"):
-        cm.load_jpeg(p)
+        cm.load_jpeg(g)
 
 
 def test_corrupt_jpeg_raises_friendly_error(tmp_path):
