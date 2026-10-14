@@ -44,13 +44,15 @@ class CaptureSession(QObject):
 
     def __init__(
         self, captures: list[ScreenCapture], steps: list[str], radius: int = 2, allow_point: bool = True,
-        lasso: bool = False, labels: list[str] | None = None,
+        lasso: bool = False, labels: list[str] | None = None, multi_point: bool = False,
     ):
         super().__init__()
         self.captures = captures
         self.steps = steps
         self.step = 0
         self.allow_point = allow_point
+        self.multi_point = multi_point  # 单点模式：可以连续点多个，回车或 Esc 结束
+        self.points = 0
         self.labels = labels or (["参考区", "问题区"] if len(steps) > 1 else ["选区"])
         self.overlays: list[_ScreenOverlay] = []
         for i, cap in enumerate(captures):
@@ -62,7 +64,8 @@ class CaptureSession(QObject):
             ov.view.polygon_selected.connect(lambda pts, i=i: self._on_polygon(i, pts))
             ov.view.point_selected.connect(lambda x, y, i=i: self._on_point(i, x, y))
             ov.view.rect_selected.connect(lambda x, y, w, h, i=i: self._on_rect(i, x, y, w, h))
-            ov.view.cancelled.connect(self.cancel)
+            ov.view.cancelled.connect(self._esc)
+            ov.view.finished.connect(self._enter)
             ov.on_close = self._overlay_closed
             self.overlays.append(ov)
         self._update_text()
@@ -76,15 +79,36 @@ class CaptureSession(QObject):
 
     def _update_text(self):
         text = self.steps[self.step] if self.step < len(self.steps) else ""
+        if self.multi_point:
+            text = (f"已取 {self.points} 个点，继续单击取点；回车或 Esc 结束（两个点以上会自动对比）" if self.points
+                    else "单击取点，可以连续点多个；拖动则取框内平均")
         for ov in self.overlays:
-            ov.view.instruction = text + "   （Esc 取消）"
+            ov.view.instruction = text + ("" if self.multi_point else "   （Esc 取消）")
             ov.view.update()
 
     def _on_point(self, i, x, y):
         if not self.allow_point:
             return
+        if self.multi_point:
+            self.points += 1
+            self.selected.emit(self.captures[i], "point", (x, y), self.step)
+            self.overlays[i].view.add_mark((x, y, 1, 1), f"点 {self.points}")
+            self._update_text()
+            return
         self.selected.emit(self.captures[i], "point", (x, y), self.step)
         self._advance(i, (x, y, 1, 1))
+
+    def _esc(self):
+        # 连续取点时 Esc 也是“结束”（已经取的点保留），否则是取消
+        if self.multi_point and self.points:
+            self._enter()
+        else:
+            self.cancel()
+
+    def _enter(self):
+        if self.multi_point and self.points:
+            self.close()
+            self.finished.emit()
 
     def _sync_radius(self, r):
         for ov in self.overlays:

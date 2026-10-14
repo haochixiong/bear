@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPixmap
-from PyQt6.QtWidgets import QListWidget, QListWidgetItem, QMenu
+from PyQt6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, QMenu
 
 from colordoctor.ui.session import HistoryItem
 
@@ -16,11 +16,13 @@ class HistoryPanel(QListWidget):
     use_as_target = pyqtSignal(int)
     remove_item = pyqtSignal(int)
     clear_all = pyqtSignal()
+    compare_points = pyqtSignal(list)  # 选中的多个取色点 id（按取样先后，第一个是基准）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl / Shift 多选取色点做对比
         self.currentItemChanged.connect(self._changed)
         self.ref_action_text = "设为参考区"  # 仿色模式下改为“设为参考作品”
 
@@ -65,6 +67,11 @@ class HistoryPanel(QListWidget):
     def _menu(self, pos):
         it = self.itemAt(pos)
         m = QMenu(self)
+        sel = [int(i.data(Qt.ItemDataRole.UserRole)) for i in self.selectedItems()]
+        if len(sel) >= 2:
+            ids = sorted(sel)  # 按取样先后（id 递增），最早取的是基准
+            m.addAction(f"对比选中的 {len(ids)} 个取色点（最早取的为基准）", lambda: self.compare_points.emit(ids))
+            m.addSeparator()
         if it is not None:
             hid = int(it.data(Qt.ItemDataRole.UserRole))
             m.addAction(self.ref_action_text, lambda: self.set_reference.emit(hid))

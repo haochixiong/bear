@@ -81,7 +81,7 @@ class JpgSelectDialog(QDialog):
     """在 JPG 上选择点/区域（不是图片浏览器，只用来取样）。"""
 
     def __init__(self, parent, pixels: np.ndarray, steps: list[str], radius: int, lasso: bool = False,
-                 labels: list[str] | None = None, allow_point: bool = True):
+                 labels: list[str] | None = None, allow_point: bool = True, multi_point: bool = False):
         super().__init__(parent)
         self.labels = labels or (["参考区", "问题区"] if len(steps) > 1 else ["选区"])
         self.setWindowTitle("在图片上选择（滚轮缩放，右键拖动平移，Esc 取消）")
@@ -97,17 +97,40 @@ class JpgSelectDialog(QDialog):
         self.view.polygon_selected.connect(lambda pts: self._got("polygon", tuple(pts)))
         self.view.point_selected.connect(lambda x, y: self._got("point", (x, y)))
         self.view.rect_selected.connect(lambda x, y, w, h: self._got("rect", (x, y, w, h)))
-        self.view.cancelled.connect(self.reject)
+        self.multi_point = multi_point  # 单点模式：连续取多个点，回车或 Esc 结束
+        self.view.cancelled.connect(self._esc)
+        self.view.finished.connect(self._enter)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.view)
         self._text()
 
     def _text(self):
-        self.view.instruction = self.steps[self.step]
+        if self.multi_point:
+            n = len(self.results)
+            self.view.instruction = (f"已取 {n} 个，继续单击取点；回车或 Esc 结束（两个点以上会自动对比）" if n
+                                     else "单击取点，可以连续点多个；拖动则取框内平均")
+        else:
+            self.view.instruction = self.steps[self.step]
         self.view.update()
 
+    def _esc(self):
+        if self.multi_point and self.results:
+            self.accept()  # 已经取的点保留
+        else:
+            self.reject()
+
+    def _enter(self):
+        if self.results:
+            self.accept()
+
     def _got(self, kind, coords):
+        if self.multi_point:
+            self.results.append((kind, coords, 0))
+            rect = coords if kind == "rect" else (coords[0], coords[1], 1, 1)
+            self.view.add_mark(rect, f"点 {len(self.results)}")
+            self._text()
+            return
         self.results.append((kind, coords, self.step))
         if kind == "polygon":
             xs, ys = [p[0] for p in coords], [p[1] for p in coords]
@@ -215,6 +238,7 @@ class MainWindow(QMainWindow):
         self._live = None
         self._was_live = False
         self._pending_problem = None
+        self._batch_points: list | None = None  # 连续取点时本轮取到的点
         self._ref_busy = False
         self._current: HistoryItem | None = None
         self.ref_image_item: HistoryItem | None = None
@@ -422,6 +446,7 @@ class MainWindow(QMainWindow):
         self.history_panel.item_activated.connect(self._history_activated)
         self.history_panel.set_reference.connect(self._history_set_ref)
         self.history_panel.set_problem.connect(self._history_compare)
+        self.history_panel.compare_points.connect(lambda ids: self.show_multipoint([h for h in (self.session.get(i) for i in ids) if h]))
         self.history_panel.use_as_target.connect(self._history_target)
         self.history_panel.remove_item.connect(self._history_remove)
         self.history_panel.clear_all.connect(self._history_clear)
@@ -749,7 +774,10 @@ class MainWindow(QMainWindow):
             labels = labels[self._capture_steps_offset:]
         lasso = self.session.mode == "skin" and self.lasso_check.isChecked()
         multi = self.session.mode in ("compare", "reference")  # 多步框选：单击不能吃掉一步
-        cs_ = CaptureSession(caps, steps, radius=self.session.radius, lasso=lasso, labels=labels, allow_point=not multi)
+        point_mode = self.session.mode == "point"
+        self._batch_points = [] if point_mode else None
+        cs_ = CaptureSession(caps, steps, radius=self.session.radius, lasso=lasso, labels=labels, allow_point=not multi,
+                             multi_point=point_mode)
         cs_.radius_changed.connect(self._set_radius)
         cs_.selected.connect(self._on_capture_selected)
         cs_.finished.connect(self._capture_done)
@@ -764,6 +792,7 @@ class MainWindow(QMainWindow):
         self.capture_session = None
         self.show()
         self.raise_()
+        self._finish_batch()
         if self._was_live:
             self.live_timer.start()
 
@@ -840,10 +869,12 @@ class MainWindow(QMainWindow):
         labels = LABELS.get(mode)
         lasso = mode == "skin" and self.lasso_check.isChecked()
         dlg = JpgSelectDialog(self, self.jpg.pixels, steps, self.session.radius, lasso=lasso,
-                              labels=labels[offset:] if labels else None, allow_point=mode not in ("compare", "reference"))
+                              labels=labels[offset:] if labels else None, allow_point=mode not in ("compare", "reference"),
+                              multi_point=mode == "point")
         if not dlg.exec() and not dlg.results:
             return
         label = f"文件 {self.jpg.context.device}"
+        self._batch_points = [] if mode == "point" else None
         for kind, coords, step in dlg.results:
             step += offset
             try:
@@ -863,6 +894,7 @@ class MainWindow(QMainWindow):
                 return
         if mode == "reference" and offset == 0:
             self.statusBar().showMessage("已记录参考作品：现在打开你的照片（或框选屏幕）选你的照片", 10000)
+        self._finish_batch()
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasUrls():
@@ -887,7 +919,32 @@ class MainWindow(QMainWindow):
             return
         s = dataclasses.replace(s, x=int(x), y=int(y))
         item = self.session.add_point(patch, s, label)
+        if getattr(self, "_batch_points", None) is not None:
+            self._batch_points.append(item)
+            item.label = f"点 {len(self._batch_points)}  {item.label}"
         self._after_add(item)
+
+    def _finish_batch(self):
+        """连续取了两个点以上：自动对比，显示在“取色数值”页。"""
+        items, self._batch_points = getattr(self, "_batch_points", None) or [], None
+        if len(items) >= 2:
+            self.show_multipoint(items)
+
+    def show_multipoint(self, items: list[HistoryItem]):
+        from colordoctor.core.multipoint import compare_points
+        from colordoctor.ui.multipoint_view import multipoint_html
+
+        pts = sorted((h for h in items if isinstance(h.result, PointSample)), key=lambda h: h.id)  # 最早取的是基准
+        if len(pts) < 2:
+            self.statusBar().showMessage("至少选两个取色点才能对比", 4000)
+            return
+        names = [h.label.split("  ")[0] if h.label.startswith("点 ") else f"点 {i + 1}" for i, h in enumerate(pts)]
+        res = compare_points([h.result.values.lab for h in pts], names)
+        self.point_view.setHtml(multipoint_html(res))
+        self.tabs.setCurrentWidget(self.point_view)
+        self.wheel.set_scatter(None)
+        self.wheel.set_point(pts[-1].result.values.lab, pts[-1].result.values.rgb)
+        self.statusBar().showMessage(res.summary, 10000)
 
     def _run_rect(self, region, rect, ctx, label, step, replace: HistoryItem | None = None, lasso=None, manual_mask=None,
                   mode: str | None = None, part: str | None = None):
@@ -917,6 +974,9 @@ class MainWindow(QMainWindow):
             s = PointSample(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2, 0, int(region.shape[0] * region.shape[1]), vals, ctx)
             item = self.session.add_point(region, s, label)
             item.label = f"区域平均 {rect[2]}×{rect[3]} {vals.hex}"
+            if getattr(self, "_batch_points", None) is not None:  # 连续取点时也算一个点
+                self._batch_points.append(item)
+                item.label = f"点 {len(self._batch_points)}  {item.label}"
             self._after_add(item)
             return
         if mode == "compare":

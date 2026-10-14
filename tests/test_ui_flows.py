@@ -167,3 +167,60 @@ def test_user_choices_are_restored_after_restart(qtbot, tmp_path):
     w3 = MainWindow(settings=QSettings(str(tmp_path / "keep.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(w3)
     assert w3.style_box.currentData() is None
+
+
+def test_jpg_point_mode_takes_several_points_and_compares(win, qtbot, monkeypatch):
+    from colordoctor.core.color_models import PointSample
+    from colordoctor.ui import main_window as mw
+    from synth import YELLOW
+
+    img = noisy(flat(BLUE), 1)
+    img[:, 100:] = flat(YELLOW)[:, 100:]
+
+    class Dlg(mw.JpgSelectDialog):
+        def exec(self):
+            for x in (20, 40, 150):  # 两个蓝点、一个黄点
+                self._got("point", (x, 50))
+            assert self.results and self.isHidden()  # 连续取点：对话框不会因为单击而关闭
+            return 1
+
+    monkeypatch.setattr(mw, "JpgSelectDialog", Dlg)
+    win.jpg = type("J", (), {"pixels": img, "context": CTX})()
+    win.set_mode("point")
+    win.select_on_jpg()
+    pts = sorted((h for h in win.session.history if isinstance(h.result, PointSample)), key=lambda h: h.id)
+    assert len(pts) == 3 and pts[0].label.startswith("点 1")
+    text = win.point_view.toPlainText()
+    assert "多点对比" in text and "基准" in text and "不均" in text
+    assert win.tabs.currentWidget() is win.point_view
+
+
+def test_capture_multi_point_ends_with_enter(qtbot):
+    from colordoctor.capture.geometry import ScreenInfo
+    from colordoctor.capture.screen_capture import ScreenCapture
+    from colordoctor.ui.capture_overlay import CaptureSession
+
+    info = ScreenInfo("FAKE", 0, 0, 200, 150, 1.0)
+    s = CaptureSession([ScreenCapture(info=info, pixels=flat((1, 2, 3), 150, 200))], ["单击"], multi_point=True)
+    got, done = [], []
+    s.selected.connect(lambda c, k, coords, step: got.append(coords))
+    s.finished.connect(lambda: done.append(1))
+    s.show()
+    v = s.overlays[0].view
+    qtbot.waitExposed(s.overlays[0])
+    for x in (20, 60, 100):
+        qtbot.mouseClick(v, Qt.MouseButton.LeftButton, pos=v.to_view(x, 40).toPoint())
+    assert len(got) == 3 and not done and "已取 3 个点" in v.instruction
+    qtbot.keyClick(v, Qt.Key.Key_Return)
+    assert done == [1]
+
+
+def test_history_multi_select_compares_points(win):
+    from colordoctor.core.color_models import PointSample
+
+    win.set_mode("point")
+    for c in (BLUE, (40, 80, 210), (200, 170, 40)):
+        win._run_rect(noisy(flat(c), 1)[:20, :20], (0, 0, 20, 20), CTX, "t", 0)
+    ids = [h.id for h in win.session.history if isinstance(h.result, PointSample)]
+    win.history_panel.compare_points.emit(ids)
+    assert "多点对比" in win.point_view.toPlainText()

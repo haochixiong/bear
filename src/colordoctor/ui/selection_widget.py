@@ -23,6 +23,7 @@ class ImageSelectWidget(QWidget):
     polygon_selected = pyqtSignal(object)  # [(x, y), ...] 图像坐标（套索）
     radius_changed = pyqtSignal(int)
     cancelled = pyqtSignal()
+    finished = pyqtSignal()  # 回车：结束连续取点
 
     def __init__(self, parent=None, magnifier: bool = True, allow_zoom: bool = False):
         super().__init__(parent)
@@ -153,6 +154,8 @@ class ImageSelectWidget(QWidget):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape:
             self.cancelled.emit()
+        elif ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.finished.emit()
         elif ev.key() in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
             ch = list(self.radius_choices)
             i = min(range(len(ch)), key=lambda k: abs(ch[k] - self.radius))
