@@ -44,7 +44,9 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 47321
 CLIENT_HEADER = "X-ColorDoctor-Client"
 MAX_BODY = 400 * 1024 * 1024  # 约 1 亿像素的 RGBA
-MAX_SESSIONS = 8
+MAX_SESSIONS = 16
+# 插件和服务的协议版本：加了接口 / 参数就加 1。插件发现服务的版本比自己要求的旧，就提示更新桌面版
+PROTOCOL = 3  # 1：基础分析；2：/multipoint、/reference-file；3：影调风格（tone_style / tone_target / tone）
 MODES = ("dirty", "skin", "palette", "reference", "patch")
 
 
@@ -72,8 +74,12 @@ class Store:
         return key
 
     def get(self, key: str):
+        """取出并刷新“最近使用”：正在用的结果（例如反复生成图层）不会因为别的页面分析了几次就被挤掉。"""
         with self._lock:
-            return self._d.get(key)
+            v = self._d.get(key)
+            if v is not None:
+                self._d.move_to_end(key)
+            return v
 
 
 def photoshop_context(layer_name: str = "") -> ColorContext:
@@ -108,8 +114,10 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
                 part = None  # 肤色规则分不出脸和身体，不能再标“脸部”
                 ctx = dataclasses.replace(ctx, warnings=(*ctx.warnings, f"{e}；已改用肤色规则抠皮肤（不区分脸和身体）"))
             else:
-                if not manual.any():
-                    raise pixel_guard.BlockedError("AI 没有在画面里找到这个部位的皮肤。可以换成「肤色规则」，或改选部位。")
+                if not manual.any():  # 和桌面版一样：改用肤色规则，并说明（而不是直接报错）
+                    manual = None
+                    ctx = dataclasses.replace(ctx, warnings=(*ctx.warnings, f"AI 没有在画面里找到{part or ''}皮肤，已改用肤色规则抠皮肤（不区分脸和身体）"))
+                    part = None
         if manual is None and valid is not None:
             from colordoctor.core.skin_mask import skin_mask
 
@@ -229,7 +237,7 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
     """服务端核心逻辑（与 HTTP 解耦，便于测试）。不能分析时抛 pixel_guard.BlockedError。"""
     pixel_guard.check_layer_kind(layer_kind, layer_name)
     if mode == "patch":
-        return patch_values(pixels)
+        return patch_values(pixels, q.get("preset") or "")
     prep = pixel_guard.prepare(pixels)
     report = run_analysis(prep, mode, q, refs, layer_name)
     plan = layer_plan.plan_from_report(report, prep.rgb.shape)
@@ -272,8 +280,11 @@ def tone_json(report) -> dict | None:
     return tcl.to_json(p.tone_class, p.tone_target, p.tone_also, p.tone_label)
 
 
-def patch_values(pixels: np.ndarray) -> dict:
-    """取色：一小块像素（PS 选区或吸管范围）的平均颜色、肤色快速规则、所属 ACR 通道、纯度。"""
+def patch_values(pixels: np.ndarray, preset_key: str = "") -> dict:
+    """取色：一小块像素（PS 选区或吸管范围）的平均颜色、肤色快速规则、所属 ACR 通道、纯度。
+
+    preset_key：肤色风格；给出时按这个风格自己的快速规则判断（和「人像」页、桌面版一致），否则用全局规则。
+    """
     from colordoctor.core import acr_channels as ac
     from colordoctor.core import color_spaces as cs
     from colordoctor.core.portrait_analysis import quick_rule_check
@@ -288,7 +299,14 @@ def patch_values(pixels: np.ndarray) -> dict:
     rgb = px[:, :3]
     vals = color_values(rgb.astype(np.float64).mean(axis=0))
     lab = cs.srgb8_to_lab(rgb[:: max(1, rgb.shape[0] // 50_000)])
-    qr = quick_rule_check(lab, global_quick_rule())
+    preset = None
+    if preset_key:
+        from colordoctor.core import skin_presets as sp
+
+        if preset_key not in {p.key for p in sp.load_presets()}:
+            raise ValueError(f"不认识的肤色风格：{preset_key}")
+        preset = sp.get_preset(preset_key)
+    qr = quick_rule_check(lab, preset.quick_rule if preset is not None and preset.quick_rule else global_quick_rule())
     w = ac.memberships(np.array([vals.hsb[0]]))[0] if vals.lch[1] >= 4 else np.zeros(len(ac.NAMES))
     channels = [{"channel": n, "weight": round(float(x), 3)} for n, x in zip(ac.NAMES, w, strict=True) if x > 0.01]
     purity = None
@@ -299,6 +317,7 @@ def patch_values(pixels: np.ndarray) -> dict:
             d = np.abs(((lch[..., 2][chrom] - vals.lch[2] + 180) % 360) - 180)
             purity = round(float((d <= 30).mean()), 4)
     return {"mode": "patch", "pixels": int(px.shape[0]), "values": to_jsonable(vals), "quick_rule": to_jsonable(qr),
+            "quick_rule_preset": preset.name if preset is not None and preset.quick_rule else "",
             "acr_channels": channels, "purity": purity}
 
 
@@ -450,7 +469,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path == "/health":
-            return self._send(200, {"ok": True, "version": __version__, "modes": list(MODES)})
+            return self._send(200, {"ok": True, "version": __version__, "protocol": PROTOCOL, "modes": list(MODES)})
         if url.path == "/options":
             from colordoctor.core import palette as pl
             from colordoctor.core import skin_presets as sp
@@ -579,10 +598,27 @@ def _header_text(v: str) -> str:
     return unquote(v or "")
 
 
+class _ExclusiveServer(ThreadingHTTPServer):
+    """端口被占用时必须绑定失败（桌面版据此知道已经有一个服务在跑）。
+
+    标准库默认打开 SO_REUSEADDR：在 Windows 上这会让第二个程序也绑上同一个端口，两个服务各收一部分请求，
+    插件拿到的会话 / 蒙版时有时无，旧版本也可能来回答。
+    """
+
+    allow_reuse_address = False
+
+    def server_bind(self):
+        import socket
+
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows：独占端口
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
     handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4), "calibration": {},
                                                 "cal_lock": threading.Lock()})
-    srv = ThreadingHTTPServer((HOST, port), handler)
+    srv = _ExclusiveServer((HOST, port), handler)
     srv.daemon_threads = True
     return srv
 

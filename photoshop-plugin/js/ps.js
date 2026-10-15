@@ -48,7 +48,7 @@ function inspectTarget(target) {
   const doc = app.activeDocument;
   if (!doc) return { ok: false, reason: "没有打开的文档。" };
   if (target === "merged") {
-    return { ok: true, doc, layer: null, kind: "merged", label: "合并可见图层（整个画面）",
+    return { ok: true, doc, layer: null, kind: "merged", label: "整个画面（合并可见）",
       bounds: { left: 0, top: 0, right: doc.width, bottom: doc.height } };
   }
   const layers = doc.activeLayers;
@@ -69,13 +69,13 @@ function inspectTarget(target) {
   const label = `${layer.name}`;
   if (NO_PIXEL_KINDS.has(kind)) {
     return { ok: false, layer, kind, label,
-      reason: `「${layer.name}」是调整图层或填充图层，本身没有像素。请把分析对象改为「当前图层及以下」（分析到这一层为止看到的画面），或选中像素图层。` };
+      reason: `「${layer.name}」是调整图层或填充图层，本身没有像素。请把分析对象改为「到这一层的画面」，或选中像素图层。` };
   }
   if (NEED_MERGED_KINDS[kind]) {
     // 图层组不能栅格化，只能合并
     const fix = kind === "group" ? "或先合并这个组（Ctrl+E）" : "或先栅格化（图层 → 栅格化）";
     return { ok: false, layer, kind, label,
-      reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「当前图层及以下」，${fix}。` };
+      reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「到这一层的画面」，${fix}。` };
   }
   const b = layer.boundsNoEffects || layer.bounds;
   if (!b || b.right - b.left < 2 || b.bottom - b.top < 2) {

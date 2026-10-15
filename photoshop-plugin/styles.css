@@ -7,7 +7,10 @@ button.make { background: #2b5aa0; border-color: #2b5aa0; color: #fff; }
 select, input { background: #1f1f1f; color: #e6e6e6; border: 1px solid #4a4a4a; border-radius: 3px; height: 28px; font-size: 12px; }
 input[type=number] { width: 54px; }
 .row { display: flex; gap: 6px; align-items: center; }
-.row > * { flex: 1; }
+.row > * { flex: 1; min-width: 0; }
+.row > label { flex: 0 0 auto; color: #b0b0b0; }  /* 标签只占自己的宽度，下拉框拿剩下的 */
+select { text-overflow: ellipsis; }
+#analyze { flex: 0 0 auto; }
 .between { justify-content: space-between; }
 .hidden { display: none; }
 .strong { font-weight: bold; }

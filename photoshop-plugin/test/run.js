@@ -274,7 +274,7 @@ function dirtySky(w, h) {
     const sinfo = ps.inspectTarget("stack");
     assert.ok(sinfo.ok && sinfo.stack && /及以下/.test(sinfo.label) && /2 个可见图层/.test(sinfo.notes.join("")));
     const linfo = ps.inspectTarget("layer");
-    assert.ok(!linfo.ok && /当前图层及以下/.test(linfo.reason));  // 只看像素时调整图层不能分析，提示改用“及以下”
+    assert.ok(!linfo.ok && /到这一层的画面/.test(linfo.reason));  // 只看像素时调整图层不能分析，提示改用“及以下”
     let seenVis = null;
     let seenOpts = null;
     const resumes = [];

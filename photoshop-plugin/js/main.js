@@ -6,7 +6,7 @@ const ps = require("./ps.js");
 
 const SUBS = {
   color: [["dirty", "脏色"], ["patch", "取色"], ["ratio", "比例 6:3:1"], ["style", "影调与颜色"]],
-  portrait: [["skin", "皮肤均匀"], ["skinpatch", "肤色取色"]],
+  portrait: [["skin", "人像肤色"], ["skinpatch", "肤色取色"]],
   reference: [["reference", "仿色"]],
 };
 const SUB_NAME = Object.fromEntries(Object.values(SUBS).flat());
@@ -49,7 +49,7 @@ const cur = () => state.bySub[state.sub] || null;
 function analyzeLabel() {
   if (MODE_OF[state.sub] === "patch") return "读取选区颜色";
   const t = $("target").value;
-  return t === "merged" ? "分析合并画面" : (t === "stack" ? "分析到这一层的画面" : "分析当前图层");
+  return t === "merged" ? "分析整个画面" : (t === "stack" ? "分析到这一层" : "分析这个图层");
 }
 
 // ---------------------------------------------------------------- 分析对象栏
@@ -87,7 +87,10 @@ function refreshTarget() {
   }
   $("analyze").disabled = false;
   const sameObject = a && info.doc && a.docId === info.doc.id && a.layerId === (info.layer ? info.layer.id : null);
-  if (sameObject && a.target === $("target").value) {
+  if (e && e.expired) {
+    st.className = "status warn";
+    st.textContent = `这次分析的结果在本机服务里已经过期（服务重启过，或之后又分析了很多次），蒙版取不到了。请再点「${analyzeLabel()}」`;
+  } else if (sameObject && a.target === $("target").value) {
     const stale = isStale(a, info.doc);
     const changed = settingsChanged(e);
     st.className = stale || changed ? "status warn" : "status ok";
@@ -108,7 +111,7 @@ function refreshTarget() {
   return info;
 }
 
-const TARGET_NAME = { stack: "当前图层及以下的画面", layer: "只看当前图层", merged: "合并可见图层" };
+const TARGET_NAME = { stack: "到这一层的画面", layer: "只看这个图层", merged: "整个画面（合并可见）" };
 
 // 结果是按哪些设置算的：分析时记下，设置改了就提示（不能拿旧设置的结果当新设置的用）
 function settingsKey(sub) { return JSON.stringify(query(sub)); }
@@ -247,7 +250,7 @@ function renderControls() {
     toneHint();
     colorHint();
   } else if (state.sub === "ratio") {
-    c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>
+    c.innerHTML = `<div class="row"><label>统一色</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>
       <div class="muted">影调风格和颜色模板在「影调与颜色」页选；这里只看比例和统一色。</div>
       <div class="muted">看主色 / 辅色 / 点缀色的面积是否接近 6:3:1；选一个色系时还会生成把杂色往它统一的调整图层。</div>`;
     remember("family");
@@ -337,6 +340,8 @@ function query(sub) {
     if (t.startsWith("t:")) q.tone_target = t.slice(2);
   }
   if (sub === "ratio" && v("family")) q.family = v("family");
+  // 肤色取色：快速规则按「人像肤色」页选的肤色风格判断（和那一页、桌面版一致）
+  if (sub === "skinpatch" && typeof prefs.preset === "string" && prefs.preset) q.preset = prefs.preset;
   if (sub === "skin") {
     q.preset = v("preset"); q.seg = v("seg");
     q.part = q.seg === "ai" ? v("part") : "";  // 肤色规则分不出脸和身体：不标部位
@@ -419,10 +424,15 @@ async function runAnalyze() {
       },
     };
   } catch (e) {
+    setBusy(false);
+    if (mode === "patch") {
+      // 取色失败（例如没有选区）：保留之前的取色结果，只在状态栏说明
+      refreshTarget();
+      statusError(e);
+      return;
+    }
     // 失败：这个页面不再保留旧结果，避免用旧结果生成图层
     delete state.bySub[sub];
-    setBusy(false);
-    serviceDown(e);
     if (state.sub === sub) renderError(e);
     refreshTarget();  // 也会刷新影调说明（不再说“这张图现在是…”）
     return;
@@ -442,7 +452,7 @@ async function readForeground() {
   const sub = state.sub;
   setBusy(true, "正在读取前景色…");
   try {
-    const res = await bridge.analyze(px, "patch", {}, { layerKind: "pixel" });
+    const res = await bridge.analyze(px, "patch", query(sub), { layerKind: "pixel" });
     res.sub = sub;
     res.fromForeground = true;
     state.bySub[sub] = { result: res, analyzed: null, made: new Set() };
@@ -512,7 +522,8 @@ function updateButtons() {
   const docMode = String((app.activeDocument && app.activeDocument.mode) || "");
   const nonRgb = !!docMode && !/rgb/i.test(docMode);
   const blockTitle = nonRgb ? "校正图层按 RGB 设计：请先把文档转换为 RGB（图像 → 模式 → RGB 颜色）" : "";
-  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb;
+  const expired = !!(e && e.expired);
+  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb || expired;
   $("generateAll").title = blockTitle;
   if (e && hasLayers(e)) {
     const rest = e.result.plan.layers.filter((l) => !e.made.has(l.id));
@@ -522,8 +533,8 @@ function updateButtons() {
   } else {
     $("generateAll").textContent = "一键生成全部";
   }
-  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || b.dataset.done === "1"; b.title = blockTitle; });
-  document.querySelectorAll("[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc; });
+  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || expired || b.dataset.done === "1"; b.title = blockTitle; });
+  document.querySelectorAll("[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc || expired; });
   const acrOk = !busy && hasAcrSource();
   $("acrExport").disabled = !acrOk;
   $("acrLayer").disabled = !acrOk;
@@ -668,7 +679,7 @@ function renderPatch(e) {
     <div class="card"><div class="line">RGB ${v.rgb.join(" ")} · ${esc(v.hex)}</div>
       <div class="line">HSB ${v.hsb.map((x) => Math.round(x)).join(" / ")}（= PS 拾色器）</div>
       <div class="muted">取样 ${r.pixels} 像素 · Lab 为 D50（与 PS 信息面板一致）</div></div>
-    ${skin && qr ? `<div class="card"><div class="title"><span>肤色快速规则</span><span>${qrOk ? "通过" : "不通过"}</span></div>
+    ${skin && qr ? `<div class="card"><div class="title"><span>肤色快速规则${r.quick_rule_preset ? `（按「${esc(r.quick_rule_preset)}」）` : ""}</span><span>${qrOk ? "通过" : "不通过"}</span></div>
       <div class="line">a* ${qr.a.toFixed(1)}、b* ${qr.b.toFixed(1)}，|a−b| = ${Math.abs(qr.a - qr.b).toFixed(1)}</div></div>` : ""}
     ${r.acr_channels.length ? `<div class="card"><div class="title"><span>归哪个 ACR 混色器通道管</span></div>
       ${r.acr_channels.map((c) => `<div class="line">${esc(c.channel)} ${(c.weight * 100).toFixed(0)}%</div>`).join("")}</div>` : ""}
@@ -778,7 +789,7 @@ async function generate(ids, single, findingIndex) {
     $("status").textContent = a.justMadeText;
   } catch (err) {
     setBusy(false);
-    serviceDown(err);
+    if (err && err.status === 404 && /过期/.test(err.message || "")) markExpired(e);
     statusError(err);
   }
 }
@@ -802,8 +813,16 @@ async function makeSelection(id) {
     $("status").textContent = "已建立选区（蚂蚁线）：可以用它手动加调整图层或修饰";
   } catch (err) {
     setBusy(false);
+    if (err && err.status === 404 && /过期/.test(err.message || "")) markExpired(e);
     statusError(err);
   }
+}
+
+// 服务端已经没有这次分析的会话（服务重启过，或之后又分析了很多次）：带蒙版的图层和选区都取不到了
+function markExpired(e) {
+  if (!e) return;
+  e.expired = true;
+  updateButtons();
 }
 
 // ---------------------------------------------------------------- ACR
@@ -981,24 +1000,30 @@ async function calibrate() {
 
 // ---------------------------------------------------------------- 启动
 // 服务可能在面板打开之后才启动：每次分析前没有选项就再试一次
-// 连不上本机服务（status 0）：右上角的服务状态跟着变红
-function serviceDown(err) {
-  if (err && err.status === 0) {
-    $("svc").className = "chip bad";
-    $("svc").textContent = "分析服务未启动";
-  }
+// 右上角的服务状态：每次请求后跟着更新（连不上变红，连上了恢复；服务版本太旧时一直提示）
+const NEED_PROTOCOL = 3;
+function setService(up) {
+  if (!up) { $("svc").className = "chip bad"; $("svc").textContent = "分析服务未启动"; return; }
+  if (state.oldService) { $("svc").className = "chip warn"; $("svc").textContent = "桌面版太旧，请更新"; return; }
+  $("svc").className = "chip ok";
+  $("svc").textContent = "本机分析 · 不上传";
 }
+bridge.onStatus(setService);
 
 async function loadOptions() {
   try {
-    await bridge.health();
+    const h = await bridge.health();
+    // 桌面版 / 服务比插件旧：新功能（影调风格、多点对比、选参考图文件）会被忽略或报错，先说清楚
+    state.oldService = !(h && Number(h.protocol) >= NEED_PROTOCOL);
     state.options = await bridge.options();
-    $("svc").className = "chip ok";
-    $("svc").textContent = "本机分析 · 不上传";
+    setService(true);
+    if (state.oldService) {
+      $("status").className = "status warn";
+      $("status").textContent = `桌面版 ColorDoctor 的版本（${(h && h.version) || "未知"}）比插件旧：影调风格、多点对比、选参考图文件可能用不了，请更新桌面版。`;
+    }
     renderControls();
   } catch (e) {
-    $("svc").className = "chip bad";
-    $("svc").textContent = "分析服务未启动";
+    setService(false);
   }
 }
 

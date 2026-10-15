@@ -10,20 +10,37 @@ class BridgeError extends Error {
   }
 }
 
+// 每次请求后告诉面板服务是否连得上（用来更新右上角的服务状态）
+let statusListener = null;
+function onStatus(fn) { statusListener = fn; }
+function report(up) { try { if (statusListener) statusListener(up); } catch (_) { /* 只是显示 */ } }
+
+// 服务返回的英文 / 简短错误换成能看懂的中文
+const STATUS_TEXT = {
+  403: "本机分析服务拒绝了这个请求（只接受来自 Photoshop 插件的本机连接）。请重启 ColorDoctor 再试。",
+  404: "本机分析服务不认识这个操作：桌面版 ColorDoctor 可能太旧，请更新后再试。",
+};
+
 async function call(path, { method = "GET", headers = {}, body } = {}) {
   let res;
   try {
     res = await fetch(BASE + path, { method, headers: { ...CLIENT, ...headers }, body });
   } catch (e) {
-    throw new BridgeError("连不上本机分析服务。请先运行 ColorDoctor（或命令 colordoctor serve），再点一次。");
+    report(false);
+    throw new BridgeError("连不上本机分析服务。请先运行 ColorDoctor（或命令 colordoctor serve），并确认设置里“允许 Photoshop 插件连接”已打开，再点一次。");
   }
+  report(true);
   if (res.status === 422) {
     const j = await res.json();
     throw new BridgeError(j.blocked, { blocked: true, status: 422 });
   }
   if (!res.ok) {
-    let msg = `分析服务出错（${res.status}）`;
-    try { msg = (await res.json()).error || msg; } catch (_) { /* 非 JSON */ }
+    let msg = STATUS_TEXT[res.status] || `分析服务出错（${res.status}）`;
+    try {
+      const err = (await res.json()).error;
+      // 服务自己写的中文说明优先；英文的“not found / forbidden”之类换成上面的说明
+      if (err && /[\u4e00-\u9fff]/.test(err)) msg = err;
+    } catch (_) { /* 非 JSON */ }
     throw new BridgeError(msg, { status: res.status });
   }
   return res;
@@ -137,6 +154,6 @@ async function calibrationFit(acrVersion) {
 }
 
 module.exports = {
-  BridgeError, health, options, analyze, uploadReference, uploadReferenceFile, multipoint, fetchMask, acrPreset,
+  BridgeError, onStatus, health, options, analyze, uploadReference, uploadReferenceFile, multipoint, fetchMask, acrPreset,
   calibrationChart, calibrationPlan, calibrationSample, calibrationFit,
 };

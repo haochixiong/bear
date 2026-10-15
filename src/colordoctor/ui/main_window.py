@@ -232,6 +232,9 @@ class MainWindow(QMainWindow):
         self.settings = settings or QSettings("ColorDoctor", "ColorDoctor")
         self.setWindowTitle(f"人像色彩诊断取色器 {__version__}")
         self.resize(480, 940)
+        scr = self.screen().availableGeometry() if self.screen() is not None else None
+        if scr is not None and scr.height() < 980:  # 笔记本 / 高缩放：第一次打开不要超出屏幕
+            self.resize(480, max(600, scr.height() - 60))
         self.setMinimumWidth(440)  # _build 之后按实际布局再调大
         self.setAcceptDrops(True)
         self.jpg = None
@@ -306,7 +309,7 @@ class MainWindow(QMainWindow):
         self.radius_box.setToolTip("取样大小：与 Photoshop 吸管“取样大小 N×N 平均”一致")
         self.radius_box.currentIndexChanged.connect(self._radius_changed)
         self.preset_box = QComboBox()
-        self.preset_box.setToolTip("目标肤色风格（经验区间，可在设置中修改）")
+        self.preset_box.setToolTip("肤色风格：皮肤往哪种肤色靠（经验区间，可在设置中修改）")
         self.preset_box.currentIndexChanged.connect(self._preset_changed)
         self.source_box = QComboBox()
         self.source_box.addItem("画面来自 PS/ACR（色彩管理）", True)
@@ -317,7 +320,7 @@ class MainWindow(QMainWindow):
         )
         row.addWidget(QLabel("采样"))
         row.addWidget(self.radius_box)
-        self.preset_label = QLabel("肤色目标")
+        self.preset_label = QLabel("肤色风格")
         row.addWidget(self.preset_label)
         row.addWidget(self.preset_box, 1)
         lay.addLayout(row)
@@ -773,7 +776,9 @@ class MainWindow(QMainWindow):
     def set_live(self, on: bool):
         if on:
             self.live_timer.start()
-            self.live_label.setText("实时取色：移动鼠标到 Photoshop 画面上；按 %s 锁定读数" % self._hotkey_texts()["lock_sample"])
+            lock = (f"按 {self._hotkey_texts()['lock_sample']} 锁定读数" if hk.is_supported()
+                    else "这个系统不支持全局快捷键，不能在 Photoshop 里锁定读数；要记下颜色请用框选 / 单点取色")
+            self.live_label.setText(f"实时取色：移动鼠标到 Photoshop 画面上；{lock}")
         else:
             self.live_timer.stop()
             self.live_label.setText("实时取色：关闭")
@@ -1073,7 +1078,7 @@ class MainWindow(QMainWindow):
         self._start(self.session.compute_rect, region, ctx, rect, mode, lasso, manual_mask, part=part,
                     on_done=lambda rep: self._rect_done(region, rect, rep, label, None, replace, lasso))
 
-    def _start(self, fn, *args, on_done, **kwargs):
+    def _start(self, fn, *args, on_done, on_fail=None, **kwargs):
         def done(rep):
             # 窗口已关闭（例如分析还没结束就退出）时丢弃结果
             from PyQt6 import sip
@@ -1086,7 +1091,7 @@ class MainWindow(QMainWindow):
             from PyQt6 import sip
 
             if not sip.isdeleted(self):
-                self._failed(msg)
+                (on_fail or self._failed)(msg)
 
         task = run_in_background(fn, *args, on_done=done, on_failed=failed, **kwargs)
         self._tasks.append(task)
@@ -1138,7 +1143,7 @@ class MainWindow(QMainWindow):
     def _failed(self, msg: str):
         self._ref_busy = False
         self._pending_problem = None
-        self.ai_btn.setEnabled(True)
+        # AI 点评按钮只由 AI 请求自己恢复：别的分析失败时不能把它提前打开（否则会同时发出第二个请求）
         self.statusBar().showMessage("分析失败", 5000)
         QMessageBox.warning(self, "分析失败", msg)
 
@@ -1371,7 +1376,11 @@ class MainWindow(QMainWindow):
                     except OSError:
                         pass
 
-        self._start(ask_and_cleanup, prompt, cfg, image_path, on_done=self._ai_done)
+        def ai_failed(msg):
+            self.ai_btn.setEnabled(True)
+            self._failed(msg)
+
+        self._start(ask_and_cleanup, prompt, cfg, image_path, on_done=self._ai_done, on_fail=ai_failed)
 
     def _ai_done(self, result):
         self.ai_btn.setEnabled(True)
