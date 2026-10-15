@@ -203,7 +203,7 @@ def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
         if hit is not None and refs.get(hit[0]) is not None:  # 插件每次分析都会重新上传，RAW 不必每次都解码
             return {**hit[1], "ref": hit[0]}
     try:
-        src = load_image_bytes(data, name)
+        src = load_image_bytes(data, name, max_side=REF_SIDE)
     except ImageLoadError as e:
         raise ValueError(str(e)) from e
     px = src.pixels

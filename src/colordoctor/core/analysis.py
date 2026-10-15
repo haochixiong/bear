@@ -99,7 +99,8 @@ def _finalize(mode, context, stats, components, findings, extra_conf_reasons, co
     sev = severity_from_score(risk)
     order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
     # “影调”卡说的是离用户选的目标影调多远，不是脏色 / 偏色问题：不抬高总体程度，也不挡住“未发现明显问题”
-    problems = [f for f in findings if not f.problem.startswith("影调：")]
+    # 6:3:1 是构图经验、不是错误（单一色系的画面本来就“不符合”）：也不抬高总体程度
+    problems = [f for f in findings if not f.problem.startswith(("影调：", "色彩比例"))]
     shown = max((order.index(f.severity) for f in problems), default=0)
     if shown > order.index(sev):  # 总体程度不低于任何一张卡片，风险分随之抬到该档的下限
         sev = order[shown]
@@ -659,7 +660,8 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
         own = Severity.MILD if b.score < 0.08 else Severity.NOTABLE
         top = comp_sev[b.kind]
         sev = top if b.kind not in seen else min(own, top, key=order.index)
-        sev = max(sev, Severity.MILD, key=order.index)
+        if top != Severity.NORMAL:  # 分项整体正常时，零星的可疑位置也按正常列出，不把总体程度抬上去
+            sev = max(sev, Severity.MILD, key=order.index)
         seen.add(b.kind)
         if b.kind == "opposite":
             problem = f"可疑脏色：“{b.base_hue_name}”中夹杂“{b.contaminant_hue_name}”散点"

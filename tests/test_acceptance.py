@@ -55,7 +55,10 @@ def test_no_code_writes_image_files():
 
 
 def test_24mp_region_analysis_is_fast_enough():
-    img = sprinkle(noisy(flat(BLUE, 4000, 6000), 2), YELLOW, 0.02)
+    # 杂色点按“看得见的大小”放（10×10 像素一个点）：分析按区域平均降采样（和 PS 缩小图像一样），
+    # 24 MP 图里单个像素的杂点在正常观看尺寸下看不见，属于降噪的事，不算脏色
+    small = sprinkle(noisy(flat(BLUE, 400, 600), 2), YELLOW, 0.02)
+    img = np.repeat(np.repeat(small, 10, axis=0), 10, axis=1)
     t = time.perf_counter()
     r = an.analyze_region(img, synthetic_context())
     dt = time.perf_counter() - t

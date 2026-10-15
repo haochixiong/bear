@@ -107,12 +107,18 @@ def _range_weight(hue_deg: np.ndarray, rng: str) -> np.ndarray:
     return np.where(h < b_, h / b_, np.where(h <= c_, 1.0, np.where(h < d_, (d_ - h) / (d_ - c_), 0.0)))
 
 
+def sat_multiplier(saturation: float) -> float:
+    """PS 色相/饱和度的“饱和度”对颜色浓度的倍数：减少时 ×(1 + s)，增加时 ×1/(1 − s)（PS 的算法，加得比线性快）。"""
+    s = float(np.clip(saturation, -100.0, 100.0)) / 100.0
+    return 1.0 + s if s <= 0 else 1.0 / max(1.0 - s, 1e-3)
+
+
 def hue_saturation(x: np.ndarray, hue: float = 0, saturation: float = 0, lightness: float = 0, color_range: str = "master"):
     """hue: -180..180；saturation/lightness: -100..100。"""
     x = np.asarray(x, dtype=float)
     h, s, light = _rgb_to_hsl(x)
     h2 = (h + hue / 360.0) % 1.0
-    s2 = np.clip(s * (1 + saturation / 100.0), 0, 1)
+    s2 = np.clip(s * sat_multiplier(saturation), 0, 1)
     v = lightness / 100.0
     l2 = light * (1 + v) if v < 0 else light + v * (1 - light)
     out = _hsl_to_rgb(h2, s2, l2)

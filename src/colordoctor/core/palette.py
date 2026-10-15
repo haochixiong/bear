@@ -26,13 +26,15 @@ MAX_SAMPLES = 200_000
 CHROMA_MIN = 8.0
 ACCENT_L_GAP = 20.0  # 点缀色与主色、辅色的明度差至少这么大，才算“靠明度跳出来”
 
-# Hasler & Süsstrunk (2003) 色彩丰富度分级
+# Hasler & Süsstrunk (2003) 色彩丰富度分级：论文给的是各级的代表值（0 / 15 / 33 / 45 / 59 / 82 / 109），
+# 这里按“离哪个代表值最近”分级（分界取相邻代表值的中点），以前把代表值当成下限，整体偏了一级
 COLORFULNESS_LEVELS = (
-    (15, "不鲜艳（接近灰）"),
-    (33, "略有色彩"),
-    (45, "中等"),
-    (59, "较鲜艳"),
-    (82, "很鲜艳"),
+    (7.5, "不鲜艳（接近灰）"),
+    (24.0, "略有色彩"),
+    (39.0, "色彩偏弱"),
+    (52.0, "中等"),
+    (70.5, "较鲜艳"),
+    (95.5, "很鲜艳"),
     (1e9, "极鲜艳"),
 )
 
@@ -524,7 +526,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
     on_target = float(w[on].sum() / tot) if has_sectors else 1.0
     off = []
     if has_sectors:
-        names = np.array([cs.hue_name(v) for v in h[chrom & ~on]]) if (chrom & ~on).any() else np.array([])
+        names = cs.hue_names(h[chrom & ~on]) if (chrom & ~on).any() else np.array([])
         ww = w[chrom & ~on]
         for name in np.unique(names):
             share = float(ww[names == name].sum() / tot)

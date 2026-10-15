@@ -174,7 +174,8 @@ def test_neutral_region_has_no_base_hue():
 def test_large_region_is_fast_and_bounded():
     import time
 
-    img = sprinkle(noisy(flat(BLUE, 2000, 3000), 2), YELLOW, 0.03)
+    small = sprinkle(noisy(flat(BLUE, 200, 300), 2), YELLOW, 0.03)  # 10×10 像素一个杂色点（看得见的大小）
+    img = np.repeat(np.repeat(small, 10, 0), 10, 1)
     t = time.perf_counter()
     r = run(img)
     assert time.perf_counter() - t < 5.0

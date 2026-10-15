@@ -101,16 +101,33 @@ def grid_step(n_pixels: int, max_samples: int) -> int:
 
 
 def grid_downsample(pixels: np.ndarray, max_samples: int) -> tuple[np.ndarray, int]:
-    """确定性分层（等间隔网格）降采样，保留二维结构，返回 (子图, 步长)。"""
+    """确定性网格降采样，保留二维结构，返回 (子图, 步长)。
+
+    每个样本是原图 step×step 一格的平均（和 Photoshop 缩小图像一样），第 i 个样本代表 [i*step, (i+1)*step)。
+    以前只取每格中间的一个像素：同一张图在 45 MP 和 2048 像素（插件传来的就是 PS 缩小过的）时，
+    噪点、零星杂色像素的统计差很多，桌面版和插件的结论也就不一样。
+    """
     _check_image(pixels)
     h, w = pixels.shape[:2]
     step = grid_step(h * w, max_samples)
     if step == 1:
         return pixels[..., :3], 1
-    off = step // 2
-    sub = pixels[off::step, off::step, :3]
-    while sub.shape[0] * sub.shape[1] > max_samples:  # 极端长宽比时保证上限
+    while (h // step) * (w // step) > max_samples:  # 极端长宽比时保证上限
         step += 1
-        off = step // 2
-        sub = pixels[off::step, off::step, :3]
-    return sub, step
+    if h // step == 0 or w // step == 0:  # 一条线这样的极端长宽比：退回每格取一个像素
+        return pixels[min(step // 2, h - 1)::step, min(step // 2, w - 1)::step, :3], step
+    return block_mean(pixels, step), step
+
+
+def block_mean(pixels: np.ndarray, step: int) -> np.ndarray:
+    """按 step×step 一格求平均（不够一格的边缘舍去）。8 位图用 Pillow 的 reduce（快，不复制整幅图）。"""
+    h, w = pixels.shape[:2]
+    H, W = h // step, w // step
+    if pixels.dtype == np.uint8 and pixels.shape[2] in (3, 4):
+        from PIL import Image
+
+        arr = pixels if pixels.flags.c_contiguous else np.ascontiguousarray(pixels)
+        img = Image.fromarray(arr, "RGB" if arr.shape[2] == 3 else "RGBA")
+        return np.array(img.reduce(step, box=(0, 0, W * step, H * step)))[..., :3]
+    crop = pixels[: H * step, : W * step, :3].astype(np.float32)
+    return crop.reshape(H, step, W, step, 3).mean(axis=(1, 3)).astype(pixels.dtype)

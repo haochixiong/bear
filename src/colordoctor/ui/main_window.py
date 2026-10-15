@@ -225,6 +225,9 @@ class SettingsDialog(QDialog):
         }
 
 
+RERUN_DELAY_MS = 250  # 改设置后等这么久再重算：连续改几个选项只算一次
+
+
 class MainWindow(QMainWindow):
     def __init__(self, session: Session | None = None, settings: QSettings | None = None):
         super().__init__()
@@ -758,13 +761,23 @@ class MainWindow(QMainWindow):
         mm = rep.valid_mask if mode == "skin" and rep.mask_info.get("manual") else None
 
         def done(new_rep):
-            if gen != self._rerun_gen or self.session.get(item.id) is None:
+            if new_rep is None or gen != self._rerun_gen or self.session.get(item.id) is None:
                 return  # 已有更新的请求，或原条目已被删除
             self._rect_done(item.region, item.rect, new_rep, item.source_label, None, item, item.lasso)
 
+        def compute(*args, **kwargs):
+            if gen != self._rerun_gen:  # 排队时又改了设置：这次不用算了（大图每次要一两秒）
+                return None
+            return self.session.compute_rect(*args, **kwargs)
+
+        def start():
+            if gen != self._rerun_gen:
+                return
+            self._start(compute, item.region, item.context, item.rect, mode, item.lasso, mm,
+                        part=rep.part if mode == "skin" else None, on_done=done)
+
         self.statusBar().showMessage("正在按新设置重新计算……")
-        self._start(self.session.compute_rect, item.region, item.context, item.rect, mode, item.lasso, mm,
-                    part=rep.part if mode == "skin" else None, on_done=done)
+        QTimer.singleShot(RERUN_DELAY_MS, start)  # 连续改几个选项时只算最后一次
 
     def set_on_top(self, on: bool):
         visible = self.isVisible()
@@ -1046,7 +1059,7 @@ class MainWindow(QMainWindow):
             return
         if mode == "point":
             # 单点模式下拖动：取框内平均
-            vals = color_values(region.reshape(-1, 3).astype(float).mean(axis=0))
+            vals = color_values(region.reshape(-1, 3).mean(axis=0, dtype=np.float64))  # 不先转成整幅 float（大图很慢）
             s = PointSample(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2, 0, int(region.shape[0] * region.shape[1]), vals, ctx)
             item = self.session.add_point(region, s, label)
             item.label = f"区域平均 {rect[2]}×{rect[3]} {vals.hex}"
@@ -1148,6 +1161,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "分析失败", msg)
 
     def _after_add(self, item: HistoryItem | None, quiet: bool = False):
+        keep = {i.id for i in (item, self.ref_image_item, self._current) if i is not None}
+        if self.session.trim(keep):
+            self.statusBar().showMessage("历史记录太多（占用内存），已自动删掉最旧的几条", 6000)
         ref = self.session.reference.id if self.session.reference else None
         self.history_panel.set_items(self.session.history, ref, self.ref_image_item.id if self.ref_image_item else None)
         if not quiet and item is not None:

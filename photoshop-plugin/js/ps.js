@@ -241,10 +241,12 @@ function vibranceDescriptor(p) {
   return { _obj: "vibrance", vibrance: p.vibrance, saturation: p.saturation || 0 };
 }
 
+// batchPlay 里通道名用的是 PS 的字符串 ID：绿通道 'Grn ' 的字符串 ID 是 "grain"（不是 "green"），红、蓝就是 red / blue
+const CURVE_CHANNEL_ID = { composite: "composite", red: "red", green: "grain", blue: "blue" };
 function curvesDescriptor(p) {
   const adjustment = Object.entries(p.channels).map(([ch, pts]) => ({
     _obj: "curvesAdjustment",
-    channel: { _ref: "channel", _enum: "channel", _value: ch === "composite" ? "composite" : ch },
+    channel: { _ref: "channel", _enum: "channel", _value: CURVE_CHANNEL_ID[ch] || ch },
     curve: pts.map(([x, y]) => ({ _obj: "paint", horizontal: x, vertical: y })),
   }));
   return { _obj: "curves", presetKind: { _enum: "presetKindType", _value: "presetKindCustom" }, adjustment };
@@ -252,12 +254,14 @@ function curvesDescriptor(p) {
 
 // 可选颜色（相对）：colors = {reds|yellows|greens|cyans|blues|magentas|whites|neutrals|blacks: {c, m, y, k}}（−100…100 %）
 const SELECTIVE_COLORS = ["reds", "yellows", "greens", "cyans", "blues", "magentas", "whites", "neutrals", "blacks"];
+// 可选颜色里“红色”'Rds ' 的字符串 ID 是 "radius"（PS 的老毛病：和半径共用一个 ID），其余就是英文名
+const SELECTIVE_COLOR_ID = { reds: "radius" };
 function selectiveColorDescriptor(p) {
   const pct = (v) => ({ _unit: "percentUnit", _value: Math.max(-100, Math.min(100, Math.round(v || 0))) });
   const colorCorrection = Object.entries(p.colors || {})
     .filter(([name]) => SELECTIVE_COLORS.includes(name))
     .map(([name, v]) => ({
-      _obj: "colorCorrection", colors: { _enum: "colors", _value: name },
+      _obj: "colorCorrection", colors: { _enum: "colors", _value: SELECTIVE_COLOR_ID[name] || name },
       cyan: pct(v.c), magenta: pct(v.m), yellowColor: pct(v.y), black: pct(v.k),
     }));
   return { _obj: "selectiveColor", method: { _enum: "correctionMethod", _value: p.method === "absolute" ? "absolute" : "relative" }, colorCorrection };

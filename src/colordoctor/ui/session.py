@@ -183,7 +183,8 @@ class Session:
         return item
 
     def add_rect(self, region: np.ndarray, rect, report: AnalysisReport, label: str, role: str | None = None) -> HistoryItem:
-        mean = np.rint(region.reshape(-1, 3).astype(float).mean(axis=0)).astype(int)
+        step = max(1, int(np.sqrt(region.shape[0] * region.shape[1] / 250_000)))  # 色块用抽样平均：大图不在界面线程上转整幅 float
+        mean = np.rint(region[::step, ::step, :3].reshape(-1, 3).mean(axis=0)).astype(int)
         title = {"general": "区域", "skin": "肤色", "compare": "对比", "scan": "整图", "palette": "整图色彩",
                  "reference": "仿色"}.get(report.mode, "区域")
         if report.mode == "skin" and report.part:
@@ -205,6 +206,24 @@ class Session:
         )
         self.history.insert(0, item)
         return item
+
+    HISTORY_BYTES = 1_500_000_000  # 历史里保存的选区像素 + 蒙版超过这么多时，丢掉最旧的（45 MP 的整图每条约 170 MB）
+    HISTORY_MAX = 60
+
+    def trim(self, keep: set[int] = frozenset()) -> list[int]:
+        """历史太大时从最旧的开始丢（参考区、参考作品和 keep 里的不丢）。返回被丢掉的 id。"""
+        protect = set(keep) | ({self.reference.id} if self.reference is not None else set())
+        total, dropped = 0, []
+        for i, h in enumerate(self.history):  # 新的在前
+            rep = h.result
+            size = h.region.nbytes + (rep.valid_mask.nbytes if isinstance(rep, AnalysisReport) and rep.valid_mask is not None else 0)
+            total += size
+            if h.id not in protect and (total > self.HISTORY_BYTES or i >= self.HISTORY_MAX):
+                dropped.append(h.id)
+                total -= size
+        for i in dropped:
+            self.remove(i)
+        return dropped
 
     def remove(self, item_id: int) -> None:
         self.history = [h for h in self.history if h.id != item_id]

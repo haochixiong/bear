@@ -225,7 +225,9 @@ function dirtySky(w, h) {
   assert.strictEqual(sc._obj, "selectiveColor");
   assert.strictEqual(sc.method._value, "relative");
   assert.strictEqual(sc.colorCorrection.length, 1);
-  assert.strictEqual(sc.colorCorrection[0].colors._value, "reds");
+  assert.strictEqual(sc.colorCorrection[0].colors._value, "radius");  // 'Rds ' 的字符串 ID
+  const cvGreen = ps._descriptors.curvesDescriptor({ channels: { green: [[0, 0], [128, 140], [255, 255]] } });
+  assert.strictEqual(cvGreen.adjustment[0].channel._value, "grain");  // 'Grn ' 的字符串 ID
   assert.strictEqual(sc.colorCorrection[0].yellowColor._value, -12);
   doc.colorSamplers = [{ color: { lab: { l: 71, a: 13.8, b: 19.6 } }, position: { x: 10, y: 10 } },
     { color: { lab: { l: 67, a: 10.9, b: 24.9 } }, position: { x: 50, y: 80 } }];

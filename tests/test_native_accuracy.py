@@ -53,7 +53,7 @@ def _ramp(h, b0, b1, e0, e1):
 def _hs_one(x, hue, sat, light):
     h, s, li = _hsl(x)
     v = light / 100
-    return _rgb((h + hue) % 360, np.clip(s * (1 + sat / 100), 0, 1), li * (1 + v) if v < 0 else li + v * (1 - li))
+    return _rgb((h + hue) % 360, np.clip(s * (1 + sat / 100 if sat <= 0 else 1 / max(1 - sat / 100, 1e-3)), 0, 1), li * (1 + v) if v < 0 else li + v * (1 - li))
 
 
 def hue_sat(x, p):
@@ -82,14 +82,18 @@ def color_balance(x, p):
 
 
 def curves(x, p):
+    """PS 曲线：平滑的三次样条穿过各点（不是点之间连直线），用和生成曲线时同一个近似。"""
+    from colordoctor.core.tone_class import spline_lut
+
+    def ap(v, pts):
+        return np.interp(v * 255, np.arange(256), spline_lut(pts)) / 255
+
     x = x.copy()
     for i, ch in enumerate(("red", "green", "blue")):
         if ch in p["channels"]:
-            xs, ys = np.array(p["channels"][ch], float).T
-            x[..., i] = np.interp(x[..., i] * 255, xs, ys) / 255
+            x[..., i] = ap(x[..., i], p["channels"][ch])
     if "composite" in p["channels"]:
-        xs, ys = np.array(p["channels"]["composite"], float).T
-        x = np.interp(x * 255, xs, ys) / 255
+        x = ap(x, p["channels"]["composite"])
     return x
 
 
@@ -266,8 +270,10 @@ def test_scan_spot_masks_are_disjoint():
     img = noisy(flat(lab_color(55, -30, 35), 600, 800), 2)
     for i in range(100):
         y, x = rng.integers(0, 580), rng.integers(0, 780)
-        if i % 2:
-            img[y:y + 15:3, x:x + 15:3] = lab_color(60, 30, -30)
+        if i % 2:  # 一小片 4×4 像素的杂色点（大图按区域平均降采样，1 个像素的点会被平均掉）
+            for dy in (0, 8):
+                for dx in (0, 8):
+                    img[y + dy:y + dy + 4, x + dx:x + dx + 4] = lab_color(60, 30, -30)
         else:
             img[y:y + 18, x:x + 18] = lab_color(55, -8, 10)
     rep = an.scan_image(img, CTX)

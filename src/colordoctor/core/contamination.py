@@ -265,7 +265,7 @@ def analyze(
     mask[~vsub] = MASK_OUTSIDE
 
     if mode == "scan":
-        return _scan(sub, step, offset, L, C, h, chromatic, edge, mask, chrom_frac)
+        return _scan(sub, step, offset, L, C, h, chromatic, edge, mask, chrom_frac, vsub)
 
     opp_angle = SKIN_OPP_ANGLE if mode == "skin" else OPP_ANGLE
     if base_hue is None:
@@ -306,7 +306,7 @@ def analyze(
 
     anomalies: dict[str, float] = {}
     if n_opp and not bicolor:
-        names = np.array([cs.hue_name(v) for v in h[opp]])
+        names = cs.hue_names(h[opp])
         for name in np.unique(names):
             anomalies[str(name)] = round(float(np.sum(names == name)) / n_total, 5)
         mask[opp] = MASK_OPPOSITE
@@ -380,14 +380,14 @@ def _neutral_result(mask, step, chrom_frac) -> ContaminationResult:
     )
 
 
-def _scan(sub, step, offset, L, C, h, chromatic, edge, mask, chrom_frac) -> ContaminationResult:
+def _scan(sub, step, offset, L, C, h, chromatic, edge, mask, chrom_frac, vsub=None) -> ContaminationResult:
     """整图扫描：按瓦片判断“局部主色里的散点对立色”，按色相族判断局部发灰。
 
     整图没有语义（不知道哪里是一件衣服），因此只在“散点状混杂”时报告对立色；
     成片的不同颜色视为画面中本来就有的不同物体或配色。
     """
     hh, ww = sub.shape[:2]
-    n_total = hh * ww
+    n_total = max(1, int(vsub.sum())) if vsub is not None else hh * ww  # 透明 / 蒙版外的像素不算进分母
     ts = int(max(8, round(min(hh, ww) / 12)))
     opp_all = np.zeros((hh, ww), dtype=bool)
     for y0 in range(0, hh, ts):

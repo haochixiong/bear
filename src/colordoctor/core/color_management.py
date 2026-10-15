@@ -119,8 +119,11 @@ def load_picture(path: str | os.PathLike) -> SourceImage:
     return _decode_jpeg(lambda: Image.open(path), path.name, IMAGE_FORMATS)
 
 
-def load_image_bytes(data: bytes, name: str, use_raw_preview: bool = False) -> SourceImage:
-    """从文件内容读取（PS 插件选的参考图）。name 只用来判断格式和显示。"""
+def load_image_bytes(data: bytes, name: str, use_raw_preview: bool = False, max_side: int | None = None) -> SourceImage:
+    """从文件内容读取（PS 插件选的参考图）。name 只用来判断格式和显示。
+
+    max_side：只需要这么大时，JPG 直接按缩小的尺寸解码（快很多；结果至少这么大，调用方再缩到准确尺寸）。
+    """
     if not data:
         raise ImageLoadError("文件为空，无法读取")
     suffix = Path(name).suffix.lower()
@@ -136,7 +139,7 @@ def load_image_bytes(data: bytes, name: str, use_raw_preview: bool = False) -> S
         finally:
             _remove_later(tmp)
         return SourceImage(src.pixels, dataclasses.replace(src.context, device=name), src.original_size)
-    return _decode_jpeg(lambda: Image.open(io.BytesIO(data)), name, IMAGE_FORMATS)
+    return _decode_jpeg(lambda: Image.open(io.BytesIO(data)), name, IMAGE_FORMATS, max_side=max_side)
 
 
 _pending_removal: list[str] = []
@@ -192,7 +195,7 @@ def _to_8bit(im: Image.Image) -> Image.Image:
     return im
 
 
-def _decode_jpeg(opener, name: str, formats: tuple[str, ...] = ("JPEG",)) -> SourceImage:
+def _decode_jpeg(opener, name: str, formats: tuple[str, ...] = ("JPEG",), max_side: int | None = None) -> SourceImage:
     kinds = "/".join("JPG" if f == "JPEG" else f for f in formats)
     try:
         with opener() as im:
@@ -202,6 +205,8 @@ def _decode_jpeg(opener, name: str, formats: tuple[str, ...] = ("JPEG",)) -> Sou
             if w * h > MAX_PIXELS:
                 raise ImageLoadError(f"图片过大（{w}×{h}），超过 {MAX_PIXELS // 1_000_000} MP 上限")
             icc = im.info.get("icc_profile")
+            if max_side and im.format == "JPEG" and max(w, h) > 2 * max_side:
+                im.draft("RGB", (max_side, max_side))  # 按 1/2、1/4、1/8 解码，尺寸仍不小于 max_side
             im.load()
             im = ImageOps.exif_transpose(im)
             im = _to_8bit(im)

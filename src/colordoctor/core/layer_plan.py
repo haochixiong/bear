@@ -320,6 +320,7 @@ def _merge_pair(a: dict, b: dict) -> dict | None:
 
 
 SKIP_SAME_PIXELS = "同一张卡片上已经有一层色相/饱和度改这些颜色（二选一），没有再生成一层"
+SKIP_OTHER_CARD = "前面一张卡片已经有一层改这些颜色的饱和度 / 色相（一键生成时会叠加成两倍），这里没有再生成；按那一层调整即可"
 SKIP_NO_MASK = "没能单独选出要改的区域（皮肤或问题位置），直接生成会改到整张图，所以没有生成图层；可以先手动建选区或蒙版，再按这里的数值调"
 
 
@@ -388,6 +389,19 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
         sk: list = []
         per_finding.append(_finding_layers(f, sk))
         skipped += [(i, t, why) for t, why in sk]
+    # 不同卡片改同一批颜色（例如 6:3:1 和颜色模板都给洋红降饱和、缺色 / 过艳都用自然饱和度）：只留前面那一层
+    for i in range(1, len(per_finding)):
+        keep = []
+        for spec, texts in per_finding[i]:
+            earlier = [o for j in range(i) for o, _ in per_finding[j]
+                       if o["scope"] == spec["scope"] == "global" and o["kind"] == spec["kind"]]
+            dup = (spec["kind"] == "hueSaturation" and any(nl.huesat_overlap(o["params"], spec["params"]) for o in earlier)) \
+                or (spec["kind"] == "vibrance" and earlier)
+            if dup:
+                skipped += [(i, t, SKIP_OTHER_CARD) for t in texts]
+            else:
+                keep.append((spec, texts))
+        per_finding[i] = keep
     spots: dict[str, list[int]] = {}
     for specs in per_finding:
         for spec, _ in specs:
@@ -415,6 +429,8 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
         pts = ref_curve_points(ref.curve_points)
         layers.append(curves_layer(_unique("ref_curve", used), "仿色影调 · 曲线", {"composite": pts},
                                    "把影调拉向参考：" + "；".join(f"{a}→{b}" for a, b in ref.curve_points)))
+    # “明度”混合的影调曲线放在最上面：它只改明暗、不改颜色，下面的颜色图层都是按原图的明暗算的
+    layers.sort(key=lambda ly: ly.blend == "luminosity")
     name = group_name or f"ColorDoctor · {_MODE_NAME.get(report.mode, report.mode)}"
     return LayerPlan(name, w, h, layers, skipped)
 

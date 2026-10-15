@@ -21,6 +21,7 @@ from colordoctor.core import color_spaces as cs
 from colordoctor.core import native_layers as nl
 from colordoctor.core import palette as pl
 from colordoctor.core import ps_models as pm_mod
+from colordoctor.core import tone_class as tcl
 from colordoctor.core.color_models import Adjustment
 from colordoctor.core.perception import de_words
 
@@ -121,12 +122,17 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         if pts and (x - pts[-1][0] < 12 or y < pts[-1][1]):
             continue
         pts.append((x, y))
-    curve = tuple(pts) if any(x != y for x, y in pts) else ()  # 全部一致：不给曲线
+    if any(x != y for x, y in pts):
+        # PS 的曲线是平滑样条：在会冲过头 / 往回走的段中间加辅助点，实际曲线才和这些点一致
+        safe = tcl.spline_safe([[0, 0], *pts, [255, 255]])
+        curve = tuple((x, y) for x, y in safe if (x, y) not in ((0, 0), (255, 255)))
+    else:
+        curve = ()  # 全部一致：不给曲线
     # 建议顺序是先用曲线定影调、再调颜色：白平衡、阴影 / 高光色调、混色器都在“曲线之后”的图上和参考比。
     # 否则混色器的明亮度会把曲线已经提亮 / 压暗的部分再调一次，色彩平衡也会按曲线之前的明度去求
     if curve:
-        xs, ys = np.array(nl.curve_points(curve), dtype=float).T
-        s_c = np.clip(np.rint(np.interp(s_m.astype(float), xs, ys)), 0, 255).astype(np.uint8)
+        lut = np.rint(tcl.spline_lut(nl.curve_points(curve))).astype(np.uint8)  # 按 PS 的平滑曲线算
+        s_c = lut[s_m]
         lc = cs.srgb8_to_lab(s_c).reshape(-1, 3)
     else:
         s_c, lc = s_m, lm

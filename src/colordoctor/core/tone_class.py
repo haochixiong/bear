@@ -57,7 +57,7 @@ class ToneClass:
     hi: float  # 去掉 2% 后最亮处
     span: float  # 跨度（明度级，0–255）
     histogram: tuple[float, ...]  # 32 段直方图（占比），用于显示
-    near: str = ""  # 处在边界上时，相邻的那种影调（例如“接近低中调”）
+    near: str = ""  # 处在边界上时，相邻的影调（例如“低中调”；基调和调长都在分界附近时是“低中调、低长调”）
 
     @property
     def desc(self) -> str:
@@ -80,14 +80,16 @@ def classify(rgb: np.ndarray, valid: np.ndarray | None = None) -> ToneClass:
     span = hi - lo
     length = "长" if span >= LONG_SPAN else ("中" if span >= SHORT_SPAN else "短")
     # 边界提示：主导的一段只比第二多一点，或跨度离分界很近
+    # 基调和调长可能同时在分界附近：两个相邻的都列出来（以前只能说一个，另一边一点点变化就跳过去了却没提示）
     order = sorted(range(3), key=lambda i: -shares[i])
-    near = ""
+    nears = []
     if shares[order[0]] - shares[order[1]] < 0.08:
-        near = ("低", "中", "高")[order[1]] + length + "调"
-    elif abs(span - LONG_SPAN) < NEAR:
-        near = key + ("中" if length == "长" else "长") + "调"
+        nears.append(("低", "中", "高")[order[1]] + length + "调")
+    if abs(span - LONG_SPAN) < NEAR:
+        nears.append(key + ("中" if length == "长" else "长") + "调")
     elif abs(span - SHORT_SPAN) < NEAR:
-        near = key + ("短" if length == "中" else "中") + "调"
+        nears.append(key + ("短" if length == "中" else "中") + "调")
+    near = "、".join(nears)
     hist = np.histogram(y, bins=32, range=(0, 256))[0] / y.size
     name = f"{key}{length}调"
     return ToneClass(name, key, length, tuple(round(s, 4) for s in shares), round(lo, 1), round(hi, 1), round(span, 1),
@@ -190,14 +192,69 @@ def limit_slopes(pts) -> tuple[list[list[float]], bool]:
     return pts, changed
 
 
+def spline_lut(pts) -> np.ndarray:
+    """PS 曲线的实际形状（256 级查找表）：PS 用平滑的三次样条穿过各点，不是点与点之间连直线。
+
+    这里用自然三次样条近似。点之间的坡度一会儿很平一会儿很陡时，样条会冲过头（暗部被压成一片死黑、
+    某一段反而往下走），用 spline_safe 加辅助点避免。
+    """
+    x = np.array([p[0] for p in pts], dtype=float)
+    y = np.array([p[1] for p in pts], dtype=float)
+    xs = np.arange(256, dtype=float)
+    n = len(x)
+    if n < 3:
+        return np.clip(np.interp(xs, x, y), 0, 255)
+    h = np.diff(x)
+    A = np.zeros((n, n))
+    r = np.zeros(n)
+    A[0, 0] = A[-1, -1] = 1.0
+    for i in range(1, n - 1):
+        A[i, i - 1], A[i, i], A[i, i + 1] = h[i - 1], 2 * (h[i - 1] + h[i]), h[i]
+        r[i] = 6 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1])
+    M = np.linalg.solve(A, r)
+    idx = np.clip(np.searchsorted(x, xs, side="right") - 1, 0, n - 2)
+    hi = h[idx]
+    a = (x[idx + 1] - xs) / hi
+    b = (xs - x[idx]) / hi
+    v = a * y[idx] + b * y[idx + 1] + ((a ** 3 - a) * M[idx] + (b ** 3 - b) * M[idx + 1]) * hi ** 2 / 6
+    v = np.where(xs < x[0], y[0], np.where(xs > x[-1], y[-1], v))
+    return np.clip(v, 0, 255)
+
+
+SPLINE_TOL = 3.0  # PS 的平滑曲线离“点之间连直线”最多差这么多级
+MAX_CURVE_POINTS = 14  # PS 曲线最多 16 个点（含两个端点）
+
+
+def spline_safe(pts) -> list[list[int]]:
+    """在 PS 的平滑曲线会冲过头或往回走的那一段中间加辅助点（取直线上的值），让实际曲线和设计的一致、单调。"""
+    pts = [[int(x), int(y)] for x, y in pts]
+    for _ in range(12):
+        lut = spline_lut(pts)
+        xs, ys = np.array(pts, dtype=float).T
+        lin = np.interp(np.arange(256), xs, ys)
+        bad = []
+        for (x0, _), (x1, _) in zip(pts, pts[1:]):
+            seg = slice(x0, x1 + 1)
+            off = float(np.abs(lut[seg] - lin[seg]).max())
+            back = bool(np.any(np.diff(lut[seg]) < -0.5))
+            if (off > SPLINE_TOL or back) and x1 - x0 >= 8:
+                bad.append((off + 100 * back, (x0 + x1) // 2))
+        if not bad or len(pts) >= MAX_CURVE_POINTS:
+            break
+        for _, xm in sorted(bad, reverse=True)[: MAX_CURVE_POINTS - len(pts)]:
+            pts.append([xm, int(round(np.interp(xm, xs, ys)))])
+        pts.sort()
+    return pts
+
+
 def apply_curve_luminosity(rgb: np.ndarray, pts) -> np.ndarray:
     """曲线（线性插值近似）作用在 RGB 各通道上、图层混合模式“明度”时，结果的 PS 明度（0–255）。
 
     “明度”混合只取调整后画面的明度、保留原来的颜色，所以结果的明度 = Lum(曲线(R, G, B))，
     和“曲线(明度)”不一样（彩色像素差得更多）：生成曲线时用它来模拟、修正。
     """
-    xs, ys = np.array(pts, dtype=float).T
-    return luminance(np.interp(np.asarray(rgb, dtype=float)[..., :3], xs, ys))
+    lut = spline_lut(pts)  # 按 PS 的平滑曲线算
+    return luminance(lut[np.clip(np.asarray(rgb)[..., :3], 0, 255).astype(np.uint8)])
 
 
 def fit_curve(rgb: np.ndarray, valid, current: tuple, target: tuple, rounds: int = 3) -> tuple[list[list[int]], bool]:
@@ -209,6 +266,7 @@ def fit_curve(rgb: np.ndarray, valid, current: tuple, target: tuple, rounds: int
     best_err = None
     for _ in range(rounds):
         pts, capped = match_curve(current, tuple(goal))
+        pts = spline_safe(pts)
         got = np.percentile(apply_curve_luminosity(px, pts), [2, 25, 50, 75, 98])
         err = np.array(target, dtype=float) - got
         score = float(np.abs(err).mean())

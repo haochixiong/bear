@@ -41,9 +41,13 @@ class Prepared:
         if self.valid is None:
             return self.rgb
         out = self.rgb.copy()
-        src = self.rgb[self.valid]
-        holes = ~self.valid
         rng = np.random.default_rng(0)
+        # 从不透明像素里抽一部分（最多 100 万）当填充的来源：分布一样，不必把几千万个像素整个复制一遍
+        idx = np.flatnonzero(self.valid)
+        if idx.size > 1_000_000:
+            idx = rng.choice(idx, 1_000_000, replace=False)
+        src = self.rgb.reshape(-1, 3)[idx]
+        holes = ~self.valid
         out[holes] = src[rng.integers(0, src.shape[0], int(holes.sum()))]
         return out
 
@@ -71,8 +75,9 @@ def prepare(pixels: np.ndarray) -> Prepared:
         if frac < MIN_OPAQUE:
             raise BlockedError("当前图层是空白图层（几乎没有不透明像素），无法分析。")
         if frac < 0.999:
-            ys, xs = np.nonzero(opaque)
-            y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+            # 外接矩形用行 / 列的 any 求（不用 nonzero 列出几千万个坐标）
+            rows, cols = np.flatnonzero(opaque.any(axis=1)), np.flatnonzero(opaque.any(axis=0))
+            y0, y1, x0, x1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
             offset = (int(x0), int(y0))
             rgb = rgb[y0:y1, x0:x1].copy()
             valid = opaque[y0:y1, x0:x1].copy()

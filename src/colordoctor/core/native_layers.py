@@ -201,7 +201,7 @@ def mixer_rows_to_huesat(rows) -> list[tuple[dict, str]]:
         h = clip(np.average(hues, weights=wts), -PS_HUE_CAP, PS_HUE_CAP)
         li = clip(np.average(lums, weights=wts) * 0.5, -PS_LIGHT_CAP, PS_LIGHT_CAP)
         k = 1.0 + float(np.average(sats, weights=wts)) / 100.0  # 想要的色度倍数
-        s = clip(((k / (1.0 - abs(li) / 100.0)) - 1.0) * 100.0, -PS_SAT_CAP, PS_SAT_CAP)
+        s = clip(sat_for_ratio(k / (1.0 - abs(li) / 100.0)), -PS_SAT_CAP, PS_SAT_CAP)
         if not (h or s or li):
             continue
         others = [abs(((c - m[1] + 180) % 360) - 180) for m in merged if m[1] != c]
@@ -345,14 +345,21 @@ def skin_selective(da: float, db: float) -> dict:
     return selective({"reds": cap(reds), "yellows": cap(yellows)})
 
 
+def sat_for_ratio(k: float) -> float:
+    """想要的色度倍数 k -> PS 色相/饱和度的“饱和度”。PS 减饱和度时色度 ×(1 + s)，加饱和度时 ×1/(1 − s)：
+    想 ×1.4 只要 +29，不是 +40（以前按线性算，加得过头）。"""
+    k = float(k)
+    return (1.0 - 1.0 / k) * 100.0 if k > 1 else (k - 1.0) * 100.0
+
+
 def skin_dull_huesat(deficit: float, skin_lab) -> dict:
     """肤色发灰、不够透亮 -> 色相/饱和度：范围对准肤色的饱和度提高。deficit：低于下限的比例（色度要乘 1/(1-deficit)）。
 
-    模型里这一层的色度倍数 ≈ 1 + 饱和度/100（明度、色相几乎不变）；可选颜色“减黑”主要是提亮，几乎不加色度，
+    PS 加饱和度时色度 ×1/(1 − 饱和度/100)（见 sat_for_ratio）；可选颜色“减黑”主要是提亮，几乎不加色度，
     自然饱和度在 PS 里会刻意少动肤色，都不适合。范围中心对准皮肤平均色，±15° 全量、±45° 过渡；上限 +30。
     """
     d = float(np.clip(deficit, 0.0, 0.9))
-    sat = clip((1.0 / (1.0 - d) - 1.0) * 100.0, 5, 30)
+    sat = clip(sat_for_ratio(1.0 / (1.0 - d)), 5, 30)
     idx, ramps = custom_range(ps_hsb_of_lab(skin_lab), 15, 45)
     return huesat(idx, ramps, sat=sat)
 
@@ -426,8 +433,9 @@ def skin_patch_layer(kind: str, dh: float, ds: float, lab=(68.0, 14.0, 19.0)):
         return ("hueSaturation", huesat(idx, ramps, hue=hue),
                 f"{PS_RANGES[idx - 1][1]}（范围已对准问题色）色相 {hue:+d}（往{'黄' if hue > 0 else '红'}）")
     if kind == "缺色发灰":
-        vib = clip(abs(ds) * 60, 8, 30)
-        return "vibrance", {"vibrance": vib, "saturation": 0}, f"自然饱和度 +{vib}"
+        # 不用自然饱和度：PS 的自然饱和度会刻意少动肤色，加在皮肤上几乎没效果
+        p = skin_dull_huesat(min(abs(ds), 0.5), lab)
+        return "hueSaturation", p, f"{huesat_text(p)}（范围对准这块皮肤的颜色，只加饱和度、不改明暗）"
     if kind == "饱和度偏高":
         sat = -clip(abs(ds) * 60, 5, 25)
         return "hueSaturation", huesat(0, None, sat=sat, master=True), f"全图 饱和度 {sat}"

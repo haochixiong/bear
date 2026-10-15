@@ -40,7 +40,7 @@ def _hs_one(x, hue, sat, light):
     """PS 色相/饱和度：HSL 里转色相、乘饱和度；明度是往黑 / 往白混合（“加黑 / 加白”，颜色同时变淡），
     不是保持 HSL 饱和度只改 HSL 明度（那样浅色压暗时会变得非常艳）。"""
     h, s, li = _hsl(x)
-    y = _rgb((h + hue) % 360, np.clip(s * (1 + sat / 100), 0, 1), li)
+    y = _rgb((h + hue) % 360, np.clip(s * (1 + sat / 100 if sat <= 0 else 1 / max(1 - sat / 100, 1e-3)), 0, 1), li)
     v = light / 100
     return y * (1 + v) if v < 0 else y + (1 - y) * v
 

@@ -82,7 +82,7 @@ def compute_stats(
 
     lab_mean = lab.mean(axis=0)
     ok_mean = ok.mean(axis=0)
-    clipped = np.any((rgb == 0) | (rgb == 255), axis=1)
+    clipped = cs.clipped(rgb)  # 任一通道 ≥ 254 或三个通道都 ≤ 1；饱和的纯色（例如 R = 0 的蓝）不是裁切
     return RegionStats(
         total_pixels=total,
         sampled_pixels=n,

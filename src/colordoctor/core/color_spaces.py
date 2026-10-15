@@ -338,5 +338,15 @@ def hue_name(h: float, chroma: float | None = None) -> str:
     return "紫/品红"
 
 
+def hue_names(h: np.ndarray) -> np.ndarray:
+    """hue_name 的数组版（不逐个像素调 Python 函数：几十万个像素时快几十倍）。"""
+    h = np.asarray(h, dtype=float) % 360.0
+    out = np.full(h.shape, "紫/品红", dtype=object)
+    for name, lo, hi in reversed(HUE_SECTORS):  # 和 hue_name 一样，前面的区段优先
+        sel = ((lo <= h) & (h < hi)) | ((lo <= h + 360.0) & (h + 360.0 < hi))
+        out[sel] = name
+    return out.astype(str)
+
+
 def opposite_hue(h: float) -> float:
     return (float(h) + 180.0) % 360.0

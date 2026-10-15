@@ -412,6 +412,11 @@ async function runAnalyze() {
       docWidth: sb.right - sb.left, docHeight: sb.bottom - sb.top, layerKind: info.kind, layerName: info.label,
     });
     res.sub = sub;
+    // 像素按 sRGB 读出来分析，但调整图层作用在文档自己的颜色空间：不是 sRGB 时色相范围、曲线点会偏
+    const profile = String(info.doc.colorProfileName || "");
+    if (profile && !/srgb/i.test(profile) && mode !== "patch") {
+      res.notes = [...(res.notes || []), `文档的颜色配置文件是「${profile}」：分析按 sRGB 换算，但调整图层作用在「${profile}」里，色相范围和曲线点会有偏差。建议在转换为 sRGB 的副本上调（编辑 → 转换为配置文件）`];
+    }
     state.bySub[sub] = {
       result: res, made: new Set(),
       analyzed: {
@@ -639,7 +644,7 @@ const KEYS = ["高", "中", "低"];
 const LENGTHS = ["长", "中", "短"];
 function toneGrid(t) {
   const cell = (name) => {
-    const cls = [name === t.name ? "now" : "", name === t.target && t.target !== t.name ? "goal" : "", name === t.near ? "near" : ""].join(" ");
+    const cls = [name === t.name ? "now" : "", name === t.target && t.target !== t.name ? "goal" : "", (t.near || "").split("、").includes(name) ? "near" : ""].join(" ");
     const tag = name === t.name ? "现在" : (name === t.target ? "目标" : "");
     const info = ((state.options && state.options.tones) || []).find((x) => x.name === name);
     return `<div class="tcell ${cls}" title="${esc(info ? info.desc : name)}">${esc(name)}${tag ? `<span>${tag}</span>` : ""}</div>`;
@@ -705,6 +710,19 @@ function checkStillValid(a) {
   return null;
 }
 
+// 新图层应该放在哪一层上面：方案里排在它前面、已经生成且还在的那一层（没有就返回 null，放在分析的图层上方）
+function anchorLayer(e, specIds, doc) {
+  const order = e.result.plan.layers.map((l) => l.id);
+  const first = Math.min(...specIds.map((id) => order.indexOf(id)));
+  let best = null;
+  for (const [sid, lids] of Object.entries(e.madeLayers || {})) {
+    const k = order.indexOf(sid);
+    const lid = lids[lids.length - 1];
+    if (k >= 0 && k < first && (!best || k > best.k) && ps.findLayer(doc, lid)) best = { k, lid };
+  }
+  return best ? best.lid : null;
+}
+
 function markMade(e, ids, text) {
   const a = e.analyzed;
   ids.forEach((id) => e.made.add(id));
@@ -760,8 +778,11 @@ async function generate(ids, single, findingIndex) {
     // 蒙版是整幅文档大小（大图每张几十 MB）：逐层取、用完即弃，不一次全部放在内存里。
     // 中途任何一步失败，modal 都不提交历史记录，已建的图层整体撤回。
     await ps.modal(specs.length > 1 ? "ColorDoctor 一键校正" : "ColorDoctor 校正", async (ctx, d) => {
-      if (a.layerId != null) await ps.selectLayer(a.layerId);  // 分析的是单个图层：建在它上方
-      else await ps.selectTopLayer(d);  // 分析的是合并画面：建在最顶层
+      if (a.layerId != null) {
+        // 建在分析的图层上方；已经生成过这次分析的其他图层时，按方案里的先后放（先曲线后颜色、影调曲线在最上），
+        // 而不是总贴着分析的图层、跑到之前生成的图层下面去
+        await ps.selectLayer(anchorLayer(e, specs.map((x) => x.id), d) || a.layerId);
+      } else await ps.selectTopLayer(d);  // 分析的是合并画面：建在最顶层
       // 当前选区不能变成调整图层的蒙版：暂时取消，生成后恢复
       await ps.withoutSelection(d, async () => {
         const made = [];

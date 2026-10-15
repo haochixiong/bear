@@ -111,6 +111,10 @@ def _upsample(prob: np.ndarray, w: int, h: int) -> np.ndarray:
     return np.asarray(Image.fromarray(np.ascontiguousarray(prob, np.float32), mode="F").resize((w, h), Image.BILINEAR))
 
 
+def _upsample_mask(m: np.ndarray, w: int, h: int) -> np.ndarray:
+    return np.asarray(Image.fromarray(m.astype(np.uint8) * 255).resize((w, h), Image.BILINEAR)) > 127
+
+
 def segment_skin(rgb: np.ndarray, refine_with_color: bool = True, session=None) -> SkinSegmentation:
     """rgb：(H, W, 3) uint8 sRGB。返回脸部 / 身体皮肤蒙版（与原图同尺寸）。"""
     sess = session or _session()
@@ -126,8 +130,9 @@ def segment_skin(rgb: np.ndarray, refine_with_color: bool = True, session=None) 
     logits = sess.run(None, {inp: x[None]})[0][0]  # (256, 256, 6)
     prob = _softmax(logits.astype(np.float32))[oy:oy + nh, ox:ox + nw]
     labels_small = prob.argmax(-1).astype(np.uint8)
-    face = _upsample(prob[..., FACE], w, h) > 0.5
-    body = _upsample(prob[..., BODY], w, h) > 0.5
+    # 在 256 像素的小图上先判断，再把 8 位蒙版放大（以前把浮点概率图整幅放大到原图尺寸，45 MP 要 5 秒多）
+    face = _upsample_mask(prob[..., FACE] > 0.5, w, h)
+    body = _upsample_mask(prob[..., BODY] > 0.5, w, h)
     labels = np.asarray(Image.fromarray(labels_small).resize((w, h), Image.NEAREST))
     info = {"provider": (sess.get_providers() or [""])[0] if hasattr(sess, "get_providers") else "",
             "ai_face": round(float(face.mean()), 4), "ai_body": round(float(body.mean()), 4), "refined": False}
