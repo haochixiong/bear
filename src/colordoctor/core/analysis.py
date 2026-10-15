@@ -74,19 +74,22 @@ BAND_MIN_DL = 6.0  # 阴影 / 高光段的平均明度与中间调至少差这�
 
 def _bands(region: np.ndarray, mask: np.ndarray | None) -> dict:
     sub, _ = grid_downsample(region, MAX_SAMPLES)
-    lab = cs.srgb8_to_lab(sub).reshape(-1, 3)
-    keep = ~cs.clipped(sub.reshape(-1, 3))  # 被裁切的纯白 / 死黑没有颜色信息
-    if mask is not None and mask.size == lab.shape[0]:
-        keep &= mask.reshape(-1) == ct_mod.MASK_NORMAL
-    lab = lab[keep]
-    if lab.shape[0] < 20:
+    px = sub.reshape(-1, 3)
+    if mask is not None and mask.size == px.shape[0]:
+        px = px[mask.reshape(-1) == ct_mod.MASK_NORMAL]
+    # 原图尺寸的每个像素：按“不同的颜色 × 像素数”加权
+    cols, w = cs.unique_colours(px)
+    keep = ~cs.clipped(cols)  # 被裁切的纯白 / 死黑没有颜色信息
+    cols, w = cols[keep], w[keep].astype(np.float64)
+    if w.sum() < 20:
         return {}
+    lab = np.asarray(cs.srgb8_to_lab(cols), dtype=np.float64)
     L = lab[:, 0]
-    p15, p40, p60, p85 = np.percentile(L, [15, 40, 60, 85])
+    p15, p40, p60, p85 = cs.weighted_percentile(L, w, [15, 40, 60, 85])
     out = {}
     for key, sel in (("shadow", L <= p15), ("mid", (L >= p40) & (L <= p60)), ("highlight", L >= p85)):
-        if sel.sum() >= 5:
-            out[key] = lab[sel].mean(axis=0)
+        if w[sel].sum() >= 5:
+            out[key] = (lab[sel] * w[sel][:, None]).sum(axis=0) / w[sel].sum()
     mid = out.get("mid")
     for key in ("shadow", "highlight"):
         if mid is not None and key in out and abs(out[key][0] - mid[0]) < BAND_MIN_DL:
@@ -337,8 +340,8 @@ def analyze_skin_region(
     if preset is None and preset_key:
         preset = sp.get_preset(preset_key, presets)
     stats = rs.compute_stats(region, valid=valid)
-    skin = pa.analyze_skin(region, preset, valid=valid)
     ct = ct_mod.analyze(region, mode="skin", offset=_offset(rect), valid=valid)
+    skin = pa.analyze_skin(region, preset, valid=valid, contamination=ct)
     uni = su.analyze_uniformity(region, mask=valid, offset=_offset(rect))
     rule = quick_rule or (preset.quick_rule if preset is not None and preset.quick_rule else sp.global_quick_rule())
     skin_px = _skin_pixels(region, valid)

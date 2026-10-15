@@ -170,8 +170,25 @@ def test_overlay_alignment_for_downsampled_masks():
     img = noisy(flat(BLUE, 1200, 1600), 2)
     img[600:700, 800:900] = sprinkle(img[600:700, 800:900], YELLOW, 0.5, seed=1)
     rep = an.analyze_region(img, CTX)
-    assert rep.contamination.mask_scale > 1
+    assert rep.contamination.mask_scale == 1  # 原图尺寸分析：掩码与原图一一对应
     out = overlay_image(img, rep, dim_normal=False)
+    changed = np.abs(out.astype(int) - img.astype(int)).sum(axis=2) > 60
+    ys, xs = np.nonzero(changed)
+    assert 590 <= ys.min() and ys.max() <= 710 and 790 <= xs.min() and xs.max() <= 910
+
+
+def test_overlay_alignment_for_downsampled_masks_over_limit():
+    # 超过 1.6 亿像素的图才会降采样：用小上限模拟，叠加标记仍要落在原图的正确位置
+    import dataclasses
+
+    from colordoctor.core import contamination as ct
+
+    img = noisy(flat(BLUE, 1200, 1600), 2)
+    img[600:700, 800:900] = sprinkle(img[600:700, 800:900], YELLOW, 0.5, seed=1)
+    rep = an.analyze_region(img, CTX)
+    small = ct.analyze(img, "region", max_samples=400_000)
+    assert small.mask_scale > 1
+    out = overlay_image(img, dataclasses.replace(rep, contamination=small), dim_normal=False)
     changed = np.abs(out.astype(int) - img.astype(int)).sum(axis=2) > 60
     ys, xs = np.nonzero(changed)
     assert 590 <= ys.min() and ys.max() <= 710 and 790 <= xs.min() and xs.max() <= 910

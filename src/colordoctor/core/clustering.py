@@ -39,15 +39,23 @@ def kmeans(points: np.ndarray, k: int, iters: int = 40, seed: int = 0) -> tuple[
 
 
 def dominant_clusters(
-    lab: np.ndarray, max_k: int = 6, merge_de: float = 4.0, max_points: int = 20_000
+    lab: np.ndarray, max_k: int = 6, merge_de: float = 4.0, max_points: int = 20_000, weights=None
 ) -> list[tuple[np.ndarray, float]]:
-    """返回 [(Lab 中心, 占比)]，按占比降序；ΔE00 < merge_de 的簇会合并。"""
+    """返回 [(Lab 中心, 占比)]，按占比降序；ΔE00 < merge_de 的簇会合并。
+
+    weights：每个点代表多少个像素（按不同颜色统计时传像素数），占比按像素算。
+    """
     pts = np.asarray(lab, dtype=np.float64).reshape(-1, 3)
     n = pts.shape[0]
     if n == 0:
         return []
+    w_all = np.ones(n) if weights is None else np.asarray(weights, dtype=np.float64).ravel()
     fit = pts
-    if n > max_points:
+    if weights is not None and n > max_points:
+        # 按像素数抽样找中心（固定随机种子，结果可复现）：像素多的颜色被抽到的机会大
+        rng = np.random.default_rng(0)
+        fit = pts[rng.choice(n, max_points, replace=True, p=w_all / w_all.sum())]
+    elif n > max_points:
         step = int(np.ceil(n / max_points))
         fit = pts[step // 2 :: step]
     centers, _ = kmeans(fit, max_k)
@@ -56,7 +64,7 @@ def dominant_clusters(
     for s in range(0, n, 200_000):
         chunk = pts[s : s + 200_000]
         labels[s : s + 200_000] = ((chunk[:, None, :] - centers[None]) ** 2).sum(axis=2).argmin(axis=1)
-    counts = np.bincount(labels, minlength=len(centers)).astype(float)
+    counts = np.bincount(labels, weights=w_all, minlength=len(centers)).astype(float)
     groups = [[i] for i in range(len(centers)) if counts[i] > 0]
 
     def center_of(g):
@@ -77,6 +85,6 @@ def dominant_clusters(
             groups[i] = groups[i] + groups[j]
             del groups[j]
             merged = True
-    out = [(center_of(g), float(counts[g].sum() / n)) for g in groups]
+    out = [(center_of(g), float(counts[g].sum() / w_all.sum())) for g in groups]
     out.sort(key=lambda t: -t[1])
     return out

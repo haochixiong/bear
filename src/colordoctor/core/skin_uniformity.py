@@ -16,7 +16,8 @@ import numpy as np
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.contamination import _components, downsample_mask
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.sampling import grid_downsample
+from colordoctor.core.pixel_table import PixelTable, wmedian
+from colordoctor.core.sampling import FULL_RES_MAX, grid_downsample
 
 HUE_MILD = 6.0  # 色相偏离（度）：轻微
 HUE_NOTABLE = 10.0  # 明显（例如橙 55° 与黄 68° 相差约 13°）
@@ -72,21 +73,23 @@ def analyze_uniformity(
     region: np.ndarray,
     mask: np.ndarray | None = None,
     offset: tuple[int, int] = (0, 0),
-    max_samples: int = 262_144,
+    max_samples: int = FULL_RES_MAX,
 ) -> UniformityResult:
     sub, step = grid_downsample(region, max_samples)
     hh, ww = sub.shape[:2]
     valid = downsample_mask(mask, step, (hh, ww))
-    lab = cs.srgb8_to_lab(sub)
-    lch = cs.lab_to_lch(lab)
-    L, C, h = lch[..., 0], lch[..., 1], lch[..., 2]
-    valid = valid & (C >= 3)
-    n_skin = int(valid.sum())
+    # 原图尺寸的每个像素：颜色只算一次（PixelTable），每一小块按“颜色 × 这块里的像素数”统计
+    pt = PixelTable(sub)
+    Lu, Cu, hu = pt.L, pt.C, pt.h
+    valid = valid & (Cu >= 3)[pt.index]
+    wv = pt.count(valid)
+    n_skin = int(wv.sum())
     if n_skin < 20:
         return UniformityResult(n_skin, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, step=step)
-    s = C / np.maximum(L, 1.0)
-    h0, _, _ = weighted_circular_hue(h[valid], C[valid])
-    s0 = float(np.median(s[valid]))
+    su = Cu / np.maximum(Lu, 1.0)
+    nz = wv > 0
+    h0, _, _ = weighted_circular_hue(hu[nz], Cu[nz] * wv[nz])
+    s0 = wmedian(su[nz], wv[nz])
 
     ts = int(max(6, round(min(hh, ww) / 12)))
     th, tw = (hh + ts - 1) // ts, (ww + ts - 1) // ts
@@ -98,12 +101,15 @@ def analyze_uniformity(
             v = valid[sl]
             if v.size == 0 or v.mean() < MIN_TILE_SKIN or v.sum() < 6:
                 continue
-            ht, _, _ = weighted_circular_hue(h[sl][v], C[sl][v])
+            cnt = np.bincount(pt.index[sl][v], minlength=pt.n)
+            k = np.flatnonzero(cnt)
+            c = cnt[k].astype(np.float64)
+            ht, _, _ = weighted_circular_hue(hu[k], Cu[k] * c)
             if ht is None:
                 continue
             tiles.append(
-                (ty, tx, float(cs.hue_diff(h0, ht)), float(np.median(s[sl][v])), float(np.median(L[sl][v])), int(v.sum()),
-                 lab[sl][v].mean(axis=0))
+                (ty, tx, float(cs.hue_diff(h0, ht)), wmedian(su[k], c), wmedian(Lu[k], c), int(v.sum()),
+                 (pt.lab[k] * c[:, None]).sum(axis=0) / c.sum())
             )
     if not tiles:
         return UniformityResult(n_skin, float(h0), s0, 0.0, 0.0, 0.0, 0.0, 100.0, step=step)

@@ -84,6 +84,8 @@ class PointSample:
     @property
     def size_label(self) -> str:
         n = 2 * self.radius + 1
+        if 0 < self.pixel_count < n * n:  # 靠近图像边缘：N×N 的范围有一部分在图外，实际平均的像素更少
+            return f"{n}×{n}（靠边，实际 {self.pixel_count} 个像素）"
         return f"{n}×{n}"
 
 

@@ -52,6 +52,69 @@ def _srgb8_to_linear_calc(rgb) -> np.ndarray:
 _LINEAR_LUT = _srgb8_to_linear_calc(np.arange(256))
 
 
+# ---------------------------------------------------------------- 大图：按“不同的颜色”换算
+# 一张照片的像素有几千万个，但不同的颜色一般只有一两百万种：每种颜色只换算一次、再按像素查回去，
+# 结果和逐个像素换算完全一样（不是降采样），快很多；结果用 float32 存，几千万个像素时内存省一半。
+PER_COLOUR_MIN = 400_000  # 像素数达到这么多才走这条路（小图直接算更快）
+
+
+def per_colour(fn):
+    """把“8 位 sRGB -> 每个像素若干个数”的换算包成按不同颜色计算。"""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(rgb, *args, **kwargs):
+        if not (isinstance(rgb, np.ndarray) and rgb.dtype == np.uint8 and rgb.ndim >= 2 and rgb.shape[-1] == 3
+                and rgb.size // 3 >= PER_COLOUR_MIN):
+            return fn(rgb, *args, **kwargs)
+        flat = rgb.reshape(-1, 3)
+        packed = (flat[:, 0].astype(np.uint32) << 16) | (flat[:, 1].astype(np.uint32) << 8) | flat[:, 2]
+        present = np.bincount(packed, minlength=1 << 24).astype(bool)
+        uniq = np.flatnonzero(present).astype(np.uint32)
+        index = np.zeros(1 << 24, dtype=np.int32)
+        index[uniq] = np.arange(uniq.size, dtype=np.int32)
+        colours = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], axis=-1).astype(np.uint8)
+        vals = np.asarray(fn(colours, *args, **kwargs), dtype=np.float32)
+        out = vals[index[packed]]
+        return out.reshape(*rgb.shape[:-1], *vals.shape[1:])
+
+    return wrapper
+
+
+def unique_colours(px) -> tuple[np.ndarray, np.ndarray]:
+    """一组像素 -> (不同的颜色 (U, 3), 每种颜色的像素数 (U,))。
+
+    只看颜色分布的统计（平均、分位数、占比、聚类、通道占比……）按“颜色 × 像素数”加权算，
+    和逐个像素算完全一样，但几千万个像素时快得多。像素不多时原样返回（每个像素权重 1）。
+    """
+    flat = np.asarray(px).reshape(-1, 3)
+    if flat.dtype != np.uint8 or flat.shape[0] < PER_COLOUR_MIN:
+        return flat, np.ones(flat.shape[0], dtype=np.int64)
+    packed = (flat[:, 0].astype(np.uint32) << 16) | (flat[:, 1].astype(np.uint32) << 8) | flat[:, 2]
+    counts = np.bincount(packed, minlength=1 << 24)
+    uniq = np.flatnonzero(counts).astype(np.uint32)
+    colours = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], axis=-1).astype(np.uint8)
+    return colours, counts[uniq]
+
+
+def weighted_percentile(values, weights, q) -> np.ndarray:
+    """加权分位数（weights 为每个值的像素数时，结果和对展开后的全部像素求 np.percentile 一致到插值误差）。"""
+    v = np.asarray(values, dtype=np.float64).ravel()
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    order = np.argsort(v, kind="stable")
+    v, w = v[order], w[order]
+    cw = np.cumsum(w)
+    if cw.size == 0 or cw[-1] <= 0:
+        return np.full(np.shape(q), np.nan)
+    # 第 k 个像素（从 0 数）的位置 = 累计权重；和 numpy 的 linear 插值一样按 (N-1)·q 取位置
+    pos = np.asarray(q, dtype=np.float64) / 100.0 * (cw[-1] - 1)
+    lo = np.searchsorted(cw, np.floor(pos) + 1, side="left")
+    hi = np.searchsorted(cw, np.floor(pos) + 2, side="left")
+    lo, hi = np.minimum(lo, v.size - 1), np.minimum(hi, v.size - 1)
+    frac = pos - np.floor(pos)
+    return v[lo] + (v[hi] - v[lo]) * frac
+
+
 def srgb8_to_linear(rgb) -> np.ndarray:
     if isinstance(rgb, np.ndarray) and rgb.dtype == np.uint8:
         return _LINEAR_LUT[rgb]  # 整数输入查表，结果与逐个计算相同，大图快很多
@@ -103,6 +166,7 @@ def lab_to_xyz(lab, white: str = "D50") -> np.ndarray:
     return np.stack([xr, yr, zr], axis=-1) * wp
 
 
+@per_colour
 def srgb8_to_lab(rgb, white: str = "D50") -> np.ndarray:
     return xyz_to_lab(srgb8_to_xyz(rgb, white), white)
 
@@ -141,7 +205,9 @@ def lab_in_srgb_gamut(lab, white: str = "D50", tol: float = 0.5 / 255) -> np.nda
 
 
 def lab_to_lch(lab) -> np.ndarray:
-    lab = np.asarray(lab, dtype=np.float64)
+    lab = np.asarray(lab)
+    if lab.dtype != np.float32:  # 大图的 Lab 是 float32（见 per_colour）：保持 float32，省内存
+        lab = lab.astype(np.float64)
     C = np.hypot(lab[..., 1], lab[..., 2])
     h = np.degrees(np.arctan2(lab[..., 2], lab[..., 1])) % 360.0
     return np.stack([lab[..., 0], C, h], axis=-1)
@@ -170,6 +236,7 @@ _M_OK2 = np.array(
 )
 
 
+@per_colour
 def srgb8_to_oklab(rgb) -> np.ndarray:
     lms = srgb8_to_linear(rgb) @ _M_OK1.T
     return np.cbrt(lms) @ _M_OK2.T
@@ -192,6 +259,7 @@ def _hue_from_rgb(c: np.ndarray, mx: np.ndarray, mn: np.ndarray) -> np.ndarray:
     return np.where(d == 0, 0.0, h * 60.0) % 360.0
 
 
+@per_colour
 def srgb8_to_hsb(rgb) -> np.ndarray:
     """HSB（= HSV，Photoshop 拾色器的 H/S/B）。H 0–360，S/B 0–100。"""
     c = _as_float(rgb) / 255.0
@@ -202,6 +270,7 @@ def srgb8_to_hsb(rgb) -> np.ndarray:
     return np.stack([h, s * 100.0, mx * 100.0], axis=-1)
 
 
+@per_colour
 def srgb8_to_hsl(rgb) -> np.ndarray:
     """HSL：H 0–360，S/L 0–100（顺序为 H, S, L）。"""
     c = _as_float(rgb) / 255.0

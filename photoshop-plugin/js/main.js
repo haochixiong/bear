@@ -417,6 +417,9 @@ async function runAnalyze() {
     if (profile && !/srgb/i.test(profile) && mode !== "patch") {
       res.notes = [...(res.notes || []), `文档的颜色配置文件是「${profile}」：分析按 sRGB 换算，但调整图层作用在「${profile}」里，色相范围和曲线点会有偏差。建议在转换为 sRGB 的副本上调（编辑 → 转换为配置文件）`];
     }
+    if (px.scaled) {
+      res.notes = [...(res.notes || []), `这张图超过 1 亿像素，按 ${px.width}×${px.height} 读取分析（1 亿像素以内都按原图尺寸逐个像素检查）：只有一两个像素大的杂色点可能被平均掉，可以框选局部再查`];
+    }
     state.bySub[sub] = {
       result: res, made: new Set(),
       analyzed: {
@@ -452,12 +455,15 @@ async function runAnalyze() {
 
 async function readForeground() {
   if (state.busy) return;
+  // 前景色按 PS 的 Lab 读（和文档的颜色配置文件无关）；foregroundColor.rgb 是文档 / 工作空间的 RGB，
+  // 不是 sRGB，ProPhoto 等文档里直接当 sRGB 用会偏
+  const fg = ps.foregroundLab();
   const c = app.foregroundColor.rgb;
   const px = { data: new Uint8Array([c.red, c.green, c.blue]), width: 1, height: 1, components: 3 };
   const sub = state.sub;
   setBusy(true, "正在读取前景色…");
   try {
-    const res = await bridge.analyze(px, "patch", query(sub), { layerKind: "pixel" });
+    const res = await bridge.analyze(px, "patch", { ...query(sub), lab: `${fg.L},${fg.a},${fg.b}` }, { layerKind: "pixel" });
     res.sub = sub;
     res.fromForeground = true;
     state.bySub[sub] = { result: res, analyzed: null, made: new Set() };

@@ -183,7 +183,7 @@ def multipoint_request(req: dict) -> dict:
     return {"summary": res.summary, "legend": res.legend, "rows": [dataclasses.asdict(r) for r in res.rows]}
 
 
-REF_SIDE = 2048  # 参考图按与插件读像素相同的长边缩小后保存（只用来统计颜色）
+REF_MAX_PIXELS = 100_000_000  # 参考图和插件读文档一样按原图尺寸分析；超过这么多像素的超大图才缩小（与插件的 MAX_READ_PIXELS 相同）
 
 
 _ref_cache: OrderedDict[str, tuple[str, dict]] = OrderedDict()  # 文件内容 → (ref id, 结果)：同一张参考图不重复解码
@@ -203,7 +203,7 @@ def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
         if hit is not None and refs.get(hit[0]) is not None:  # 插件每次分析都会重新上传，RAW 不必每次都解码
             return {**hit[1], "ref": hit[0]}
     try:
-        src = load_image_bytes(data, name, max_side=REF_SIDE)
+        src = load_image_bytes(data, name)
     except ImageLoadError as e:
         raise ValueError(str(e)) from e
     px = src.pixels
@@ -211,11 +211,11 @@ def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
     if alpha is not None and alpha.shape == px.shape[:2]:
         px = np.dstack([px, alpha])  # 透明的地方不算进参考图（与从 PS 图层读取一致）
     h, w = px.shape[:2]
-    if max(h, w) > REF_SIDE:
-        k = REF_SIDE / max(h, w)
+    if h * w > REF_MAX_PIXELS:
+        k = (REF_MAX_PIXELS / (h * w)) ** 0.5
         mode = "RGBA" if px.shape[2] == 4 else "RGB"
         px = np.asarray(Image.fromarray(np.ascontiguousarray(px), mode=mode).resize(
-            (max(1, round(w * k)), max(1, round(h * k))), Image.BILINEAR))
+            (max(1, round(w * k)), max(1, round(h * k))), Image.Resampling.BOX))
     try:
         prep = pixel_guard.prepare(px)
     except pixel_guard.BlockedError as e:
@@ -237,7 +237,15 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
     """服务端核心逻辑（与 HTTP 解耦，便于测试）。不能分析时抛 pixel_guard.BlockedError。"""
     pixel_guard.check_layer_kind(layer_kind, layer_name)
     if mode == "patch":
-        return patch_values(pixels, q.get("preset") or "")
+        lab = None
+        if q.get("lab"):  # 前景色：插件直接给 PS 的 Lab（和文档的颜色配置文件无关），比按文档 RGB 读更准
+            try:
+                lab = tuple(float(v) for v in q["lab"].split(","))
+            except ValueError as e:
+                raise ValueError("lab 参数应为 L,a,b") from e
+            if len(lab) != 3 or not (0 <= lab[0] <= 100):
+                raise ValueError("lab 参数应为 L,a,b")
+        return patch_values(pixels, q.get("preset") or "", lab=lab)
     prep = pixel_guard.prepare(pixels)
     report = run_analysis(prep, mode, q, refs, layer_name)
     plan = layer_plan.plan_from_report(report, prep.rgb.shape)
@@ -280,10 +288,12 @@ def tone_json(report) -> dict | None:
     return tcl.to_json(p.tone_class, p.tone_target, p.tone_also, p.tone_label)
 
 
-def patch_values(pixels: np.ndarray, preset_key: str = "") -> dict:
+def patch_values(pixels: np.ndarray, preset_key: str = "", lab=None) -> dict:
     """取色：一小块像素（PS 选区或吸管范围）的平均颜色、肤色快速规则、所属 ACR 通道、纯度。
 
     preset_key：肤色风格；给出时按这个风格自己的快速规则判断（和「人像」页、桌面版一致），否则用全局规则。
+    lab：直接给出的 Lab（D50，PS 前景色）；给出时数值以它为准，不经过 8 位 RGB 的取整。
+    选区有羽化（半选中的像素）时按选中程度加权平均，和 PS 里“羽化选区”的效果一致。
     """
     from colordoctor.core import acr_channels as ac
     from colordoctor.core import color_spaces as cs
@@ -291,14 +301,28 @@ def patch_values(pixels: np.ndarray, preset_key: str = "") -> dict:
     from colordoctor.core.sampling import color_values
     from colordoctor.core.skin_presets import global_quick_rule
 
+    import dataclasses
+
     px = pixels.reshape(-1, pixels.shape[2])
+    weights = None
     if pixels.shape[2] == 4:
-        px = px[px[:, 3] >= pixel_guard.ALPHA_MIN]
+        keep = px[:, 3] > 0
+        weights = px[keep, 3].astype(np.float64) / 255.0  # 羽化边缘按选中程度计入
+        px = px[keep]
     if px.shape[0] == 0:
         raise pixel_guard.BlockedError("取样范围内没有不透明像素。")
     rgb = px[:, :3]
-    vals = color_values(rgb.astype(np.float64).mean(axis=0))
-    lab = cs.srgb8_to_lab(rgb[:: max(1, rgb.shape[0] // 50_000)])
+    mean = np.average(rgb.astype(np.float64), axis=0, weights=weights)
+    if lab is not None:
+        exact = np.array(lab, dtype=np.float64)
+        vals = color_values(np.clip(cs.lab_to_srgb_float(exact), 0, 1) * 255.0)
+        vals = dataclasses.replace(vals, lab=tuple(round(float(v), 4) for v in exact),
+                                   lch=tuple(round(float(v), 4) for v in cs.lab_to_lch(exact)))
+    else:
+        vals = color_values(mean)
+    core = rgb if weights is None else rgb[weights >= 0.5]  # 快速规则 / 纯度只看选中一半以上的像素
+    core = core if core.shape[0] else rgb
+    lab = cs.srgb8_to_lab(core) if lab is None else np.array([lab], dtype=np.float64)  # 每个像素都算
     preset = None
     if preset_key:
         from colordoctor.core import skin_presets as sp

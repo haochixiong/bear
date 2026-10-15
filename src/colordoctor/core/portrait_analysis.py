@@ -15,7 +15,8 @@ from colordoctor.core import color_spaces as cs
 from colordoctor.core import contamination as ct
 from colordoctor.core.color_models import Comparison, QuickRuleResult, SkinPreset, SkinReport
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.sampling import SampleError, grid_downsample
+from colordoctor.core.pixel_table import wmedian
+from colordoctor.core.sampling import FULL_RES_MAX, SampleError, grid_downsample
 
 # 相对“自然肤色”的色相区间（D50 Lab），超出即给出倾向
 NATURAL_HUE = (40.0, 68.0)
@@ -101,26 +102,31 @@ def _band_mean(lab, sel):
 
 
 def analyze_skin(
-    region: np.ndarray, preset: SkinPreset | None = None, max_samples: int = 262_144, valid: np.ndarray | None = None
+    region: np.ndarray, preset: SkinPreset | None = None, max_samples: int = FULL_RES_MAX, valid: np.ndarray | None = None,
+    contamination=None,
 ) -> SkinReport:
+    """contamination：已经算好的同一块区域的脏色结果（同样的像素和蒙版），给出时不再算一遍。"""
     if region is None or region.ndim != 3 or region.shape[0] == 0 or region.shape[1] == 0:
         raise SampleError("选区为空")
     sub, step = grid_downsample(region, max_samples)
     vsub = ct.downsample_mask(valid, step, sub.shape[:2]).reshape(-1)
-    lab = cs.srgb8_to_lab(sub).reshape(-1, 3)[vsub]
-    clip = cs.clipped(sub.reshape(-1, 3))[vsub]
-    if lab.shape[0] == 0:
+    # 原图尺寸的每个像素都统计：按“不同的颜色 × 像素数”加权（和逐个像素算一样，快很多）
+    cols, wt = cs.unique_colours(sub.reshape(-1, 3)[vsub])
+    if cols.shape[0] == 0:
         raise SampleError("蒙版内没有皮肤像素")
+    w = wt.astype(np.float64)
+    lab = np.asarray(cs.srgb8_to_lab(cols), dtype=np.float64)
+    clip = cs.clipped(cols)
     lch = cs.lab_to_lch(lab)
     L, C, h = lch[:, 0], lch[:, 1], lch[:, 2]
     skin = (C >= 3.0) & (h >= SKIN_HUE_RANGE[0]) & (h <= SKIN_HUE_RANGE[1]) & (L >= 10) & (L <= 98)
-    share = float(skin.mean())
+    share = float(w[skin].sum() / w.sum())
     mixed = share < MIXED_SHARE
-    if skin.sum() < 1:
+    if not skin.any():
         skin = np.ones_like(skin)
 
-    sl = lab[skin]
-    mean = sl.mean(axis=0)
+    sl, sw = lab[skin], w[skin]
+    mean = (sl * sw[:, None]).sum(axis=0) / sw.sum()
     mean_lch = cs.lab_to_lch(mean)
     lab65 = cs.srgb8_to_lab(cs.lab_to_srgb8(mean), white="D65")
     ita = ita_angle(float(lab65[0]), float(lab65[2]))
@@ -130,19 +136,24 @@ def analyze_skin(
 
     # 高光 / 阴影段的偏色：去掉被裁切的像素和镜面反光（比皮肤亮很多、颜色又淡很多的点，是光源的颜色不是皮肤的），
     # 并且这一段要和中间调真的有明暗差，否则不算“高光 / 阴影”
-    sl_b = sl[~clip[skin]]
-    if sl_b.shape[0] >= 20:
+    keep = ~clip[skin]
+    sl_b, wb = sl[keep], sw[keep]
+    if wb.sum() >= 20:
         s_b = np.hypot(sl_b[:, 1], sl_b[:, 2]) / np.maximum(sl_b[:, 0], 1.0)
-        spec = (sl_b[:, 0] >= np.median(sl_b[:, 0]) + SPECULAR_DL) & (s_b < SPECULAR_SAT * np.median(s_b))
-        if (~spec).sum() >= 20:
-            sl_b = sl_b[~spec]
+        spec = (sl_b[:, 0] >= wmedian(sl_b[:, 0], wb) + SPECULAR_DL) & (s_b < SPECULAR_SAT * wmedian(s_b, wb))
+        if wb[~spec].sum() >= 20:
+            sl_b, wb = sl_b[~spec], wb[~spec]
     else:
-        sl_b = sl
+        sl_b, wb = sl, sw
     Ls = sl_b[:, 0]
-    p15, p40, p60, p85 = np.percentile(Ls, [15, 40, 60, 85])
-    hi = _band_mean(sl_b, Ls >= p85)
-    lo = _band_mean(sl_b, Ls <= p15)
-    mid = _band_mean(sl_b, (Ls >= p40) & (Ls <= p60))
+    p15, p40, p60, p85 = cs.weighted_percentile(Ls, wb, [15, 40, 60, 85])
+
+    def band_mean(sel):
+        return (sl_b[sel] * wb[sel][:, None]).sum(axis=0) / wb[sel].sum() if wb[sel].sum() > 0 else None
+
+    hi = band_mean(Ls >= p85)
+    lo = band_mean(Ls <= p15)
+    mid = band_mean((Ls >= p40) & (Ls <= p60))
     if mid is None:
         mid = mean
     hi = hi if hi is not None and hi[0] - mid[0] >= BAND_MIN_DL else None
@@ -162,7 +173,7 @@ def analyze_skin(
     sh_shift, sh_hue = shift(lo)
 
     exp_sat = _expected_saturation(preset, float(mean[0]))
-    contam = ct.analyze(region, mode="skin", max_samples=max_samples, valid=valid)
+    contam = contamination if contamination is not None else ct.analyze(region, mode="skin", max_samples=max_samples, valid=valid)
     return SkinReport(
         mean_lab=tuple(round(float(v), 3) for v in mean),
         mean_lch=tuple(round(float(v), 3) for v in mean_lch),

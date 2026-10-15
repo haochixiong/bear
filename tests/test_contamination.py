@@ -174,11 +174,9 @@ def test_neutral_region_has_no_base_hue():
 def test_large_region_is_fast_and_bounded():
     import time
 
-    small = sprinkle(noisy(flat(BLUE, 200, 300), 2), YELLOW, 0.03)  # 10×10 像素一个杂色点（看得见的大小）
-    img = np.repeat(np.repeat(small, 10, 0), 10, 1)
+    img = sprinkle(noisy(flat(BLUE, 2000, 3000), 2), YELLOW, 0.03)  # 单个像素的杂色点：按原图尺寸检查，一个都不漏
     t = time.perf_counter()
     r = run(img)
-    assert time.perf_counter() - t < 5.0
-    assert r.mask.shape[0] * r.mask.shape[1] <= ct.MAX_SAMPLES
-    assert r.mask_scale > 1
+    assert time.perf_counter() - t < 10.0
+    assert r.mask.shape == img.shape[:2] and r.mask_scale == 1  # 原图尺寸，不降采样
     assert r.opposite_fraction == pytest.approx(0.03, rel=0.25)

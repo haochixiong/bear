@@ -15,14 +15,15 @@ from colordoctor.core import color_spaces as cs
 from colordoctor.core import native_layers as nl
 from colordoctor.core.color_models import Adjustment
 from colordoctor.core.perception import de_words
+from colordoctor.core.pixel_table import PixelTable
 from colordoctor.core.contamination import _components
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.sampling import SampleError, grid_downsample
+from colordoctor.core.sampling import FULL_RES_MAX, SampleError, grid_downsample
 from colordoctor.core.tone_class import TONE_STYLES
 
 TONE_STYLE_NAMES = {k: v["name"] for k, v in TONE_STYLES.items()}
 
-MAX_SAMPLES = 200_000
+MAX_SAMPLES = FULL_RES_MAX  # 原图尺寸
 CHROMA_MIN = 8.0
 ACCENT_L_GAP = 20.0  # 点缀色与主色、辅色的明度差至少这么大，才算“靠明度跳出来”
 
@@ -150,22 +151,46 @@ def _prep(image: np.ndarray, max_samples: int = MAX_SAMPLES):
     return sub, step, lab, cs.lab_to_lch(lab)
 
 
-def colorfulness(rgb: np.ndarray, lch: np.ndarray | None = None) -> Colorfulness:
+def _colours(image: np.ndarray, max_samples: int = MAX_SAMPLES):
+    """原图尺寸的全部像素 -> (不同的颜色, 每种的像素数, Lab, LCh)：只看颜色分布的统计都按像素数加权，
+    和逐个像素算完全一样（每个像素都算进去），快很多。"""
+    if image is None or image.ndim != 3 or image.shape[0] == 0 or image.shape[1] == 0:
+        raise SampleError("图像为空")
+    sub, _ = grid_downsample(image, max_samples)
+    cols, pw = cs.unique_colours(sub)
+    lab = np.asarray(cs.srgb8_to_lab(cols), dtype=np.float64)
+    return cols, pw.astype(np.float64), lab, cs.lab_to_lch(lab)
+
+
+def colorfulness(rgb: np.ndarray, lch: np.ndarray | None = None, weights=None) -> Colorfulness:
+    """weights：rgb 是“不同的颜色”时，每种颜色的像素数。"""
+    if weights is None:
+        rgb, weights = cs.unique_colours(np.asarray(rgb).reshape(-1, 3))
+        lch = None
+    w = np.asarray(weights, dtype=np.float64)
+    tot = w.sum()
     px = np.asarray(rgb, dtype=float).reshape(-1, 3)
     rg = px[:, 0] - px[:, 1]
     yb = 0.5 * (px[:, 0] + px[:, 1]) - px[:, 2]
-    M = float(np.hypot(rg.std(), yb.std()) + 0.3 * np.hypot(rg.mean(), yb.mean()))
+
+    def mean(v):
+        return float((v * w).sum() / tot)
+
+    def std(v):
+        return float(np.sqrt(max(0.0, mean(v * v) - mean(v) ** 2)))
+
+    M = float(np.hypot(std(rg), std(yb)) + 0.3 * np.hypot(mean(rg), mean(yb)))
     label = next(name for lim, name in COLORFULNESS_LEVELS if M < lim)
     if lch is None:
-        lch = cs.lab_to_lch(cs.srgb8_to_lab(px))
-    C = lch.reshape(-1, 3)[:, 1]
+        lch = cs.lab_to_lch(cs.srgb8_to_lab(np.asarray(rgb).reshape(-1, 3)))
+    C = np.asarray(lch).reshape(-1, 3)[:, 1].astype(np.float64)
     chrom = C >= CHROMA_MIN
     return Colorfulness(
         value=round(M, 2),
         label=label,
-        mean_chroma=round(float(C[chrom].mean()) if chrom.any() else 0.0, 2),
-        p90_chroma=round(float(np.percentile(C, 90)), 2),
-        chromatic_share=round(float(chrom.mean()), 4),
+        mean_chroma=round(float((C[chrom] * w[chrom]).sum() / w[chrom].sum()) if chrom.any() else 0.0, 2),
+        p90_chroma=round(float(cs.weighted_percentile(C, w, 90)), 2),
+        chromatic_share=round(float(w[chrom].sum() / tot), 4),
     )
 
 
@@ -176,15 +201,17 @@ KEY_OTHER_END_SHARE = 0.10  # ……且另一端（暗调的亮部 L* ≥ 70 / �
 KEY_NAME = {"low": "暗调", "high": "高调"}
 
 
-def tone_key(L) -> str:
+def tone_key(L, weights=None) -> str:
     """画面的影调基调："low" = 暗调（大部分像素很暗、亮部很少），"high" = 高调，"" = 普通。"""
     L = np.asarray(L, dtype=float).ravel()
     if L.size == 0:
         return ""
-    p50 = float(np.median(L))
-    if p50 <= LOW_KEY_MEDIAN_L and float((L >= 70).mean()) < KEY_OTHER_END_SHARE:
+    w = np.ones(L.size) if weights is None else np.asarray(weights, dtype=float).ravel()
+    tot = w.sum()
+    p50 = float(cs.weighted_percentile(L, w, 50))
+    if p50 <= LOW_KEY_MEDIAN_L and float(w[L >= 70].sum() / tot) < KEY_OTHER_END_SHARE:
         return "low"
-    if p50 >= HIGH_KEY_MEDIAN_L and float((L <= 30).mean()) < KEY_OTHER_END_SHARE:
+    if p50 >= HIGH_KEY_MEDIAN_L and float(w[L <= 30].sum() / tot) < KEY_OTHER_END_SHARE:
         return "high"
     return ""
 
@@ -208,9 +235,9 @@ def family_of(L: float, C: float, h: float) -> str:
 
 
 # ================================================================ 6:3:1
-def ratio_631(lab: np.ndarray) -> tuple[tuple[PaletteColor, ...], RatioResult]:
+def ratio_631(lab: np.ndarray, weights=None) -> tuple[tuple[PaletteColor, ...], RatioResult]:
     pts = lab.reshape(-1, 3)
-    clusters = clustering.dominant_clusters(pts, max_k=8, merge_de=8.0)
+    clusters = clustering.dominant_clusters(pts, max_k=8, merge_de=8.0, weights=weights)
     fam: dict[str, list] = {}
     for center, share in clusters:
         L, C, h = cs.lab_to_lch(center)
@@ -262,41 +289,54 @@ def family_unity(
     image: np.ndarray, family: str, target_lab=None, offset=(0, 0), max_samples: int = MAX_SAMPLES
 ) -> FamilyUnity:
     """检查画面中某一种颜色（例如所有的绿色）是否统一，并给出混色器建议。"""
-    sub, step, lab, lch = _prep(image, max_samples)
-    L, C, h = lch[..., 0], lch[..., 1], lch[..., 2]
+    if image is None or image.ndim != 3 or image.shape[0] == 0 or image.shape[1] == 0:
+        raise SampleError("图像为空")
+    sub, step = grid_downsample(image, max_samples)
+    # 原图尺寸：每种颜色只算一次，统计按像素数加权（和逐个像素算一样）；小块定位按像素位置
+    pt = PixelTable(sub)
+    L, C, h, lab = pt.L, pt.C, pt.h, pt.lab
     lo, hi = FAMILY_SECTORS[family]
     lo, hi = lo - 12, hi + 12
     hh = np.where(h < lo, h + 360, h)
-    sel = (C >= CHROMA_MIN) & (hh >= lo) & (hh <= hi)
-    n = int(sel.sum())
+    sel_u = (C >= CHROMA_MIN) & (hh >= lo) & (hh <= hi)  # 每种颜色是不是这一类
+    cnt = pt.count()
+    w = np.where(sel_u, cnt, 0).astype(np.float64)  # 这一类的每种颜色有多少个像素
+    n = int(w.sum())
+    total = int(cnt.sum())
     if n < 20:
-        return FamilyUnity(family, round(n / h.size, 4), (0, 0, 0), None, 0, 0, 0, None, 100.0, (), (
+        return FamilyUnity(family, round(n / total, 4), (0, 0, 0), None, 0, 0, 0, None, 100.0, (), (
             Adjustment("提示", f"画面中几乎没有{family}", None, False),))
-    hm, _, spread = weighted_circular_hue(h[sel], C[sel])
+    hm, _, spread = weighted_circular_hue(h, C * w)
     s = C / np.maximum(L, 1)
-    sat_cv = float(s[sel].std() / max(1e-6, s[sel].mean()))
-    mean = lab[sel].mean(axis=0)
+    s_mean = float((s * w).sum() / n)
+    sat_cv = float(np.sqrt(max(0.0, (w * (s - s_mean) ** 2).sum() / n)) / max(1e-6, s_mean))
+    mean = (lab * w[:, None]).sum(axis=0) / n
+    l_mean = float((L * w).sum() / n)
+    l_std = float(np.sqrt(max(0.0, (w * (L - l_mean) ** 2).sum() / n)))
     target = np.array(target_lab, float) if target_lab is not None else None
     de = float(cs.delta_e_2000(mean, target)) if target is not None else None
     score = float(np.clip(100 - 3.5 * max(0.0, spread - 4) - 60 * max(0.0, sat_cv - 0.15), 0, 100))
     if de is not None:
         score = float(np.clip(score - 3 * max(0.0, de - 3), 0, 100))
 
-    # 小块定位：哪里的这种颜色偏离了整体
+    # 小块定位：哪里的这种颜色偏离了整体（每块按色度加权的平均色相，和 weighted_circular_hue 一样）
     ts = int(max(8, round(min(sub.shape[:2]) / 12)))
     th, tw = (sub.shape[0] + ts - 1) // ts, (sub.shape[1] + ts - 1) // ts
-    flags = np.zeros((th, tw), bool)
-    shifts = np.zeros((th, tw))
-    for ty in range(th):
-        for tx in range(tw):
-            sl = (slice(ty * ts, (ty + 1) * ts), slice(tx * ts, (tx + 1) * ts))
-            v = sel[sl]
-            if v.sum() < max(6, 0.25 * v.size):
-                continue
-            t_h, _, _ = weighted_circular_hue(h[sl][v], C[sl][v])
-            d = float(cs.hue_diff(hm, t_h))
-            shifts[ty, tx] = d
-            flags[ty, tx] = abs(d) >= 8
+    hr = np.radians(h)
+    cw = np.where(sel_u, C, 0.0)
+
+    def tile_sum(per_colour):
+        m = np.zeros((th * ts, tw * ts), np.float64)
+        m[: sub.shape[0], : sub.shape[1]] = np.asarray(per_colour, np.float32)[pt.index]
+        return m.reshape(th, ts, tw, ts).sum(axis=(1, 3))
+
+    t_n = tile_sum(sel_u)
+    t_c, t_s = tile_sum(cw * np.cos(hr)), tile_sum(cw * np.sin(hr))
+    area = tile_sum(np.ones(pt.n))  # 每块实际有多少像素（靠边的块不满）
+    ok = (t_n >= np.maximum(6, 0.25 * area)) & (np.hypot(t_c, t_s) > 1e-9)
+    t_h = np.degrees(np.arctan2(t_s, t_c)) % 360
+    shifts = np.where(ok, cs.hue_diff(hm, t_h), 0.0)
+    flags = ok & (np.abs(shifts) >= 8)
     patches = []
     for comp in _components(flags):
         ys = [c[0] for c in comp]
@@ -312,8 +352,7 @@ def family_unity(
         )
 
     # 混色器建议：涉及的通道往统一的目标色相收拢
-    px = sub[sel]
-    stats = [c for c in ac.channel_stats(px, primary=True) if c.share >= 0.08 and c.mean_hue is not None]
+    stats = [c for c in ac.channel_stats(pt.colours[sel_u], primary=True, weights=w[sel_u]) if c.share >= 0.08 and c.mean_hue is not None]
     goal_lab_h = float(cs.lab_to_lch(target)[2]) if target is not None else float(hm)
     goal = ac.lab_hue_to_hsb_hue(goal_lab_h)
     sat_goal = float(np.median([c.mean_sat for c in stats])) if stats else 0
@@ -374,12 +413,12 @@ def family_unity(
     chans = tuple((c.name, c.share, c.mean_hue) for c in stats)
     return FamilyUnity(
         family=family,
-        share=round(n / h.size, 4),
+        share=round(n / total, 4),
         mean_lab=tuple(round(float(v), 2) for v in mean),
         target_lab=None if target is None else tuple(float(v) for v in target),
         hue_spread=round(float(spread or 0.0), 2),
         sat_cv=round(sat_cv, 3),
-        lightness_std=round(float(L[sel].std()), 2),
+        lightness_std=round(l_std, 2),
         delta_e_to_target=None if de is None else round(de, 2),
         score=round(score, 1),
         channels=chans,
@@ -450,22 +489,24 @@ BAND_MIN_SHARE = 0.01  # 这样的阴影 / 高光不到全图 1%：画面里几�
 DESAT_SAT_FLOOR = 10.0  # 通道平均饱和度（HSB）已低于此值：不再建议降饱和
 
 
-def _tint(lab: np.ndarray, sel: np.ndarray, min_share: float = 0.0, band=None) -> tuple[float, float, np.ndarray] | None:
-    if sel.sum() < 10 or (band is not None and sel.sum() < min_share * max(1, band.sum())):
+def _tint(lab: np.ndarray, sel: np.ndarray, min_share: float = 0.0, band=None, weights=None) -> tuple[float, float, np.ndarray] | None:
+    w = np.ones(sel.shape) if weights is None else weights
+    n = w[sel].sum()
+    if n < 10 or (band is not None and n < min_share * max(1, w[band].sum())):
         return None
-    m = lab[sel].mean(axis=0)
+    m = (lab[sel] * w[sel][:, None]).sum(axis=0) / n
     return float(np.degrees(np.arctan2(m[2], m[1])) % 360), float(np.hypot(m[1], m[2])), m
 
 
-def _band_tint(lab, C, band, L=None):
+def _band_tint(lab, C, band, L=None, weights=None):
     """L 给出时“接近中性”的色度上限随明度收紧（很暗的深蓝、深绿不算中性的黑，见 cs.neutral_chroma_limit）。"""
     lim = (TINT_NEUTRAL_C, TINT_MAX_C) if L is None else (cs.neutral_chroma_limit(L, TINT_NEUTRAL_C),
                                                           cs.neutral_chroma_limit(L, TINT_MAX_C))
-    return (_tint(lab, band & (C < lim[0]), min_share=0.05, band=band)
-            or _tint(lab, band & (C < lim[1]), min_share=0.05, band=band))
+    return (_tint(lab, band & (C < lim[0]), min_share=0.05, band=band, weights=weights)
+            or _tint(lab, band & (C < lim[1]), min_share=0.05, band=band, weights=weights))
 
 
-def tone_bands(L: np.ndarray, rgb: np.ndarray | None = None) -> dict[str, np.ndarray | None]:
+def tone_bands(L: np.ndarray, rgb: np.ndarray | None = None, weights=None) -> dict[str, np.ndarray | None]:
     """{"shadow": 阴影像素, "highlight": 高光像素}（布尔，与 L 同长）。
 
     阴影 = 最暗 15% 且 L* ≤ SHADOW_MAX_L，高光 = 最亮 15% 且 L* ≥ HIGHLIGHT_MIN_L：暗调画面最亮的 15% 是中灰、
@@ -473,14 +514,15 @@ def tone_bands(L: np.ndarray, rgb: np.ndarray | None = None) -> dict[str, np.nda
     它们“中性”只是因为被裁切，会把色调估计拉向中性。某一段不到全图 BAND_MIN_SHARE 时为 None（画面里几乎没有）。
     """
     L = np.asarray(L, dtype=float).ravel()
+    w = np.ones(L.shape) if weights is None else np.asarray(weights, dtype=float).ravel()
     ok = np.ones(L.shape, bool) if rgb is None else ~cs.clipped(np.asarray(rgb).reshape(-1, 3))
     out: dict[str, np.ndarray | None] = {"shadow": None, "highlight": None}
-    if ok.sum() < 10:
+    if w[ok].sum() < 10:
         return out
-    p15, p85 = np.percentile(L[ok], [15, 85])  # 分位数只在没被裁切的像素里算（大片死白不把“最亮 15%”全占掉）
+    p15, p85 = cs.weighted_percentile(L[ok], w[ok], [15, 85])  # 分位数只在没被裁切的像素里算（大片死白不把“最亮 15%”全占掉）
     for key, sel in (("shadow", (L <= p15) & (L <= SHADOW_MAX_L)), ("highlight", (L >= p85) & (L >= HIGHLIGHT_MIN_L))):
         sel &= ok
-        out[key] = sel if sel.sum() >= max(10, BAND_MIN_SHARE * L.size) else None
+        out[key] = sel if w[sel].sum() >= max(10, BAND_MIN_SHARE * w.sum()) else None
     return out
 
 
@@ -504,11 +546,10 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
 
     key：按哪种基调处理（"low" / "high" / ""）；None 时按画面本身判断。target：key 来自用户选的目标影调时，目标影调名。
     """
-    sub, _, lab, lch = _prep(image, max_samples)
-    L, C, h = lch[..., 0].ravel(), lch[..., 1].ravel(), lch[..., 2].ravel()
-    lab2 = lab.reshape(-1, 3)
+    cols, pw, lab2, lch = _colours(image, max_samples)  # 每种颜色一行，pw = 这种颜色的像素数
+    L, C, h = lch[:, 0], lch[:, 1], lch[:, 2]
     chrom = C >= CHROMA_MIN
-    w = np.where(chrom, C, 0.0)
+    w = np.where(chrom, C, 0.0) * pw
     tot = w.sum() or 1.0
     sectors = []
     on = np.zeros_like(chrom)
@@ -517,7 +558,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
         inside = chrom & _in_range(h, lo - 5, hi + 5)
         on |= inside
         share = float(w[inside].sum() / tot)
-        mh, _, _ = weighted_circular_hue(h[inside], C[inside]) if inside.any() else (None, 0, None)
+        mh, _, _ = weighted_circular_hue(h[inside], w[inside]) if inside.any() else (None, 0, None)
         sectors.append(
             SectorMatch(sec["name"], (lo, hi), round(share, 4), None if mh is None else round(mh, 1),
                         None if mh is None else round(float(cs.hue_diff(_center(lo, hi), mh)), 1))
@@ -533,17 +574,17 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
             if share >= 0.02:
                 off.append((str(name), round(share, 4)))
         off.sort(key=lambda t: -t[1])
-    cf = colorfulness(sub, lch)
+    cf = colorfulness(cols, lch, weights=pw)
     cr = tuple(style.get("colorfulness", [0, 200]))
     cf_ok = cr[0] <= cf.value <= cr[1]
-    p5, p15, p50, p85, p95 = np.percentile(L, [5, 15, 50, 85, 95])
+    p5, p15, p50, p85, p95 = cs.weighted_percentile(L, pw, [5, 15, 50, 85, 95])
     contrast = float(p95 - p5)
-    tk = tone_key(L) if key is None else key
+    tk = tone_key(L, pw) if key is None else key
     # 调色加在阴影/高光上的色调，主要体现在“接近中性”的像素上（灰墙、白衣、暗部），
     # 本身就很鲜艳的物体（绿叶、蓝天）不能代表色调。
-    bands = tone_bands(L, sub)
-    sh = _band_tint(lab2, C, bands["shadow"], L) if bands["shadow"] is not None else None
-    hl = _band_tint(lab2, C, bands["highlight"], L) if bands["highlight"] is not None else None
+    bands = tone_bands(L, cols, pw)
+    sh = _band_tint(lab2, C, bands["shadow"], L, pw) if bands["shadow"] is not None else None
+    hl = _band_tint(lab2, C, bands["highlight"], L, pw) if bands["highlight"] is not None else None
     sh_ok = _tint_ok(sh, style.get("shadow_tint"))
     hl_ok = _tint_ok(hl, style.get("highlight_tint"))
 
@@ -579,7 +620,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
             parts.append((wgt, 1.0 if ok else 0.3))
     score = 100 * sum(wt * v for wt, v in parts) / sum(wt for wt, _ in parts)
 
-    adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok, cf.value)
+    adjs = _style_adjustments(cols, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok, cf.value, weights=pw)
     pair = [TONE_STYLE_NAMES[k] for k in style.get("tone_pair", ()) if k in TONE_STYLE_NAMES]
     return StyleMatch(
         key=style["key"],
@@ -605,13 +646,13 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
     )
 
 
-def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None, cf_value=None) -> list[Adjustment]:
+def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None, cf_value=None, weights=None) -> list[Adjustment]:
     out: list[Adjustment] = []
     rows = []  # PS 色相/饱和度：(通道, HSB 中心, 色相度数, 饱和度, 明亮度)
     grading = {}  # 色彩平衡：色调 -> [青-红, 洋红-绿, 黄-蓝]
     sectors = {s["name"]: tuple(s["hue"]) for s in style.get("sectors", [])}
     cr = style.get("colorfulness", [0, 200])
-    for c in ac.channel_stats(sub, primary=True):
+    for c in ac.channel_stats(sub, primary=True, weights=weights):
         if c.share < 0.03 or c.mean_hue is None:
             continue
         act = style.get("channel_targets", {}).get(c.name, "keep")
@@ -728,18 +769,18 @@ def analyze_palette(image: np.ndarray, style_key: str | None = None, family: str
     """tone_style / tone_target：影调风格（tone_class.TONE_STYLES 的键）/ 直接选的目标影调（九种之一），都可以为空。"""
     from colordoctor.core import tone_class as tcl
 
-    sub, _, lab, lch = _prep(image)
-    cf = colorfulness(sub, lch)
-    palette, ratio = ratio_631(lab)
-    tone = tuple(round(float(v), 1) for v in np.percentile(lch[..., 0], [5, 25, 50, 75, 95]))
+    cols, pw, lab, lch = _colours(image)  # 原图尺寸的每个像素（按不同的颜色 × 像素数）
+    cf = colorfulness(cols, lch, weights=pw)
+    palette, ratio = ratio_631(lab, weights=pw)
+    tone = tuple(round(float(v), 1) for v in cs.weighted_percentile(lch[:, 0], pw, [5, 25, 50, 75, 95]))
     unity = family_unity(image, family, family_target_lab, offset) if family else None
-    detected = tone_key(lch[..., 0])
+    detected = tone_key(lch[:, 0], pw)
     main, also, label = tcl.resolve_target(tone_style, tone_target)
-    cls = tcl.classify(sub)
+    cls = tcl.classify_colours(cols, pw)
     target = tcl.pick_goal(cls.name, main, also)  # 影调风格有几种可接受的影调：往最近的那种走
     key = tcl.key_code(target) if target else detected  # 选了目标影调：颜色按目标的基调处理
     style = style_match(image, get_style(style_key), key=key, target=target) if style_key else None
-    return PaletteReport(cf, palette, ratio, tuple(ac.channel_stats(sub)), tone, unity, style,
+    return PaletteReport(cf, palette, ratio, tuple(ac.channel_stats(cols, weights=pw)), tone, unity, style,
                          tone_key=key, detected_key=detected, tone_class=cls,
                          tone_target=target, tone_label=label, tone_also=also,
                          tone_choice=f"t:{tone_target}" if tone_target else (f"s:{tone_style}" if tone_style else ""))

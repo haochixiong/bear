@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from colordoctor.core import color_spaces as cs
+
 KEYS = ("高", "中", "低")
 LENGTHS = ("长", "中", "短")
 TONE_NAMES = tuple(f"{k}{n}调" for k in KEYS for n in LENGTHS)  # 高长调 … 低短调
@@ -64,19 +66,33 @@ class ToneClass:
         return TONE_DESC[self.name]
 
 
+def _colours(rgb: np.ndarray, valid: np.ndarray | None = None):
+    """原图尺寸的像素 -> (不同的颜色, 每种的像素数)：直方图、分位数按像素数加权，和逐个像素算一样。"""
+    px = np.asarray(rgb)[..., :3]
+    px = px[valid] if valid is not None else px.reshape(-1, 3)
+    if px.dtype != np.uint8:
+        px = np.clip(np.rint(px), 0, 255).astype(np.uint8)
+    cols, w = cs.unique_colours(px)
+    return cols, w.astype(np.float64)
+
+
 def classify(rgb: np.ndarray, valid: np.ndarray | None = None) -> ToneClass:
-    """画面（或 valid 范围内）的影调。"""
-    y = luminance(rgb)
-    if valid is not None:
-        y = y[valid]
-    y = y.ravel()
-    if y.size == 0:
+    """画面（或 valid 范围内）的影调：原图尺寸的每个像素都算。"""
+    return classify_colours(*_colours(rgb, valid))
+
+
+def classify_colours(colours: np.ndarray, weights) -> ToneClass:
+    """colours：不同的颜色；weights：每种颜色的像素数。"""
+    y = luminance(colours).ravel()
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if y.size == 0 or w.sum() <= 0:
         raise ValueError("没有像素")
+    tot = w.sum()
     zones = np.minimum((y // (256 / ZONES)).astype(int), ZONES - 1)
-    counts = np.bincount(zones, minlength=ZONES) / y.size
+    counts = np.bincount(zones, weights=w, minlength=ZONES) / tot
     shares = (float(counts[:4].sum()), float(counts[4:7].sum()), float(counts[7:].sum()))  # 暗 / 中 / 亮
     key = ("低", "中", "高")[int(np.argmax(shares))]
-    lo, hi = (float(v) for v in np.percentile(y, [EDGE * 100, 100 - EDGE * 100]))
+    lo, hi = (float(v) for v in cs.weighted_percentile(y, w, [EDGE * 100, 100 - EDGE * 100]))
     span = hi - lo
     length = "长" if span >= LONG_SPAN else ("中" if span >= SHORT_SPAN else "短")
     # 边界提示：主导的一段只比第二多一点，或跨度离分界很近
@@ -90,7 +106,7 @@ def classify(rgb: np.ndarray, valid: np.ndarray | None = None) -> ToneClass:
     elif abs(span - SHORT_SPAN) < NEAR:
         nears.append(key + ("短" if length == "中" else "中") + "调")
     near = "、".join(nears)
-    hist = np.histogram(y, bins=32, range=(0, 256))[0] / y.size
+    hist = np.histogram(y, bins=32, range=(0, 256), weights=w)[0] / tot
     name = f"{key}{length}调"
     return ToneClass(name, key, length, tuple(round(s, 4) for s in shares), round(lo, 1), round(hi, 1), round(span, 1),
                      tuple(round(float(v), 4) for v in hist), near if near != name else "")
@@ -126,9 +142,8 @@ def target_quantiles(name: str) -> tuple[float, float, float, float, float]:
 
 
 def quantiles(rgb: np.ndarray, valid: np.ndarray | None = None) -> tuple[float, float, float, float, float]:
-    y = luminance(rgb)
-    y = (y[valid] if valid is not None else y).ravel()
-    return tuple(round(float(v), 1) for v in np.percentile(y, [2, 25, 50, 75, 98]))
+    cols, w = _colours(rgb, valid)
+    return tuple(round(float(v), 1) for v in cs.weighted_percentile(luminance(cols), w, [2, 25, 50, 75, 98]))
 
 
 MAX_MOVE = 45.0  # 一次曲线每个点最多移动多少级（0–255），其余提示重新分析或回 RAW 调曝光
@@ -259,15 +274,14 @@ def apply_curve_luminosity(rgb: np.ndarray, pts) -> np.ndarray:
 
 def fit_curve(rgb: np.ndarray, valid, current: tuple, target: tuple, rounds: int = 3) -> tuple[list[list[int]], bool]:
     """按目标分位点求曲线，并按“作用在 RGB 上、明度混合”的实际效果修正几次，让调完的分位点更接近目标。"""
-    px = np.asarray(rgb, dtype=float)[..., :3]
-    px = (px[valid] if valid is not None else px).reshape(-1, 3)
+    px, pw = _colours(rgb, valid)  # 每种颜色算一次，按像素数加权（原图尺寸的每个像素）
     goal = np.array(target, dtype=float)
     best = match_curve(current, target)
     best_err = None
     for _ in range(rounds):
         pts, capped = match_curve(current, tuple(goal))
         pts = spline_safe(pts)
-        got = np.percentile(apply_curve_luminosity(px, pts), [2, 25, 50, 75, 98])
+        got = cs.weighted_percentile(apply_curve_luminosity(px, pts), pw, [2, 25, 50, 75, 98])
         err = np.array(target, dtype=float) - got
         score = float(np.abs(err).mean())
         if best_err is None or score < best_err:

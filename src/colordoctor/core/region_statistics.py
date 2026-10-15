@@ -7,9 +7,9 @@ import numpy as np
 from colordoctor.core import clustering
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.color_models import Cluster, RegionStats
-from colordoctor.core.sampling import SampleError, grid_downsample
+from colordoctor.core.sampling import FULL_RES_MAX, SampleError, grid_downsample
 
-MAX_SAMPLES = 262_144
+MAX_SAMPLES = FULL_RES_MAX  # 原图尺寸：每个像素都统计
 CHROMA_MIN = 5.0  # 低于此色度的像素色相不稳定，不参与色相统计
 HIGHLIGHT_L = 90.0
 SHADOW_L = 15.0
@@ -54,19 +54,35 @@ def compute_stats(
         rgb = sub.reshape(-1, 3)
         total = int(region.shape[0] * region.shape[1])
     n = rgb.shape[0]
-    lab = cs.srgb8_to_lab(rgb)
+    # 原图尺寸的每个像素都统计：按“不同的颜色 × 像素数”加权，和逐个像素算完全一样（快很多）
+    rgb, wt = cs.unique_colours(rgb)
+    w = wt.astype(np.float64)
+    tot = float(w.sum())
+    lab = cs.srgb8_to_lab(rgb).astype(np.float64)
     lch = cs.lab_to_lch(lab)
-    ok = cs.srgb8_to_oklab(rgb)
-    hsb = cs.srgb8_to_hsb(rgb)
+    ok = cs.srgb8_to_oklab(rgb).astype(np.float64)
+    hsb = cs.srgb8_to_hsb(rgb).astype(np.float64)
     L, C, h = lch[:, 0], lch[:, 1], lch[:, 2]
 
+    def mean(v):
+        return (v * (w[:, None] if v.ndim == 2 else w)).sum(axis=0) / tot
+
+    def frac(m):
+        return float(w[m].sum() / tot)
+
+    def pct(v, q):
+        return float(cs.weighted_percentile(v, w, q))
+
+    def std(v):
+        return float(np.sqrt(max(0.0, float(mean(v * v) - mean(v) ** 2))))
+
     chromatic = C >= CHROMA_MIN
-    hue_mean, R, spread = weighted_circular_hue(h[chromatic], C[chromatic])
+    hue_mean, R, spread = weighted_circular_hue(h[chromatic], C[chromatic] * w[chromatic])
 
     clusters: tuple[Cluster, ...] = ()
     if with_clusters:
         cl = []
-        for center, share in clustering.dominant_clusters(lab):
+        for center, share in clustering.dominant_clusters(lab, weights=w):
             c_lch = cs.lab_to_lch(center)
             cl.append(
                 Cluster(
@@ -80,34 +96,35 @@ def compute_stats(
             )
         clusters = tuple(cl)
 
-    lab_mean = lab.mean(axis=0)
-    ok_mean = ok.mean(axis=0)
+    lab_mean = mean(lab)
+    ok_mean = mean(ok)
     clipped = cs.clipped(rgb)  # 任一通道 ≥ 254 或三个通道都 ≤ 1；饱和的纯色（例如 R = 0 的蓝）不是裁切
+    rgbf = rgb.astype(np.float64)
     return RegionStats(
         total_pixels=total,
         sampled_pixels=n,
-        rgb_mean=_t(rgb.mean(axis=0), 2),
-        rgb_median=_t(np.median(rgb, axis=0), 2),
+        rgb_mean=_t(mean(rgbf), 2),
+        rgb_median=_t([pct(rgbf[:, k], 50) for k in range(3)], 2),
         lab_mean=_t(lab_mean),
-        lab_median=_t(np.median(lab, axis=0)),
+        lab_median=_t([pct(lab[:, k], 50) for k in range(3)]),
         oklab_mean=_t(ok_mean, 5),
         oklch_mean=_t(cs.oklab_to_oklch(ok_mean), 5),
         lch_mean=_t(cs.lab_to_lch(lab_mean)),
-        L_std=round(float(L.std()), 4),
-        C_std=round(float(C.std()), 4),
-        L_p10=round(float(np.percentile(L, 10)), 3),
-        L_p50=round(float(np.percentile(L, 50)), 3),
-        L_p90=round(float(np.percentile(L, 90)), 3),
-        C_p10=round(float(np.percentile(C, 10)), 3),
-        C_p50=round(float(np.percentile(C, 50)), 3),
-        C_p90=round(float(np.percentile(C, 90)), 3),
-        sat_p50=round(float(np.median(hsb[:, 1])), 3),
-        hue_mean=None if hue_mean is None or chromatic.mean() < 0.05 else round(hue_mean, 3),
+        L_std=round(std(L), 4),
+        C_std=round(std(C), 4),
+        L_p10=round(pct(L, 10), 3),
+        L_p50=round(pct(L, 50), 3),
+        L_p90=round(pct(L, 90), 3),
+        C_p10=round(pct(C, 10), 3),
+        C_p50=round(pct(C, 50), 3),
+        C_p90=round(pct(C, 90), 3),
+        sat_p50=round(pct(hsb[:, 1], 50), 3),
+        hue_mean=None if hue_mean is None or frac(chromatic) < 0.05 else round(hue_mean, 3),
         hue_concentration=round(R, 6),
         hue_spread=None if spread is None else round(spread, 4),
-        chromatic_fraction=round(float(chromatic.mean()), 6),
-        highlight_fraction=round(float((L >= HIGHLIGHT_L).mean()), 6),
-        shadow_fraction=round(float((L <= SHADOW_L).mean()), 6),
-        clipped_fraction=round(float(clipped.mean()), 6),
+        chromatic_fraction=round(frac(chromatic), 6),
+        highlight_fraction=round(frac(L >= HIGHLIGHT_L), 6),
+        shadow_fraction=round(frac(L <= SHADOW_L), 6),
+        clipped_fraction=round(frac(clipped), 6),
         clusters=clusters,
     )

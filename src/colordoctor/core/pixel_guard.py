@@ -84,7 +84,7 @@ def prepare(pixels: np.ndarray) -> Prepared:
             rgb[~valid] = 128  # 中性灰；各分析通过 valid 蒙版排除这些像素
             notes.append(f"图层有 {1 - frac:.0%} 是透明的，只分析不透明部分")
     flat = rgb.reshape(-1, 3)
-    sample = flat[:: max(1, flat.shape[0] // 200_000)]
-    if float(sample.astype(np.float32).std(axis=0).max()) < 0.5:
+    # 看每一个像素（以前只抽查 20 万个：一整块纯色里零星几个杂色点会被漏掉、整张图被拒绝分析）
+    if int((flat.max(axis=0).astype(np.int16) - flat.min(axis=0)).max()) <= 1:
         raise BlockedError("当前图层是一整块纯色，没有可分析的颜色变化。")
     return Prepared(np.ascontiguousarray(rgb), offset, frac, tuple(notes), valid)

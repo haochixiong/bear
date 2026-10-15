@@ -120,7 +120,9 @@ class ImageSelectWidget(QWidget):
         W, H = self.image.width(), self.image.height()
         path, self._path = self._path, []
         if abs(b.x() - a.x()) < DRAG_THRESHOLD and abs(b.y() - a.y()) < DRAG_THRESHOLD and len(path) < 4:
-            xi, yi = int(x1), int(y1)
+            # 第 i 个像素占 [i, i+1)：向下取整（int() 会把 -0.3 截成 0，图外一点点也算成第 0 个像素）；
+            # 用按下时的位置（单击时手可能抖动一两个屏幕像素，放大看图时就是几个图像像素）
+            xi, yi = int(np.floor(x0)), int(np.floor(y0))
             if 0 <= xi < W and 0 <= yi < H:
                 if self.allow_point:
                     self.point_selected.emit(xi, yi)

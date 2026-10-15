@@ -2,7 +2,8 @@
 // 所有修改都在 executeAsModal 里完成，并合并成一步历史记录（Ctrl+Z 一次撤销）。
 const { app, action, core, imaging, constants } = require("photoshop");
 
-const MAX_SIDE = 2048; // 分析用的长边像素（蒙版会按文档尺寸放大回去）
+// 按原图尺寸读像素（每个像素都检查，不先缩小）；只有超过这么多像素的超大文档才缩小读取（本机服务一次最多收 400 MB）
+const MAX_READ_PIXELS = 100_000_000;
 
 // 没有像素、不能直接分析的图层类型（与 Python 端 pixel_guard.NO_PIXEL_KINDS 对应）
 const NEED_MERGED_KINDS = { group: "图层组", text: "文字图层", smartObject: "智能对象", video: "视频图层", threeD: "3D 图层" };
@@ -92,14 +93,14 @@ function clipToCanvas(b, doc) {
   return { left: Math.max(0, b.left), top: Math.max(0, b.top), right: Math.min(doc.width, b.right), bottom: Math.min(doc.height, b.bottom) };
 }
 
-// 读取像素（sRGB、8 位、交错），长边缩到 MAX_SIDE。必须在 executeAsModal 里调用。
+// 读取像素（sRGB、8 位、交错），按原图尺寸（超大文档才缩小到 MAX_READ_PIXELS）。必须在 executeAsModal 里调用。
 async function readPixels(info, sourceBounds) {
   // 图层可能超出画布（移出去一部分）：只读画布内的部分，返回的坐标才能和蒙版对齐
   const b = clipToCanvas(sourceBounds || info.bounds, info.doc);
   const w = b.right - b.left;
   const h = b.bottom - b.top;
   if (w < 1 || h < 1) throw new Error("要分析的范围在画布之外。");
-  const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
+  const scale = Math.min(1, Math.sqrt(MAX_READ_PIXELS / (w * h)));
   const opts = {
     documentID: info.doc.id,
     sourceBounds: b,
@@ -121,7 +122,9 @@ async function readPixels(info, sourceBounds) {
     left: Math.max(0, Math.round(sb.left * f)), top: Math.max(0, Math.round(sb.top * f)),
     right: Math.min(info.doc.width, Math.round(sb.right * f)), bottom: Math.min(info.doc.height, Math.round(sb.bottom * f)),
   };
-  const out = { data: new Uint8Array(data), width: img.width, height: img.height, components: img.components, sourceBounds: docB };
+  // 原图尺寸的数据可能有几百 MB：已经是 Uint8Array 时直接用，不再复制一份
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const out = { data: bytes, width: img.width, height: img.height, components: img.components, sourceBounds: docB, scaled: scale < 1 };
   img.dispose();
   return out;
 }

@@ -60,26 +60,27 @@ class MatchReport:
 
 
 def _neutral(lab: np.ndarray, sel: np.ndarray | None = None) -> np.ndarray:
-    """接近中性的像素：色度上限随明度收紧（很暗的深蓝、深绿不算中性的黑）；sel 一般已去掉被裁切的纯白 / 死黑。"""
+    """接近中性的颜色：色度上限随明度收紧（很暗的深蓝、深绿不算中性的黑）；sel 一般已去掉被裁切的纯白 / 死黑。"""
     m = np.hypot(lab[:, 1], lab[:, 2]) < cs.neutral_chroma_limit(lab[:, 0], NEUTRAL_C)
     return m & sel if sel is not None else m
 
 
-def _neutral_cast(lab: np.ndarray, sel: np.ndarray | None = None) -> tuple[float, float] | None:
-    """接近中性的像素的平均色调。太少（< 20 个）时返回 None：画面里没有可参考的中性色，
+def _neutral_lab(lab: np.ndarray, sel: np.ndarray | None = None, weights=None):
+    """接近中性的像素的平均 Lab（含明度）；太少（< 20 个像素）时为 None。
+    lab 是“不同的颜色”时 weights 是每种颜色的像素数，结果和逐个像素算一样。"""
+    m = _neutral(lab, sel)
+    w = np.ones(len(lab)) if weights is None else np.asarray(weights, dtype=float)
+    n = w[m].sum()
+    if n < 20:
+        return None
+    return (lab[m] * w[m][:, None]).sum(axis=0) / n
+
+
+def _neutral_cast(lab: np.ndarray, sel: np.ndarray | None = None, weights=None) -> tuple[float, float] | None:
+    """接近中性的像素的平均色调。太少时返回 None：画面里没有可参考的中性色，
     不能当成“没有偏色”，否则会按错误的起点给出色温 / 颜色分级建议。"""
-    m = _neutral(lab, sel)
-    if m.sum() < 20:
-        return None
-    return (float(lab[m, 1].mean()), float(lab[m, 2].mean()))
-
-
-def _neutral_lab(lab: np.ndarray, sel: np.ndarray | None = None):
-    """接近中性的像素的平均 Lab（含明度）；太少时为 None。"""
-    m = _neutral(lab, sel)
-    if m.sum() < 20:
-        return None
-    return lab[m].mean(axis=0)
+    m = _neutral_lab(lab, sel, weights)
+    return None if m is None else (float(m[1]), float(m[2]))
 
 
 def _huesat_rows(ch_m: dict, ch_r: dict) -> list[tuple]:
@@ -108,11 +109,11 @@ def _gray(L: float) -> int:
 
 
 def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=None) -> MatchReport:
-    s_m, _, lab_m, lch_m = pl._prep(mine)
-    s_r, _, lab_r, lch_r = pl._prep(ref)
-    lm, lr = lab_m.reshape(-1, 3), lab_r.reshape(-1, 3)
-    tm = tuple(float(v) for v in np.percentile(lm[:, 0], PCTS))
-    tr = tuple(float(v) for v in np.percentile(lr[:, 0], PCTS))
+    # 原图尺寸、每个像素都算：只看颜色分布，按“不同的颜色 × 像素数”加权，和逐个像素算完全一样
+    s_m, w_m, lm, lch_m = pl._colours(mine)
+    s_r, w_r, lr, lch_r = pl._colours(ref)
+    tm = tuple(float(v) for v in cs.weighted_percentile(lm[:, 0], w_m, np.array(PCTS)))
+    tr = tuple(float(v) for v in cs.weighted_percentile(lr[:, 0], w_r, np.array(PCTS)))
     pts: list[tuple[int, int]] = []
     for a, b in zip(tm, tr, strict=True):
         x, y = _gray(a), _gray(b)
@@ -124,7 +125,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         pts.append((x, y))
     if any(x != y for x, y in pts):
         # PS 的曲线是平滑样条：在会冲过头 / 往回走的段中间加辅助点，实际曲线才和这些点一致
-        safe = tcl.spline_safe([[0, 0], *pts, [255, 255]])
+        safe = tcl.spline_safe(nl.curve_points(pts))  # 端点 0 / 255 只留一个（点落在 0 或 255 上时不重复）
         curve = tuple((x, y) for x, y in safe if (x, y) not in ((0, 0), (255, 255)))
     else:
         curve = ()  # 全部一致：不给曲线
@@ -132,21 +133,21 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     # 否则混色器的明亮度会把曲线已经提亮 / 压暗的部分再调一次，色彩平衡也会按曲线之前的明度去求
     if curve:
         lut = np.rint(tcl.spline_lut(nl.curve_points(curve))).astype(np.uint8)  # 按 PS 的平滑曲线算
-        s_c = lut[s_m]
-        lc = cs.srgb8_to_lab(s_c).reshape(-1, 3)
+        s_c = lut[s_m]  # 每种颜色过曲线以后的颜色（像素数不变）
+        lc = np.asarray(cs.srgb8_to_lab(s_c), dtype=np.float64)
     else:
         s_c, lc = s_m, lm
     # 被裁切的纯白 / 死黑“中性”只是因为被裁切：不参与白平衡和阴影 / 高光色调的估计
-    ok_m, ok_r = ~cs.clipped(s_c.reshape(-1, 3)), ~cs.clipped(s_r.reshape(-1, 3))
-    cast_m, cast_r = _neutral_cast(lc, ok_m), _neutral_cast(lr, ok_r)
-    cfo_m, cfo_r = pl.colorfulness(s_m, lch_m), pl.colorfulness(s_r, lch_r)
+    ok_m, ok_r = ~cs.clipped(s_c), ~cs.clipped(s_r)
+    cast_m, cast_r = _neutral_cast(lc, ok_m, w_m), _neutral_cast(lr, ok_r, w_r)
+    cfo_m, cfo_r = pl.colorfulness(s_m, lch_m, w_m), pl.colorfulness(s_r, lch_r, w_r)
     cf_m, cf_r = cfo_m.value, cfo_r.value
     # 参考是黑白作品、我的明显是彩色：不按通道逐个降饱和，直接建议转黑白（色调/颜色分级仍照常比较，适用于棕调等单色调）
     ref_bw = pl.is_monochrome(cfo_r) and not pl.is_monochrome(cfo_m) and cf_m >= pl.COLORFULNESS_LEVELS[0][0]
 
     # 通道
-    ch_m = {c.name: c for c in ac.channel_stats(s_c)}
-    ch_r = {c.name: c for c in ac.channel_stats(s_r)}
+    ch_m = {c.name: c for c in ac.channel_stats(s_c, weights=w_m)}
+    ch_r = {c.name: c for c in ac.channel_stats(s_r, weights=w_r)}
     diffs = []
     for name in () if ref_bw else ac.NAMES:
         a, b = ch_m[name], ch_r[name]
@@ -163,8 +164,8 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         diffs.append(ChannelDiff(name, b.share, a.share, hs, ss, ls))
 
     # 主色对应
-    pal_r, _ = pl.ratio_631(lab_r)
-    pal_m, _ = pl.ratio_631(lab_m)
+    pal_r, _ = pl.ratio_631(lr, weights=w_r)
+    pal_m, _ = pl.ratio_631(lm, weights=w_m)
     matches = []
     pal_de = 0.0
     for p in pal_r[:5]:
@@ -228,7 +229,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
                                      "global", "转黑白 · 色相/饱和度", strength=None))
     da, db = (cast_r[0] - cast_m[0], cast_r[1] - cast_m[1]) if both_cast else (0.0, 0.0)
     # PS 色彩平衡：中间调在“我的”中性色的实际平均色上求（白平衡）
-    n_m = _neutral_lab(lc, ok_m)
+    n_m = _neutral_lab(lc, ok_m, w_m)
     balance = {"midtones": nl.balance_for_shift(da, db, "midtones", lab=n_m)
                if max(abs(da), abs(db)) >= 1.5 and n_m is not None else [0, 0, 0]}
     if abs(db) >= 1.5:
@@ -236,18 +237,18 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     if abs(da) >= 1.5:
         adjs.append(Adjustment("Camera Raw", f"色调往{'洋红' if da > 0 else '绿'}（中性区域 a* 需要 {da:+.1f}）", "小幅"))
     # 阴影 / 高光：与“整图色彩”相同的分段（暗调画面最亮处是中灰、高调画面最暗处是浅灰，都不算），已去掉被裁切的像素
-    bands_m, bands_r = pl.tone_bands(lc[:, 0], s_c), pl.tone_bands(lr[:, 0], s_r)
+    bands_m, bands_r = pl.tone_bands(lc[:, 0], s_c, w_m), pl.tone_bands(lr[:, 0], s_r, w_r)
     for label, key in (("阴影", "shadow"), ("高光", "highlight")):
         if bands_m[key] is None or bands_r[key] is None:
             continue  # 有一张图几乎没有这一段
-        tm_ = _neutral_cast(lc, bands_m[key])
-        tr_ = _neutral_cast(lr, bands_r[key])
+        tm_ = _neutral_cast(lc, bands_m[key], w_m)
+        tr_ = _neutral_cast(lr, bands_r[key], w_r)
         if tm_ is None or tr_ is None:
             continue  # 这一段没有可比较的中性色
         if np.hypot(tr_[0] - tm_[0], tr_[1] - tm_[1]) >= 2:
             gh, gs = ac.tint_to_grading(60.0, tr_[0] - tm_[0], tr_[1] - tm_[1])  # 要加的是差值
             # PS 色彩平衡：阴影/高光只补中间调那一层在这一段上没修到的部分（按模型算中间调那一层对这一段实际改了多少）
-            band = _neutral_lab(lc, bands_m[key])
+            band = _neutral_lab(lc, bands_m[key], w_m)
             done = nl.balance_effect(band, "midtones", balance["midtones"]) if any(balance["midtones"]) else np.zeros(2)
             ra, rb = tr_[0] - tm_[0] - float(done[0]), tr_[1] - tm_[1] - float(done[1])
             tone = "shadows" if label == "阴影" else "highlights"
@@ -279,9 +280,9 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     # PS 色相/饱和度：按“色彩平衡那一层之后”的颜色和参考比（否则整体偏色会被色彩平衡和混色器各修一次）
     ch_after = ch_m
     if has_balance:
-        x = s_c.reshape(-1, 3).astype(float) / 255.0
+        x = s_c.astype(float) / 255.0
         after = np.clip(np.rint(pm_mod.color_balance(x, **{k: v for k, v in balance.items()}) * 255.0), 0, 255).astype(np.uint8)
-        ch_after = {c.name: c for c in ac.channel_stats(after.reshape(s_c.shape))}
+        ch_after = {c.name: c for c in ac.channel_stats(after, weights=w_m)}
     rows = [] if ref_bw else _huesat_rows(ch_after, ch_r)
     for params, words in nl.mixer_rows_to_huesat(rows):
         done = "、".join(n for n, on in (("影调曲线", bool(curve)), ("色彩平衡", has_balance)) if on)

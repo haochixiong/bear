@@ -378,9 +378,7 @@ def test_large_image_plan_is_fast_and_masks_align():
     import time
 
     img = noisy(flat(BLUE, 3000, 4000), 2)
-    # 杂色点按看得见的大小（10×10 像素）放：分析按区域平均降采样，单个像素的杂点在大图上属于噪点
-    dots = np.repeat(np.repeat(np.random.default_rng(4).random((300, 200)) < 0.05, 10, 0), 10, 1)
-    img[:, 2000:][dots] = YELLOW
+    img[:, 2000:] = sprinkle(img[:, 2000:], YELLOW, 0.05, seed=4)
     rep = an.scan_image(img, synthetic_context())
     t = time.perf_counter()
     plan = lp.plan_from_report(rep, img.shape)
@@ -432,10 +430,17 @@ def test_reference_from_file_formats_and_errors():
     res = bs.reference_from_file(_encode(g16, "PNG"), "g16.png", refs)
     ref = refs.get(res["ref"])
     assert ref[0, 0, 0] < 10 and ref[-1, -1, 0] > 245
-    # 大图按长边 2048 缩小保存
+    # 大图按原图尺寸保存（每个像素都算）；只有超过上限的超大图才缩小
     big = np.random.default_rng(0).integers(0, 256, (1200, 4800, 3)).astype(np.uint8)
     res = bs.reference_from_file(_encode(big, "PNG"), "big.png", refs)
-    assert res["width"] == 4800 and refs.get(res["ref"]).shape[1] == 2048
+    assert res["width"] == 4800 and refs.get(res["ref"]).shape[:2] == (1200, 4800)
+    old = bs.REF_MAX_PIXELS
+    bs.REF_MAX_PIXELS = 1_440_000
+    try:
+        res = bs.reference_from_file(_encode(np.ascontiguousarray(big[:, ::-1]), "PNG"), "big2.png", refs)
+        assert refs.get(res["ref"]).shape[:2] == (600, 2400)
+    finally:
+        bs.REF_MAX_PIXELS = old
     with pytest.raises(ValueError):
         bs.reference_from_file(b"not an image", "x.jpg", refs)
     with pytest.raises(ValueError):

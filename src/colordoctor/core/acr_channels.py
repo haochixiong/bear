@@ -60,17 +60,21 @@ def memberships(hue_deg: np.ndarray) -> np.ndarray:
     return w
 
 
-def channel_stats(rgb_pixels: np.ndarray, min_sat: float = 8.0, primary: bool = False) -> list[ChannelStat]:
+def channel_stats(rgb_pixels: np.ndarray, min_sat: float = 8.0, primary: bool = False, weights=None) -> list[ChannelStat]:
     """primary=True：平均色相/饱和度/亮度只统计“主要属于”该通道的像素（隶属度最大），
     否则相邻颜色（例如偏黄的绿）会把平均色相拉偏，算出方向相反的滑块。占比 share 不受影响。"""
-    px = np.asarray(rgb_pixels).reshape(-1, 3)
+    # 按“不同的颜色 × 像素数”加权：结果和逐个像素统计一样（原图尺寸的每个像素都算进去），快很多
+    if weights is None:
+        px, counts = cs.unique_colours(rgb_pixels)
+    else:  # 已经是“不同的颜色”，weights = 每种颜色的像素数
+        px, counts = np.asarray(rgb_pixels).reshape(-1, 3), np.asarray(weights, dtype=np.float64)
     hsb = cs.srgb8_to_hsb(px)
     sel = hsb[:, 1] >= min_sat
     if not sel.any():
         return [ChannelStat(n, c, 0.0, None, 0.0, 0.0, None) for n, c in CHANNELS]
-    hsb = hsb[sel]
-    lab = cs.srgb8_to_lab(px[sel])
-    m = memberships(hsb[:, 0]) * (hsb[:, 1:2] / 100.0)
+    hsb = hsb[sel].astype(np.float64)
+    lab = cs.srgb8_to_lab(px[sel]).astype(np.float64)
+    m = memberships(hsb[:, 0]) * (hsb[:, 1:2] / 100.0) * counts[sel][:, None]
     total = m.sum()
     top = m.argmax(axis=1)
     out = []

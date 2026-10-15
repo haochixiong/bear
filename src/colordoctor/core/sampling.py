@@ -94,6 +94,10 @@ def crop(pixels: np.ndarray, rect) -> np.ndarray:
     return pixels[y : y + h, x : x + w, :3]
 
 
+# 分析按原图尺寸做：每个像素都检查（不降采样），只有超过这个上限的超大图才按格平均缩小
+FULL_RES_MAX = 160_000_000
+
+
 def grid_step(n_pixels: int, max_samples: int) -> int:
     if n_pixels <= max_samples:
         return 1

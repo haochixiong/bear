@@ -270,10 +270,8 @@ def test_scan_spot_masks_are_disjoint():
     img = noisy(flat(lab_color(55, -30, 35), 600, 800), 2)
     for i in range(100):
         y, x = rng.integers(0, 580), rng.integers(0, 780)
-        if i % 2:  # 一小片 4×4 像素的杂色点（大图按区域平均降采样，1 个像素的点会被平均掉）
-            for dy in (0, 8):
-                for dx in (0, 8):
-                    img[y + dy:y + dy + 4, x + dx:x + dx + 4] = lab_color(60, 30, -30)
+        if i % 2:
+            img[y:y + 15:3, x:x + 15:3] = lab_color(60, 30, -30)
         else:
             img[y:y + 18, x:x + 18] = lab_color(55, -8, 10)
     rep = an.scan_image(img, CTX)
