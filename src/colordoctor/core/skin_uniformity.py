@@ -16,7 +16,7 @@ import numpy as np
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.contamination import _components, downsample_mask
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.pixel_table import PixelTable, wmedian
+from colordoctor.core.pixel_table import table, wmedian
 from colordoctor.core.sampling import FULL_RES_MAX, grid_downsample
 
 HUE_MILD = 6.0  # 色相偏离（度）：轻微
@@ -79,7 +79,7 @@ def analyze_uniformity(
     hh, ww = sub.shape[:2]
     valid = downsample_mask(mask, step, (hh, ww))
     # 原图尺寸的每个像素：颜色只算一次（PixelTable），每一小块按“颜色 × 这块里的像素数”统计
-    pt = PixelTable(sub)
+    pt = table(sub)
     Lu, Cu, hu = pt.L, pt.C, pt.h
     valid = valid & (Cu >= 3)[pt.index]
     wv = pt.count(valid)

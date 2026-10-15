@@ -24,6 +24,7 @@ from colordoctor.core import ps_models as pm_mod
 from colordoctor.core import tone_class as tcl
 from colordoctor.core.color_models import Adjustment
 from colordoctor.core.perception import de_words
+from colordoctor.core.pixel_table import together
 
 PCTS = (5, 25, 50, 75, 95)
 NEUTRAL_C = 12.0
@@ -110,8 +111,7 @@ def _gray(L: float) -> int:
 
 def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=None) -> MatchReport:
     # 原图尺寸、每个像素都算：只看颜色分布，按“不同的颜色 × 像素数”加权，和逐个像素算完全一样
-    s_m, w_m, lm, lch_m = pl._colours(mine)
-    s_r, w_r, lr, lch_r = pl._colours(ref)
+    (s_m, w_m, lm, lch_m), (s_r, w_r, lr, lch_r) = together(lambda: pl._colours(mine), lambda: pl._colours(ref))
     tm = tuple(float(v) for v in cs.weighted_percentile(lm[:, 0], w_m, np.array(PCTS)))
     tr = tuple(float(v) for v in cs.weighted_percentile(lr[:, 0], w_r, np.array(PCTS)))
     pts: list[tuple[int, int]] = []
@@ -164,8 +164,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         diffs.append(ChannelDiff(name, b.share, a.share, hs, ss, ls))
 
     # 主色对应
-    pal_r, _ = pl.ratio_631(lr, weights=w_r)
-    pal_m, _ = pl.ratio_631(lm, weights=w_m)
+    (pal_r, _), (pal_m, _) = together(lambda: pl.ratio_631(lr, weights=w_r), lambda: pl.ratio_631(lm, weights=w_m))
     matches = []
     pal_de = 0.0
     for p in pal_r[:5]:

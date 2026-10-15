@@ -104,8 +104,11 @@ def near_hint(de: float, skin: bool = True) -> Adjustment:
     return Adjustment("提示", f"当前{'肤色' if skin else '颜色'}与目标已经很接近（ΔE00 {de:.1f}，{de_words(de)}），无需调整", None, False)
 
 
+pm_SAMPLE = 3000  # 与 ps_models.solve 的 max_pixels 相同
+
+
 def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool = False, skin: bool = True,
-                     scope: str | None = None, at: str | None = None) -> list[Adjustment]:
+                     scope: str | None = None, at: str | None = None, weights=None) -> list[Adjustment]:
     """当前像素 -> 目标 Lab 的 Photoshop/Camera Raw 参数建议。
 
     skin=True：肤色（色相/饱和度、可选颜色只在红色 / 黄色范围里选）；
@@ -115,12 +118,14 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
     """
     scope = scope or ("skin" if skin else "global")
     who = "肤色" if skin else "颜色"
-    px = np.asarray(pixels_rgb8, dtype=float).reshape(-1, 3)
-    if px.shape[0] > 200_000:  # 平均色和曲线点不需要全部像素
-        px = px[:: int(np.ceil(px.shape[0] / 200_000))]
+    px = np.asarray(pixels_rgb8).reshape(-1, 3)
+    if weights is None:  # 每个像素：按“不同的颜色 × 像素数”算（结果一样）
+        px, weights = cs.unique_colours(px if px.dtype == np.uint8 else np.clip(np.rint(px), 0, 255).astype(np.uint8))
+    w = np.asarray(weights, dtype=np.float64)
+    px = px.astype(float)
     ranges = pm.SKIN_RANGES if skin else tuple(pm.PS_RANGES)
     where = "皮肤" if skin else "这块区域"
-    cur_lab = cs.srgb8_to_lab(px).mean(axis=0)
+    cur_lab = (np.asarray(cs.srgb8_to_lab(px), dtype=np.float64) * w[:, None]).sum(axis=0) / w.sum()  # 全部像素的平均
     tgt = np.array(target_lab, dtype=float)
     if keep_lightness:
         tgt[0] = cur_lab[0]
@@ -134,7 +139,7 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
     dL = float(tgt[0] - cur_lab[0])
     split_lightness = abs(dL) >= 1.5
     curve_tgt = np.array([cur_lab[0], tgt[1], tgt[2]]) if split_lightness else tgt
-    mean_rgb = np.rint(px.mean(axis=0)).astype(int)
+    mean_rgb = np.rint((px * w[:, None]).sum(axis=0) / w.sum()).astype(int)
     tgt_rgb = cs.lab_to_srgb8(curve_tgt).astype(int)
     pts = pm.curves_points(mean_rgb, tgt_rgb)
     gamut_note = "" if cs.lab_in_srgb_gamut(curve_tgt) else "（目标超出 sRGB，已裁切）"
@@ -169,6 +174,11 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
             )
         )
     color_tgt = np.array([cur_lab[0], tgt[1], tgt[2]])
+    # 色彩平衡等模型估算只需要一批有代表性的像素：按像素数抽（固定种子，结果可复现）
+    if px.shape[0] > pm_SAMPLE:
+        px = px[np.random.default_rng(0).choice(px.shape[0], pm_SAMPLE, replace=True, p=w / w.sum())]
+    elif not np.all(w == w[0]):
+        px = np.repeat(px, np.maximum(1, np.rint(w * (pm_SAMPLE / w.sum()))).astype(int), axis=0)
     x = px / 255.0
     sol = pm.solve(x, color_tgt, "color_balance")
     out.append(

@@ -15,7 +15,7 @@ from colordoctor.core import color_spaces as cs
 from colordoctor.core import contamination as ct
 from colordoctor.core.color_models import Comparison, QuickRuleResult, SkinPreset, SkinReport
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.pixel_table import wmedian
+from colordoctor.core.pixel_table import colour_counts, wmedian
 from colordoctor.core.sampling import FULL_RES_MAX, SampleError, grid_downsample
 
 # 相对“自然肤色”的色相区间（D50 Lab），超出即给出倾向
@@ -111,7 +111,7 @@ def analyze_skin(
     sub, step = grid_downsample(region, max_samples)
     vsub = ct.downsample_mask(valid, step, sub.shape[:2]).reshape(-1)
     # 原图尺寸的每个像素都统计：按“不同的颜色 × 像素数”加权（和逐个像素算一样，快很多）
-    cols, wt = cs.unique_colours(sub.reshape(-1, 3)[vsub])
+    cols, wt = colour_counts(sub, vsub.reshape(sub.shape[:2]))
     if cols.shape[0] == 0:
         raise SampleError("蒙版内没有皮肤像素")
     w = wt.astype(np.float64)
@@ -194,12 +194,13 @@ def analyze_skin(
     )
 
 
-def quick_rule_check(lab_pixels: np.ndarray, rule: tuple) -> QuickRuleResult:
-    """你的经验规则：a*、b* 都在区间内，且 |a* - b*| 不超过上限。"""
+def quick_rule_check(lab_pixels: np.ndarray, rule: tuple, weights=None) -> QuickRuleResult:
+    """你的经验规则：a*、b* 都在区间内，且 |a* - b*| 不超过上限。weights：每个颜色的像素数。"""
 
     (alo, ahi), (blo, bhi), md = rule
     px = np.asarray(lab_pixels, dtype=float).reshape(-1, 3)
-    a, b = float(px[:, 1].mean()), float(px[:, 2].mean())
+    w = np.ones(px.shape[0]) if weights is None else np.asarray(weights, dtype=np.float64).ravel()
+    a, b = float((px[:, 1] * w).sum() / w.sum()), float((px[:, 2] * w).sum() / w.sum())
     a_ok, b_ok, d_ok = alo <= a <= ahi, blo <= b <= bhi, abs(a - b) <= md
     ok = (px[:, 1] >= alo) & (px[:, 1] <= ahi) & (px[:, 2] >= blo) & (px[:, 2] <= bhi) & (np.abs(px[:, 1] - px[:, 2]) <= md)
     tips = []
@@ -216,7 +217,7 @@ def quick_rule_check(lab_pixels: np.ndarray, rule: tuple) -> QuickRuleResult:
     verdict = "正常肤色" if (a_ok and b_ok and d_ok) else "不符合经验范围"
     return QuickRuleResult(
         a=round(a, 2), b=round(b, 2), a_range=(alo, ahi), b_range=(blo, bhi), max_diff=md,
-        a_ok=a_ok, b_ok=b_ok, diff_ok=d_ok, pixel_pass_share=round(float(ok.mean()), 4),
+        a_ok=a_ok, b_ok=b_ok, diff_ok=d_ok, pixel_pass_share=round(float(w[ok].sum() / w.sum()), 4),
         verdict=verdict, tips=tuple(tips),
     )
 

@@ -27,15 +27,20 @@ def kmeans(points: np.ndarray, k: int, iters: int = 40, seed: int = 0) -> tuple[
     C = np.array(centers)
     labels = np.zeros(n, dtype=int)
     for _ in range(iters):
-        dist = ((pts[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)
-        new_labels = dist.argmin(axis=1)
-        newC = np.array(
-            [pts[new_labels == j].mean(axis=0) if np.any(new_labels == j) else C[j] for j in range(len(C))]
-        )
+        new_labels = nearest(pts, C)
+        cnt = np.bincount(new_labels, minlength=len(C))
+        sums = np.stack([np.bincount(new_labels, weights=pts[:, d], minlength=len(C)) for d in range(pts.shape[1])], axis=1)
+        newC = np.where(cnt[:, None] > 0, sums / np.maximum(cnt, 1)[:, None], C)
         if np.array_equal(new_labels, labels) and np.allclose(newC, C):
             break
         labels, C = new_labels, newC
     return C, labels
+
+
+def nearest(pts: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    """每个点最近的中心（|p|² - 2p·c + |c|²，用矩阵乘法，比逐点相减快很多）。"""
+    d = (centers ** 2).sum(axis=1)[None, :] - 2.0 * (pts @ centers.T)
+    return d.argmin(axis=1)
 
 
 def dominant_clusters(
@@ -62,8 +67,7 @@ def dominant_clusters(
     # 用全部采样点重新分配，得到准确占比
     labels = np.empty(n, dtype=int)
     for s in range(0, n, 200_000):
-        chunk = pts[s : s + 200_000]
-        labels[s : s + 200_000] = ((chunk[:, None, :] - centers[None]) ** 2).sum(axis=2).argmin(axis=1)
+        labels[s : s + 200_000] = nearest(pts[s : s + 200_000], centers)
     counts = np.bincount(labels, weights=w_all, minlength=len(centers)).astype(float)
     groups = [[i] for i in range(len(centers)) if counts[i] > 0]
 

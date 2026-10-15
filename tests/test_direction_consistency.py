@@ -644,7 +644,7 @@ def _skin_means(before, after):
 def check_compare_report(tag, ref, prob, rep, skin):
     chk = Check(tag)
     plan = lp.plan_from_report(rep, prob.shape)
-    ref_lab = (cs.srgb8_to_lab(an._skin_pixels(ref)).mean(0) if skin else lab_of(ref).reshape(-1, 3).mean(0))
+    ref_lab = (an._mean_lab(an._skin_pixels(ref)) if skin else lab_of(ref).reshape(-1, 3).mean(0))
     for i, f in enumerate(rep.findings):
         for a in f.adjustments:
             check_text(chk, a.instruction, a.layer)

@@ -67,16 +67,11 @@ def per_colour(fn):
         if not (isinstance(rgb, np.ndarray) and rgb.dtype == np.uint8 and rgb.ndim >= 2 and rgb.shape[-1] == 3
                 and rgb.size // 3 >= PER_COLOUR_MIN):
             return fn(rgb, *args, **kwargs)
-        flat = rgb.reshape(-1, 3)
-        packed = (flat[:, 0].astype(np.uint32) << 16) | (flat[:, 1].astype(np.uint32) << 8) | flat[:, 2]
-        present = np.bincount(packed, minlength=1 << 24).astype(bool)
-        uniq = np.flatnonzero(present).astype(np.uint32)
-        index = np.zeros(1 << 24, dtype=np.int32)
-        index[uniq] = np.arange(uniq.size, dtype=np.int32)
-        colours = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], axis=-1).astype(np.uint8)
-        vals = np.asarray(fn(colours, *args, **kwargs), dtype=np.float32)
-        out = vals[index[packed]]
-        return out.reshape(*rgb.shape[:-1], *vals.shape[1:])
+        from colordoctor.core.pixel_table import PixelTable, table
+
+        pt = table(rgb) if rgb.ndim == 3 else PixelTable(rgb.reshape(-1, 1, 3))  # 一次分析内同一张图只编号一次
+        vals = np.asarray(fn(pt.colours, *args, **kwargs), dtype=np.float32)
+        return pt.pix(vals).reshape(*rgb.shape[:-1], *vals.shape[1:])
 
     return wrapper
 
@@ -90,11 +85,9 @@ def unique_colours(px) -> tuple[np.ndarray, np.ndarray]:
     flat = np.asarray(px).reshape(-1, 3)
     if flat.dtype != np.uint8 or flat.shape[0] < PER_COLOUR_MIN:
         return flat, np.ones(flat.shape[0], dtype=np.int64)
-    packed = (flat[:, 0].astype(np.uint32) << 16) | (flat[:, 1].astype(np.uint32) << 8) | flat[:, 2]
-    counts = np.bincount(packed, minlength=1 << 24)
-    uniq = np.flatnonzero(counts).astype(np.uint32)
-    colours = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], axis=-1).astype(np.uint8)
-    return colours, counts[uniq]
+    from colordoctor.core.pixel_table import PixelTable
+
+    return PixelTable(np.ascontiguousarray(flat).reshape(-1, 1, 3)).colour_counts()
 
 
 def weighted_percentile(values, weights, q) -> np.ndarray:
@@ -113,6 +106,19 @@ def weighted_percentile(values, weights, q) -> np.ndarray:
     lo, hi = np.minimum(lo, v.size - 1), np.minimum(hi, v.size - 1)
     frac = pos - np.floor(pos)
     return v[lo] + (v[hi] - v[lo]) * frac
+
+
+def weighted_percentile_int(values, weights, q, size: int = 256) -> np.ndarray:
+    """values 是 0..size-1 的整数（例如 8 位 RGB）时的加权分位数：按直方图算，不用排序，结果和 weighted_percentile 一样。"""
+    hist = np.bincount(np.asarray(values, dtype=np.int64).ravel(), weights=np.asarray(weights, dtype=np.float64).ravel(),
+                       minlength=size)
+    cw = np.cumsum(hist)
+    if cw[-1] <= 0:
+        return np.full(np.shape(q), np.nan)
+    pos = np.asarray(q, dtype=np.float64) / 100.0 * (cw[-1] - 1)
+    lo = np.minimum(np.searchsorted(cw, np.floor(pos) + 1, side="left"), size - 1)
+    hi = np.minimum(np.searchsorted(cw, np.floor(pos) + 2, side="left"), size - 1)
+    return lo + (hi - lo) * (pos - np.floor(pos))
 
 
 def srgb8_to_linear(rgb) -> np.ndarray:

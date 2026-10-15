@@ -7,6 +7,7 @@ import numpy as np
 from colordoctor.core import clustering
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.color_models import Cluster, RegionStats
+from colordoctor.core.pixel_table import colour_counts
 from colordoctor.core.sampling import FULL_RES_MAX, SampleError, grid_downsample
 
 MAX_SAMPLES = FULL_RES_MAX  # 原图尺寸：每个像素都统计
@@ -48,14 +49,13 @@ def compute_stats(
         vsub = downsample_mask(valid, step, sub.shape[:2])
         if not vsub.any():
             raise SampleError("蒙版内没有像素")
-        rgb = sub[vsub].reshape(-1, 3)
         total = int(np.asarray(valid, dtype=bool).sum())
     else:
-        rgb = sub.reshape(-1, 3)
+        vsub = None
         total = int(region.shape[0] * region.shape[1])
-    n = rgb.shape[0]
     # 原图尺寸的每个像素都统计：按“不同的颜色 × 像素数”加权，和逐个像素算完全一样（快很多）
-    rgb, wt = cs.unique_colours(rgb)
+    rgb, wt = colour_counts(sub, vsub)
+    n = int(wt.sum())
     w = wt.astype(np.float64)
     tot = float(w.sum())
     lab = cs.srgb8_to_lab(rgb).astype(np.float64)
@@ -71,7 +71,8 @@ def compute_stats(
         return float(w[m].sum() / tot)
 
     def pct(v, q):
-        return float(cs.weighted_percentile(v, w, q))
+        out = cs.weighted_percentile(v, w, q)  # q 可以是一组：同一组数只排序一次
+        return float(out) if np.ndim(out) == 0 else [float(x) for x in out]
 
     def std(v):
         return float(np.sqrt(max(0.0, float(mean(v * v) - mean(v) ** 2))))
@@ -100,11 +101,12 @@ def compute_stats(
     ok_mean = mean(ok)
     clipped = cs.clipped(rgb)  # 任一通道 ≥ 254 或三个通道都 ≤ 1；饱和的纯色（例如 R = 0 的蓝）不是裁切
     rgbf = rgb.astype(np.float64)
+    Lq, Cq = pct(L, [10, 50, 90]), pct(C, [10, 50, 90])
     return RegionStats(
         total_pixels=total,
         sampled_pixels=n,
         rgb_mean=_t(mean(rgbf), 2),
-        rgb_median=_t([pct(rgbf[:, k], 50) for k in range(3)], 2),
+        rgb_median=_t([float(cs.weighted_percentile_int(rgb[:, k], w, 50)) for k in range(3)], 2),
         lab_mean=_t(lab_mean),
         lab_median=_t([pct(lab[:, k], 50) for k in range(3)]),
         oklab_mean=_t(ok_mean, 5),
@@ -112,12 +114,12 @@ def compute_stats(
         lch_mean=_t(cs.lab_to_lch(lab_mean)),
         L_std=round(std(L), 4),
         C_std=round(std(C), 4),
-        L_p10=round(pct(L, 10), 3),
-        L_p50=round(pct(L, 50), 3),
-        L_p90=round(pct(L, 90), 3),
-        C_p10=round(pct(C, 10), 3),
-        C_p50=round(pct(C, 50), 3),
-        C_p90=round(pct(C, 90), 3),
+        L_p10=round(Lq[0], 3),
+        L_p50=round(Lq[1], 3),
+        L_p90=round(Lq[2], 3),
+        C_p10=round(Cq[0], 3),
+        C_p50=round(Cq[1], 3),
+        C_p90=round(Cq[2], 3),
         sat_p50=round(pct(hsb[:, 1], 50), 3),
         hue_mean=None if hue_mean is None or frac(chromatic) < 0.05 else round(hue_mean, 3),
         hue_concentration=round(R, 6),

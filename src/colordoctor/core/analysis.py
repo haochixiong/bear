@@ -32,6 +32,7 @@ from colordoctor.core.color_models import (
     severity_from_score,
 )
 from colordoctor.core.perception import de_words
+from colordoctor.core.pixel_table import colour_counts, scope, together
 from colordoctor.core.sampling import grid_downsample, sample_point
 
 MAX_SAMPLES = rs.MAX_SAMPLES
@@ -48,6 +49,18 @@ CAUSES_GRAY = (
     "对立色以“像素内混合”的方式叠加（例如蓝色上叠了一层黄），表现为变灰",
     "曲线压低了对比，局部被“压闷”",
 )
+
+
+def _shared_pixels(fn):
+    """整个分析过程中同一张图只给颜色编号一次（脏色、统计、分段、肤色、影调共用）。"""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with scope():
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def analyze_point(pixels: np.ndarray, x: int, y: int, radius: int, context: ColorContext) -> PointSample:
@@ -74,11 +87,11 @@ BAND_MIN_DL = 6.0  # 阴影 / 高光段的平均明度与中间调至少差这�
 
 def _bands(region: np.ndarray, mask: np.ndarray | None) -> dict:
     sub, _ = grid_downsample(region, MAX_SAMPLES)
-    px = sub.reshape(-1, 3)
-    if mask is not None and mask.size == px.shape[0]:
-        px = px[mask.reshape(-1) == ct_mod.MASK_NORMAL]
-    # 原图尺寸的每个像素：按“不同的颜色 × 像素数”加权
-    cols, w = cs.unique_colours(px)
+    keep_px = None
+    if mask is not None and mask.size == sub.shape[0] * sub.shape[1]:
+        keep_px = mask.reshape(sub.shape[:2]) == ct_mod.MASK_NORMAL
+    # 原图尺寸的每个像素：按“不同的颜色 × 像素数”加权（和脏色检查共用同一份颜色编号）
+    cols, w = colour_counts(sub, keep_px)
     keep = ~cs.clipped(cols)  # 被裁切的纯白 / 死黑没有颜色信息
     cols, w = cols[keep], w[keep].astype(np.float64)
     if w.sum() < 20:
@@ -285,9 +298,9 @@ def _skin_cast_findings(skin, comp, conf, base_notes):
 
 
 # ------------------------------------------------------------------ 通用区域
+@_shared_pixels
 def analyze_region(region: np.ndarray, context: ColorContext, rect=None) -> AnalysisReport:
-    stats = rs.compute_stats(region)
-    ct = ct_mod.analyze(region, mode="region", offset=_offset(rect))
+    stats, ct = together(lambda: rs.compute_stats(region), lambda: ct_mod.analyze(region, mode="region", offset=_offset(rect)))
     conf, reasons = dr.confidence(stats, context, ct)
     chroma = dr.chroma_component_region(ct)
     components = [
@@ -303,6 +316,7 @@ def analyze_region(region: np.ndarray, context: ColorContext, rect=None) -> Anal
 
 
 # ------------------------------------------------------------------ 人像肤色
+@_shared_pixels
 def analyze_skin_region(
     region: np.ndarray,
     context: ColorContext,
@@ -339,13 +353,15 @@ def analyze_skin_region(
             mask_info["note"] = (mask_info.get("note") or "") + " 自动抠皮肤失败，改用整个选区"
     if preset is None and preset_key:
         preset = sp.get_preset(preset_key, presets)
-    stats = rs.compute_stats(region, valid=valid)
-    ct = ct_mod.analyze(region, mode="skin", offset=_offset(rect), valid=valid)
+    stats, ct, uni = together(
+        lambda: rs.compute_stats(region, valid=valid),
+        lambda: ct_mod.analyze(region, mode="skin", offset=_offset(rect), valid=valid),
+        lambda: su.analyze_uniformity(region, mask=valid, offset=_offset(rect)),
+    )
     skin = pa.analyze_skin(region, preset, valid=valid, contamination=ct)
-    uni = su.analyze_uniformity(region, mask=valid, offset=_offset(rect))
     rule = quick_rule or (preset.quick_rule if preset is not None and preset.quick_rule else sp.global_quick_rule())
-    skin_px = _skin_pixels(region, valid)
-    qr = pa.quick_rule_check(cs.srgb8_to_lab(skin_px), rule)
+    skin_px, skin_w = _skin_pixels(region, valid)
+    qr = pa.quick_rule_check(cs.srgb8_to_lab(skin_px), rule, weights=skin_w)
     conf, reasons = dr.confidence(stats, context, ct, skin)
     chroma = dr.chroma_component_skin(ct, skin)
     components = [
@@ -387,7 +403,7 @@ def analyze_skin_region(
                 "skin", f"肤色整体{skin.tendency} · 可选颜色", "skin_cast",
                 strength=rec.strength_label(float(cs.hue_diff(cur_lch[2], tgt_h)) / 2.0)))
         if not style_card:
-            adjs += [a for a in rec.skin_adjustments(skin_px, target, keep_lightness=True) if a.tool == "Camera Raw"]
+            adjs += [a for a in rec.skin_adjustments(skin_px, target, keep_lightness=True, weights=skin_w) if a.tool == "Camera Raw"]
         findings.append(
             Finding(
                 problem=f"肤色整体{skin.tendency}",
@@ -412,7 +428,7 @@ def analyze_skin_region(
             )
         )
     if other_part is not None:
-        findings.append(_part_compare_finding(part or "当前部位", skin.mean_lab, other_part, skin_px, conf))
+        findings.append(_part_compare_finding(part or "当前部位", skin.mean_lab, other_part, (skin_px, skin_w), conf))
     adjustments = ()
     if preset is not None:
         fit = pa.preset_fit(skin, preset)
@@ -421,7 +437,7 @@ def analyze_skin_region(
         # 皮肤的明度一次最多拉 SKIN_MAX_DL（整张图的明暗由整图色彩的「影调风格」管，两边不要叠成一大步）
         tgt = preset.target_for(skin.mean_lab)
         tgt = (skin.mean_lab[0] + float(np.clip(tgt[0] - skin.mean_lab[0], -SKIN_MAX_DL, SKIN_MAX_DL)), tgt[1], tgt[2])
-        adjustments = (tuple(rec.skin_adjustments(skin_px, tgt, keep_lightness=preset.keeps_lightness))
+        adjustments = (tuple(rec.skin_adjustments(skin_px, tgt, keep_lightness=preset.keeps_lightness, weights=skin_w))
                        if style_card
                        else (rec.near_hint(cmp.delta_e00),))
         if style_card:
@@ -544,25 +560,30 @@ def _part_compare_finding(part, lab, other, skin_px, conf) -> Finding:
             f"ΔL* {c.dL:+.1f}，Δa* {c.da:+.1f}，Δb* {c.db:+.1f}，ΔC* {c.dC:+.1f}，Δh {c.dh:+.1f}°",
         ),
         causes=("脸部和身体受光不同", "只对脸部做了局部调整", "化妆（粉底色号）与身体肤色不同"),
-        adjustments=tuple(rec.skin_adjustments(skin_px, other_lab)) if parts else (rec.near_hint(c.delta_e00),),
+        adjustments=tuple(rec.skin_adjustments(skin_px[0], other_lab, weights=skin_px[1])) if parts else (rec.near_hint(c.delta_e00),),
         confidence=conf,
         notes=(f"调整方向是把{part}拉向{other_name}；如果想反过来，请在另一部位上分析",),
     )
 
 
-def _skin_pixels(region: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray:
-    sub, step = grid_downsample(region, 20_000)
-    px = sub.reshape(-1, 3)
-    if valid is not None:
-        v = ct_mod.downsample_mask(valid, step, sub.shape[:2]).reshape(-1)
-        if v.sum() >= 10:
-            return px[v]
-    lch = cs.lab_to_lch(cs.srgb8_to_lab(px))
+def _skin_pixels(region: np.ndarray, valid: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """皮肤像素（原图尺寸的每一个）-> (不同的颜色, 每种的像素数)。"""
+    if valid is not None and np.count_nonzero(valid) >= 10:
+        return colour_counts(region, valid)
+    cols, w = colour_counts(region)
+    lch = cs.lab_to_lch(cs.srgb8_to_lab(cols))
     sel = (lch[:, 1] >= 3) & (lch[:, 2] <= 110) & (lch[:, 0] >= 10) & (lch[:, 0] <= 98)
-    return px[sel] if sel.sum() >= 10 else px
+    return (cols[sel], w[sel]) if w[sel].sum() >= 10 else (cols, w)
+
+
+def _mean_lab(cw) -> np.ndarray:
+    cols, w = cw
+    w = np.asarray(w, dtype=np.float64)
+    return (np.asarray(cs.srgb8_to_lab(cols), dtype=np.float64) * w[:, None]).sum(axis=0) / w.sum()
 
 
 # ------------------------------------------------------------------ 参考对比
+@_shared_pixels
 def compare_regions(
     ref: np.ndarray, prob: np.ndarray, context: ColorContext, skin: bool = True, ref_rect=None, prob_rect=None
 ) -> AnalysisReport:
@@ -571,8 +592,8 @@ def compare_regions(
     ct_ref = ct_mod.analyze(ref, mode=mode)
     ct_prob = ct_mod.analyze(prob, mode=mode, offset=_offset(prob_rect))
     if skin:
-        ref_lab = cs.srgb8_to_lab(_skin_pixels(ref)).mean(axis=0)
-        prob_lab = cs.srgb8_to_lab(_skin_pixels(prob)).mean(axis=0)
+        ref_lab = _mean_lab(_skin_pixels(ref))
+        prob_lab = _mean_lab(_skin_pixels(prob))
     else:
         ref_lab = np.array(rs.compute_stats(ref, with_clusters=False).lab_mean)
         prob_lab = np.array(stats.lab_mean)
@@ -611,8 +632,8 @@ def compare_regions(
         adjustments = (rec.near_hint(c.delta_e00, skin),)
     else:
         # 图层只作用于问题区（分析的就是这块区域）
-        adjustments = tuple(rec.skin_adjustments(_skin_pixels(prob) if skin else prob.reshape(-1, 3), ref_lab, skin=skin,
-                                                 scope="local", at="region"))
+        cols, w = _skin_pixels(prob) if skin else colour_counts(prob)
+        adjustments = tuple(rec.skin_adjustments(cols, ref_lab, skin=skin, scope="local", at="region", weights=w))
     main = Finding(
         problem="问题区相对参考区：" + "；".join(parts),
         severity=severity_from_score(sev_score),
@@ -637,10 +658,11 @@ def compare_regions(
 
 
 # ------------------------------------------------------------------ 整图扫描
+@_shared_pixels
 def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.ndarray | None = None) -> AnalysisReport:
     """valid：可选的有效像素蒙版（例如半透明图层的不透明部分），蒙版外不计入。"""
-    stats = rs.compute_stats(image, valid=valid)
-    ct = ct_mod.analyze(image, mode="scan", offset=_offset(rect), valid=valid)
+    stats, ct = together(lambda: rs.compute_stats(image, valid=valid),
+                         lambda: ct_mod.analyze(image, mode="scan", offset=_offset(rect), valid=valid))
     conf, reasons = dr.confidence(stats, context, ct)
     conf *= 0.85  # 整图没有语义，结论更保守
     reasons = ["整图扫描不知道哪里是同一物体，只报告“散点状混杂”和“同色局部发灰”，请逐处确认"] + reasons
@@ -692,6 +714,7 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
 
 
 # ------------------------------------------------------------------ 整图色彩
+@_shared_pixels
 def analyze_palette_report(
     image: np.ndarray, context: ColorContext, style_key: str | None = None, family: str | None = None,
     family_target_lab=None, rect=None, tone_style: str = "", tone_target: str = "",
@@ -854,12 +877,13 @@ def _ratio_layers(pr, r) -> tuple[Adjustment, ...]:
                           "global", "杂色降饱和 · 色相/饱和度", strength="小幅"),)
 
 
+@_shared_pixels
 def compare_reference(mine: np.ndarray, ref: np.ndarray, context: ColorContext, skin_mine=None, skin_ref=None, rect=None) -> AnalysisReport:
     """仿色：参考是什么色彩，我的图差多少，适不适合照着调。"""
     from colordoctor.core import reference_match as rm
 
-    stats = rs.compute_stats(mine, with_clusters=False)
-    m = rm.match_reference(mine, ref, skin_mine, skin_ref)
+    m, stats = together(lambda: rm.match_reference(mine, ref, skin_mine, skin_ref),
+                        lambda: rs.compute_stats(mine, with_clusters=False))
     conf, reasons = dr.confidence(stats, context)
     sev = Severity.NORMAL if m.similarity >= 80 else (Severity.MILD if m.similarity >= 60 else Severity.NOTABLE)
     findings = [

@@ -15,7 +15,7 @@ from colordoctor.core import color_spaces as cs
 from colordoctor.core import native_layers as nl
 from colordoctor.core.color_models import Adjustment
 from colordoctor.core.perception import de_words
-from colordoctor.core.pixel_table import PixelTable
+from colordoctor.core.pixel_table import colour_counts, par_rows, table
 from colordoctor.core.contamination import _components
 from colordoctor.core.region_statistics import weighted_circular_hue
 from colordoctor.core.sampling import FULL_RES_MAX, SampleError, grid_downsample
@@ -157,7 +157,7 @@ def _colours(image: np.ndarray, max_samples: int = MAX_SAMPLES):
     if image is None or image.ndim != 3 or image.shape[0] == 0 or image.shape[1] == 0:
         raise SampleError("图像为空")
     sub, _ = grid_downsample(image, max_samples)
-    cols, pw = cs.unique_colours(sub)
+    cols, pw = colour_counts(sub)
     lab = np.asarray(cs.srgb8_to_lab(cols), dtype=np.float64)
     return cols, pw.astype(np.float64), lab, cs.lab_to_lch(lab)
 
@@ -293,7 +293,7 @@ def family_unity(
         raise SampleError("图像为空")
     sub, step = grid_downsample(image, max_samples)
     # 原图尺寸：每种颜色只算一次，统计按像素数加权（和逐个像素算一样）；小块定位按像素位置
-    pt = PixelTable(sub)
+    pt = table(sub)
     L, C, h, lab = pt.L, pt.C, pt.h, pt.lab
     lo, hi = FAMILY_SECTORS[family]
     lo, hi = lo - 12, hi + 12
@@ -323,16 +323,21 @@ def family_unity(
     ts = int(max(8, round(min(sub.shape[:2]) / 12)))
     th, tw = (sub.shape[0] + ts - 1) // ts, (sub.shape[1] + ts - 1) // ts
     hr = np.radians(h)
-    cw = np.where(sel_u, C, 0.0)
+    cwc, cws = C * np.cos(hr), C * np.sin(hr)
+    nt = th * tw
 
-    def tile_sum(per_colour):
-        m = np.zeros((th * ts, tw * ts), np.float64)
-        m[: sub.shape[0], : sub.shape[1]] = np.asarray(per_colour, np.float32)[pt.index]
-        return m.reshape(th, ts, tw, ts).sum(axis=(1, 3))
+    def tile_sums(y0, y1):  # 只看这一类颜色的像素：按所在小块求个数、色度 × cos / sin 之和
+        idx = pt.index[y0:y1]
+        yy, xx = np.nonzero(sel_u[idx])
+        tid = ((yy + y0) // ts) * tw + xx // ts
+        ci = idx[yy, xx]
+        return np.stack([np.bincount(tid, minlength=nt), np.bincount(tid, weights=cwc[ci], minlength=nt),
+                         np.bincount(tid, weights=cws[ci], minlength=nt)])
 
-    t_n = tile_sum(sel_u)
-    t_c, t_s = tile_sum(cw * np.cos(hr)), tile_sum(cw * np.sin(hr))
-    area = tile_sum(np.ones(pt.n))  # 每块实际有多少像素（靠边的块不满）
+    t_n, t_c, t_s = (v.reshape(th, tw) for v in np.sum(par_rows(tile_sums, sub.shape[0], sub.shape[1]), axis=0))
+    rows = np.minimum(ts, sub.shape[0] - np.arange(th) * ts)
+    cols = np.minimum(ts, sub.shape[1] - np.arange(tw) * ts)
+    area = np.outer(rows, cols)  # 每块实际有多少像素（靠边的块不满）
     ok = (t_n >= np.maximum(6, 0.25 * area)) & (np.hypot(t_c, t_s) > 1e-9)
     t_h = np.degrees(np.arctan2(t_s, t_c)) % 360
     shifts = np.where(ok, cs.hue_diff(hm, t_h), 0.0)

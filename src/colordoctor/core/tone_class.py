@@ -68,11 +68,12 @@ class ToneClass:
 
 def _colours(rgb: np.ndarray, valid: np.ndarray | None = None):
     """原图尺寸的像素 -> (不同的颜色, 每种的像素数)：直方图、分位数按像素数加权，和逐个像素算一样。"""
-    px = np.asarray(rgb)[..., :3]
-    px = px[valid] if valid is not None else px.reshape(-1, 3)
+    from colordoctor.core.pixel_table import colour_counts
+
+    px = np.asarray(rgb)
     if px.dtype != np.uint8:
-        px = np.clip(np.rint(px), 0, 255).astype(np.uint8)
-    cols, w = cs.unique_colours(px)
+        px = np.clip(np.rint(px[..., :3]), 0, 255).astype(np.uint8)
+    cols, w = colour_counts(px, valid)
     return cols, w.astype(np.float64)
 
 
