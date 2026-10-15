@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from importlib import resources
 
@@ -135,6 +136,7 @@ class PaletteReport:
     tone_target: str = ""  # 目标影调（选了影调风格或直接选了影调时），例如“高短调”
     tone_label: str = ""  # 目标的显示名（影调风格名，例如“日系”；直接选影调时就是影调名）
     tone_also: tuple[str, ...] = ()  # 也算符合的影调（影调风格的备选影调）
+    tone_choice: str = ""  # 用户的选择："s:<影调风格>" / "t:<影调>" / ""（不改影调）
 
 
 # ================================================================ 基础
@@ -494,10 +496,11 @@ def _tint_ok(t, spec) -> bool | None:
     return bool(hue_ok and lo - 0.5 <= c <= hi + 0.5)
 
 
-def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, key: str | None = None) -> StyleMatch:
+def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, key: str | None = None,
+                target: str = "") -> StyleMatch:
     """与颜色模板的差距。只看颜色（色区、丰富度、阴影 / 高光色调），明暗和反差归「影调风格」管。
 
-    key：按哪种基调处理（"low" / "high" / ""）；None 时按画面本身判断。
+    key：按哪种基调处理（"low" / "high" / ""）；None 时按画面本身判断。target：key 来自用户选的目标影调时，目标影调名。
     """
     sub, _, lab, lch = _prep(image, max_samples)
     L, C, h = lch[..., 0].ravel(), lch[..., 1].ravel(), lch[..., 2].ravel()
@@ -559,7 +562,9 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
         if t is not None and ok is False:
             now = f"色相 {t[0]:.0f}°、色度 {t[1]:.1f}" if t[1] >= 1.5 else f"接近中性（色度 {t[1]:.1f}）"
             gaps.append(f"{label}色调：{now}，目标色相 {style[skey]['hue']}、色度 {style[skey]['chroma']}")
-    if tk == "low":
+    if tk and target:
+        gaps.append(f"目标影调是{target}：颜色按{KEY_NAME[tk]}处理（{'暗部的颜色少、浅' if tk == 'low' else '亮、淡'}是正常的）")
+    elif tk == "low":
         gaps.append(f"暗调画面（中位明度 {p50:.0f}）：颜色按暗调处理，暗部的颜色少、浅是正常的")
     elif tk == "high":
         gaps.append(f"高调画面（中位明度 {p50:.0f}）：颜色按高调处理，亮、淡是这张图的基调")
@@ -643,12 +648,8 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
                 continue
             text = f"{c.name}（占画面颜色 {c.share:.0%}）：饱和度 {amount:+d}{note}"
             prm = [("饱和度", amount)]
-            lum = 0
-            if act == "desat_dark":
-                lum = -int(np.clip(20 + 100 * c.share, 20, ac.SLIDER_CAP))
-                text += f"，明亮度 {lum:+d}"
-                prm.append(("明亮度", lum))
-            rows.append((c.name, c.mean_hue, 0.0, amount, lum, c.share))
+            # 颜色模板只管颜色：desat_dark（例如黑金里的冷色）只降饱和，压暗交给影调风格（例如暗调情绪）
+            rows.append((c.name, c.mean_hue, 0.0, amount, 0, c.share))
             out.append(Adjustment("Camera Raw 混色器", text, ac.slider_strength(amount), True, tuple(prm)))
     # 阴影/高光色调：颜色分级（估算）+ 曲线（对阴影/高光平均色精确）
     for key, label, t, ok in (("shadow_tint", "阴影", sh, sh_ok), ("highlight_tint", "高光", hl, hl_ok)):
@@ -695,8 +696,28 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
                                  "global", f"「{style['name']}」色调 · 色彩平衡"))
     for panel, lines in style.get("recipe", {}).items():
         for line in lines:
-            out.append(Adjustment(f"常用做法·{panel}", line, None, True))
+            line = colour_only(panel, line)
+            if line:
+                out.append(Adjustment(f"常用做法·{panel}", line, None, True))
     return out
+
+
+# 常用做法里讲明暗的部分（对比、黑场、提亮、S 曲线……）属于影调，由「影调风格」管：颜色模板的建议里去掉，
+# 只留颜色的部分（某个颜色通道的曲线、饱和度、色温……）
+TONE_PANELS = ("曲线", "基本")
+_COLOUR_WORDS = re.compile(r"[红绿蓝]通道|饱和|色温|色调|白平衡|黑白")
+_TONE_WORDS = re.compile(r"对比|黑场|白场|提亮|压暗|压深|压实|曝光|S 形|S形|暗部|亮部|高光|阴影|柔和|明亮")
+
+
+def colour_only(panel: str, line: str) -> str:
+    if panel not in TONE_PANELS:
+        return line
+    keep = []
+    for part in re.split(r"[；，,;]", line):
+        part = part.strip()
+        if part and (_COLOUR_WORDS.search(part) or not _TONE_WORDS.search(part)):
+            keep.append(part)
+    return "；".join(keep)
 
 
 # ================================================================ 汇总
@@ -715,7 +736,8 @@ def analyze_palette(image: np.ndarray, style_key: str | None = None, family: str
     cls = tcl.classify(sub)
     target = tcl.pick_goal(cls.name, main, also)  # 影调风格有几种可接受的影调：往最近的那种走
     key = tcl.key_code(target) if target else detected  # 选了目标影调：颜色按目标的基调处理
-    style = style_match(image, get_style(style_key), key=key) if style_key else None
+    style = style_match(image, get_style(style_key), key=key, target=target) if style_key else None
     return PaletteReport(cf, palette, ratio, tuple(ac.channel_stats(sub)), tone, unity, style,
                          tone_key=key, detected_key=detected, tone_class=cls,
-                         tone_target=target, tone_label=label, tone_also=also)
+                         tone_target=target, tone_label=label, tone_also=also,
+                         tone_choice=f"t:{tone_target}" if tone_target else (f"s:{tone_style}" if tone_style else ""))

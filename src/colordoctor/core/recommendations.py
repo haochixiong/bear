@@ -160,7 +160,8 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
             Adjustment(
                 "曲线",
                 f"明度：RGB 复合曲线加一个点 输入 {g_in} → 输出 {g_out}（L* {cur_lab[0]:.1f} → {tgt[0]:.1f}）。"
-                "放在调颜色的那条曲线上方（先调颜色、再调明度），两者不要合并到同一条曲线",
+                "放在调颜色的那条曲线上方（先调颜色、再调明度），两者不要合并到同一条曲线"
+                + ("。这里只把皮肤拉回目标的明度范围（一次最多 12 L*）；整张图的明暗请用整图色彩的「影调风格」" if skin else ""),
                 strength_label(dL),
                 estimated=True,
                 params=(("RGB 输入", float(g_in)), ("RGB 输出", float(g_out))),
@@ -317,10 +318,10 @@ def graying_vibrance(depth: float) -> int:
 
 
 def contrast_adjustment(scope: str = "global", at: str | None = None, where: str = "") -> Adjustment:
-    """小幅 S 形曲线加对比（数值与生成的曲线图层相同）。"""
+    """对比偏低的提示：只给文字、不生成曲线图层（明暗和反差只由整图色彩的「影调风格」改，不替用户决定）。"""
     p = nl.curves({"composite": nl.S_CURVE})
-    return nl.adjustment("curves", p, f"{where}对比偏低：RGB 曲线小幅 S 形（{nl.curves_text(p)}）；也检查去朦胧/清晰度/降噪是否过度",
-                         scope, "加对比 · 曲线", at, strength="轻微")
+    return Adjustment("曲线", f"{where}对比偏低：如果不是刻意的柔和效果，可以手动加小幅 S 形曲线（{nl.curves_text(p)}），"
+                            "或在整图色彩里选一个长调的「影调风格」；也检查去朦胧/清晰度/降噪是否过度", "轻微", True)
 
 
 def graying_adjustments(base: str, depth: float = 0.0, at: str = "graying", skin_deficit: float | None = None,

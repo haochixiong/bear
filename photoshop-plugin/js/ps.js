@@ -302,7 +302,8 @@ async function makeAdjustmentLayer(spec) {
   if (id == null || id === before) throw new Error(`新建「${spec.name}」失败：Photoshop 没有创建调整图层（文档模式或图层锁定？）`);
   checkResults(await action.batchPlay([
     { _obj: "set", _target: ORDINAL, to: build(spec.params) },
-    { _obj: "set", _target: [{ _ref: "layer", _id: id }], to: { _obj: "layer", name: spec.name } },
+    // 影调曲线用“明度”混合模式：只改明暗，不改颜色
+    { _obj: "set", _target: [{ _ref: "layer", _id: id }], to: { _obj: "layer", name: spec.name, ...(spec.blend === "luminosity" ? { mode: { _enum: "blendMode", _value: "luminosity" } } : {}) } },
   ], {}), `设置「${spec.name}」`);
   return id;
 }

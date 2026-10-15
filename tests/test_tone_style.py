@@ -72,7 +72,7 @@ def test_no_tone_style_only_describes():
     card = _tone_card(rep)
     assert card.severity == Severity.NORMAL and "低短调" in card.problem
     assert not card.adjustments and not _curves(rep, img)
-    assert "影调风格" in card.notes[0] and "稍改就到" in card.notes[0]
+    assert "影调风格" in card.notes[0] and "稍改就到" in card.notes[1]
     assert rep.findings[0] is card  # 影调卡排第一
 
 
@@ -87,10 +87,11 @@ def test_same_photo_different_tone_styles_give_opposite_curves():
     assert all(y >= x for x, y in b_pts)  # 日系：全部提亮
     assert m_pts[1][1] <= m_pts[1][0]  # 暗调情绪：暗部不提亮
     assert any(y > x for x, y in m_pts)  # ……只拉开亮部
-    # 曲线是这张卡的图层
+    # 曲线是这张卡的图层，混合模式“明度”（只改明暗、不改颜色）
     plan = lp.plan_from_report(bright, img.shape)
     i = bright.findings.index(b_card)
-    assert [ly.kind for ly in plan.for_finding(i)] == ["curves"]
+    assert [(ly.kind, ly.blend) for ly in plan.for_finding(i)] == [("curves", "luminosity")]
+    assert plan.to_json()["layers"][0]["blend"] == "luminosity"
 
 
 def test_big_jump_points_to_raw():
@@ -138,6 +139,8 @@ def test_bridge_tone_params_and_grid():
     t = r["tone"]
     assert t["name"] == "低短调" and t["target"] == "高短调" and t["label"] == "日系" and "高中调" in t["also"]
     assert len(t["histogram"]) == 32 and len(t["suggestions"]) == len(tc.TONE_STYLES)
+    assert t["paths"]["低短调"] == "已经是这种影调" and t["paths"]["高短调"] == "整体提亮一大截"
+    assert t["long_span"] == tc.LONG_SPAN
     assert r["findings"][0]["problem"].startswith("影调：") and r["findings"][0]["layers"]
     r2 = bs.analyze_request(img, "palette", {}, bs.Store(), bs.Store(), layer_kind="pixel")
     assert r2["tone"]["target"] == "" and not r2["findings"][0]["layers"]

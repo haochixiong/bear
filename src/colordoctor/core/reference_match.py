@@ -116,12 +116,12 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
     for a, b in zip(tm, tr, strict=True):
         x, y = _gray(a), _gray(b)
         if abs(x - y) < 2:
-            continue
+            y = x  # 这一段已经和参考一致：保留为不动的锚点，否则曲线会从旁边的点直接插值过来，把它也带着动
         # 曲线点之间至少相隔 12 级、输出单调不降，否则曲线过陡会出现断层（PS 也可能合并太近的点）
         if pts and (x - pts[-1][0] < 12 or y < pts[-1][1]):
             continue
         pts.append((x, y))
-    curve = tuple(pts)
+    curve = tuple(pts) if any(x != y for x, y in pts) else ()  # 全部一致：不给曲线
     # 建议顺序是先用曲线定影调、再调颜色：白平衡、阴影 / 高光色调、混色器都在“曲线之后”的图上和参考比。
     # 否则混色器的明亮度会把曲线已经提亮 / 压暗的部分再调一次，色彩平衡也会按曲线之前的明度去求
     if curve:
@@ -211,7 +211,7 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
 
     adjs: list[Adjustment] = []
     if curve:
-        adjs.append(Adjustment("曲线", "RGB 复合曲线（把影调拉向参考）：" + "；".join(f"输入 {a} → 输出 {b}" for a, b in curve), "小幅", False,
+        adjs.append(Adjustment("曲线", "RGB 复合曲线（把影调拉向参考）：" + "；".join(f"输入 {a} → 输出 {b}" + ("（已一致，固定不动）" if a == b else "") for a, b in curve), "小幅", False,
                                tuple((f"输入 {a}", float(b)) for a, b in curve),
                                layer=nl.layer("curves", nl.curves({"composite": list(curve)}), "global", "仿色影调 · 曲线", "ref_curve")))
     if ref_bw:

@@ -132,26 +132,92 @@ def quantiles(rgb: np.ndarray, valid: np.ndarray | None = None) -> tuple[float, 
 MAX_MOVE = 45.0  # 一次曲线每个点最多移动多少级（0–255），其余提示重新分析或回 RAW 调曝光
 
 
+MIN_GAP = 12  # 曲线点之间至少相隔这么多级：太近的点会让曲线很陡，PS 的平滑曲线还会来回打折
+MAX_SLOPE = 3.0  # 相邻两点之间的斜率限制在 1/3 – 3：再陡会出现断层、再平会把层次压没
+
+
 def match_curve(current: tuple, target: tuple) -> tuple[list[list[int]], bool]:
     """按分位点做直方图匹配：把当前的 P2/P25/P50/P75/P98 映射到目标的分位点，得到 RGB 复合曲线的点。
 
-    返回 (曲线点（含 0,0 和 255,255），是否因为一次移动太多而被限幅)。保证单调。
+    - 每个点一次最多移动 MAX_MOVE 级；
+    - 最暗 / 最亮的分位已经贴着 0 / 255（死黑、死白）时移动端点本身（抬黑场 / 压白场），否则调长改不了；
+    - 点之间至少相隔 MIN_GAP 级，相邻斜率限制在 1/3 – 3，输出严格递增。
+    返回 (曲线点（含输入 0 和 255 两个端点），是否被限幅)。
     """
-    pts = [[0, 0]]
     capped = False
-    last_x, last_y = 0, 0
+    lo, hi = 0.0, 255.0
+    mid: list[tuple[float, float]] = []
     for x, y in zip(current, target, strict=True):
-        if y - x > MAX_MOVE or x - y > MAX_MOVE:
+        x, y = float(x), float(y)
+        if abs(y - x) > MAX_MOVE:
             capped = True
-            y = x + np.clip(y - x, -MAX_MOVE, MAX_MOVE)
-        xi, yi = round(float(x)), round(float(y))
-        if xi <= last_x + 3 or xi >= 252:  # 太近的点合并，避免曲线打折
-            continue
-        yi = max(yi, last_y + 1)
-        pts.append([xi, min(yi, 254)])
-        last_x, last_y = xi, pts[-1][1]
-    pts.append([255, 255])
-    return pts, capped
+            y = x + float(np.clip(y - x, -MAX_MOVE, MAX_MOVE))
+        if x <= 3:
+            lo = float(np.clip(y - x, 0.0, MAX_MOVE))  # 死黑：移动黑场端点
+        elif x >= 252:
+            hi = float(np.clip(y + (255 - x), 255 - MAX_MOVE, 255.0))  # 死白：移动白场端点
+        elif (not mid or x - mid[-1][0] >= MIN_GAP) and x >= MIN_GAP and 255 - x >= MIN_GAP:
+            mid.append((x, y))
+    pts, changed = limit_slopes([[0.0, lo], *[[x, y] for x, y in mid], [255.0, hi]])
+    capped |= changed
+    out, last = [], -1
+    for x, y in pts:
+        yi = int(np.clip(round(y), 0, 255))
+        yi = max(yi, last + 1) if out else yi
+        out.append([int(round(x)), min(yi, 255)])
+        last = out[-1][1]
+    return out, capped
+
+
+def limit_slopes(pts) -> tuple[list[list[float]], bool]:
+    """相邻曲线点的斜率限制在 1/MAX_SLOPE – MAX_SLOPE：先从左往右、再从右往左，端点也会跟着让一点。
+
+    pts：[[x, y], ...]（x 递增，含两个端点）。返回 (新的点, 是否有点被挪动超过 1 级)。
+    """
+    pts = [[float(x), float(y)] for x, y in pts]
+    changed = False
+    for _ in range(2):
+        for i in range(1, len(pts)):
+            dx = pts[i][0] - pts[i - 1][0]
+            y = float(np.clip(pts[i][1], pts[i - 1][1] + dx / MAX_SLOPE, pts[i - 1][1] + dx * MAX_SLOPE))
+            changed |= abs(y - pts[i][1]) > 1.0
+            pts[i][1] = y
+        for i in range(len(pts) - 2, -1, -1):
+            dx = pts[i + 1][0] - pts[i][0]
+            y = float(np.clip(pts[i][1], pts[i + 1][1] - dx * MAX_SLOPE, pts[i + 1][1] - dx / MAX_SLOPE))
+            changed |= abs(y - pts[i][1]) > 1.0
+            pts[i][1] = y
+    return pts, changed
+
+
+def apply_curve_luminosity(rgb: np.ndarray, pts) -> np.ndarray:
+    """曲线（线性插值近似）作用在 RGB 各通道上、图层混合模式“明度”时，结果的 PS 明度（0–255）。
+
+    “明度”混合只取调整后画面的明度、保留原来的颜色，所以结果的明度 = Lum(曲线(R, G, B))，
+    和“曲线(明度)”不一样（彩色像素差得更多）：生成曲线时用它来模拟、修正。
+    """
+    xs, ys = np.array(pts, dtype=float).T
+    return luminance(np.interp(np.asarray(rgb, dtype=float)[..., :3], xs, ys))
+
+
+def fit_curve(rgb: np.ndarray, valid, current: tuple, target: tuple, rounds: int = 3) -> tuple[list[list[int]], bool]:
+    """按目标分位点求曲线，并按“作用在 RGB 上、明度混合”的实际效果修正几次，让调完的分位点更接近目标。"""
+    px = np.asarray(rgb, dtype=float)[..., :3]
+    px = (px[valid] if valid is not None else px).reshape(-1, 3)
+    goal = np.array(target, dtype=float)
+    best = match_curve(current, target)
+    best_err = None
+    for _ in range(rounds):
+        pts, capped = match_curve(current, tuple(goal))
+        got = np.percentile(apply_curve_luminosity(px, pts), [2, 25, 50, 75, 98])
+        err = np.array(target, dtype=float) - got
+        score = float(np.abs(err).mean())
+        if best_err is None or score < best_err:
+            best, best_err = (pts, capped), score
+        if np.abs(err).max() < 3:
+            break
+        goal = np.clip(goal + err, 0, 255)
+    return best
 
 
 # ---------------------------------------------------------------- 影调风格（预制的目标影调）
@@ -252,19 +318,14 @@ def path_words(cur: str, target: str) -> str:
     return "、".join(out)
 
 
-def curve_words(pts, mid_x: float | None = None) -> str:
-    """曲线实际怎么动：暗部 / 中间调（输入最接近 mid_x 的点）/ 亮部各往哪边走（按曲线点说，和图层一致）。"""
-    inner = [(x, y) for x, y in pts if 0 < x < 255]
-    if not inner:
-        return ""
-    picks = [("暗部", inner[0])]
-    if mid_x is not None and len(inner) > 2:
-        mid = min(inner[1:-1], key=lambda p: abs(p[0] - mid_x))
-        if abs(mid[0] - mid_x) <= 12:
-            picks.append(("中间调", mid))
-    if len(inner) > 1:
-        picks.append(("亮部", inner[-1]))
-    return "、".join(f"{name}{'提亮' if y > x else '压暗'}（{x} → {y}）" for name, (x, y) in picks if abs(y - x) >= 3)
+def curve_words(pts) -> str:
+    """曲线实际怎么动（按曲线点说，和图层一致）：哪些点提亮、哪些点压暗。"""
+    def name(x):
+        return "黑场" if x == 0 else ("白场" if x == 255 else str(x))
+    up = [f"{name(x)} {x}→{y}" if x in (0, 255) else f"{x}→{y}" for x, y in pts if y - x >= 3]
+    down = [f"{name(x)} {x}→{y}" if x in (0, 255) else f"{x}→{y}" for x, y in pts if x - y >= 3]
+    parts = ([f"提亮 {'、'.join(up)}"] if up else []) + ([f"压暗 {'、'.join(down)}"] if down else [])
+    return "；".join(parts)
 
 
 def tone_distance(cur: str, target: str) -> int:
@@ -301,7 +362,9 @@ def to_json(tc: ToneClass, target: str = "", also: tuple[str, ...] = (), label: 
     return {"name": tc.name, "key": tc.key, "length": tc.length, "desc": tc.desc, "near": tc.near,
             "shares": list(tc.shares), "lo": tc.lo, "hi": tc.hi, "span": tc.span, "histogram": list(tc.histogram),
             "target": target, "also": list(also), "label": label,
-            "suggestions": suggestions(tc.name)}
+            "suggestions": suggestions(tc.name),
+            "paths": {n: path_words(tc.name, n) for n in TONE_NAMES},  # 直接选某种影调时要怎么改
+            "long_span": LONG_SPAN, "short_span": SHORT_SPAN}
 
 
 BIG_JUMP_NOTE = "影调变化很大（跨了一个基调以上）：曲线只能拉近一部分，硬拉会让暗部噪点和断层变明显；有 RAW 时先在 Camera Raw 里调曝光 / 阴影 / 高光，再回来分析"
@@ -330,7 +393,8 @@ def tone_finding(rgb: np.ndarray, valid: np.ndarray | None, style: str, tone: st
         return Finding(
             problem=head, severity=Severity.NORMAL, evidence=tuple(evidence), causes=(), adjustments=(),
             confidence=confidence,
-            notes=("只描述现在的影调，不改明暗。想往某种影调走，请在「影调风格」里选一个（各影调风格离现在多远：" + suggestion_text(tc.name) + "）",),
+            notes=("只描述现在的影调，不改明暗。想往某种影调走，请在「影调风格」里选一个（PS 插件在「影调与颜色」页）",
+                   "各影调风格离现在多远：" + suggestion_text(tc.name)),
         ), tc, ""
     who = label if label == target else f"「{label}」（{target}）"
     if tc.name == target:
@@ -341,21 +405,30 @@ def tone_finding(rgb: np.ndarray, valid: np.ndarray | None, style: str, tone: st
         ), tc, target
     cur_q = quantiles(rgb, valid)
     tgt_q = target_quantiles(target)
-    pts, capped = match_curve(cur_q, tgt_q)
+    pts, capped = fit_curve(rgb, valid, cur_q, tgt_q)
     dist = tone_distance(tc.name, target)
     evidence.append("分位点（P2 / P25 / P50 / P75 / P98）：现在 " + " / ".join(f"{v:.0f}" for v in cur_q)
                     + "，目标 " + " / ".join(f"{v:.0f}" for v in tgt_q))
+    if max(abs(y - x) for x, y in pts) < 3:
+        # 例如大部分像素已经是死黑 / 死白：曲线拉不动，不生成一条什么都不改的图层
+        return Finding(
+            problem=f"{head} → 目标{who}：曲线调不动",
+            severity=Severity.NORMAL, evidence=tuple(evidence), causes=(), adjustments=(
+                _raw_hint("直方图两端的像素已经是死黑 / 死白，曲线拉不动：请回到 RAW / Camera Raw 调曝光、阴影、高光后再分析"),),
+            confidence=confidence, notes=("没有生成曲线图层",),
+        ), tc, target
     params = nl.curves({"composite": pts})
     moved = nl.curves_text(params)
-    text = (f"RGB 曲线（{curve_words(pts, cur_q[2])}）：{moved}。按直方图匹配，把现在的明暗分布拉向{target}"
-            + ("；一次每个点最多移动 45 级，调完重新分析再看" if capped else ""))
+    text = (f"RGB 曲线（{curve_words(pts)}）：{moved}。按直方图匹配，把现在的明暗分布拉向{target}"
+            + ("；一次每个点最多移动 45 级、坡度有限制，调完重新分析再看" if capped else ""))
+    # 混合模式“明度”：曲线只改明暗，不会顺带把颜色变浓 / 变淡（影调风格和颜色互不干扰）
     adjs = [nl.adjustment("curves", params, text, "global", f"影调 {tc.name}→{target} · 曲线",
-                          strength="中等" if dist >= 2 or capped else "小幅")]
+                          strength="中等" if dist >= 2 or capped else "小幅", blend="luminosity")]
     notes = []
     if abs(KEY_IDX[target[0]] - KEY_IDX[tc.name[0]]) == 2 or capped:
         notes.append(BIG_JUMP_NOTE)
         adjs.append(_raw_hint("有 RAW 时优先在 Camera Raw 里调曝光 / 阴影 / 高光：暗部噪点和断层更少"))
-    notes.append("曲线只改明暗、不改颜色（PS 曲线图层的混合模式可改成“明度”，避免提亮 / 压暗时饱和度跟着变）")
+    notes.append("曲线图层的混合模式是“明度”：只改明暗、不改颜色（提亮 / 压暗时饱和度不会跟着变）")
     return Finding(
         problem=f"{head} → 目标{who}：{path_words(tc.name, target)}",
         severity=Severity.MILD if dist == 1 else Severity.NOTABLE,

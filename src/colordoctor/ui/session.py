@@ -113,11 +113,26 @@ class Session:
                 return (other, self.skin_by_part[other])
         return None
 
+    def palette_choice(self) -> tuple:
+        """整图色彩的当前选择（颜色模板、统一色、影调）：和结果里记下的比较，判断结果是不是按现在的选择算的。"""
+        tone = f"t:{self.tone_target}" if self.tone_target else (f"s:{self.tone_style}" if self.tone_style else "")
+        return (self.style_key or None, self.family or None, tone)
+
+    @staticmethod
+    def report_choice(rep: AnalysisReport) -> tuple | None:
+        p = rep.palette if isinstance(rep, AnalysisReport) else None
+        if p is None:
+            return None
+        return (p.style.key if p.style else None, p.unity.family if p.unity else None, p.tone_choice)
+
     def compute_rect(
         self, region: np.ndarray, ctx: ColorContext, rect, mode: str | None = None, lasso=None, manual_mask=None,
-        part: str | None = None,
+        part: str | None = None, plain: bool = False,
     ) -> AnalysisReport:
-        """part：肤色模式下的部位；None 时用当前选择（重算已有结果时传原结果的部位）。"""
+        """part：肤色模式下的部位；None 时用当前选择（重算已有结果时传原结果的部位）。
+
+        plain：整图色彩不套用影调风格、颜色模板和统一色（分析仿色的参考作品：它不是要改的图）。
+        """
         mode = mode or self.mode
         if mode == "skin":
             part = part or self.part
@@ -127,6 +142,8 @@ class Session:
                 region, ctx, preset=self.preset, rect=rect, auto_mask=self.auto_mask, lasso=lasso,
                 part=part, other_part=self.other_part(part), manual_mask=manual_mask,
             )
+        if mode == "palette" and plain:
+            return an.analyze_palette_report(region, ctx, rect=rect)
         if mode == "palette":
             return an.analyze_palette_report(region, ctx, self.style_key, self.family, self.family_target_lab, rect=rect,
                                              tone_style=self.tone_style, tone_target=self.tone_target)

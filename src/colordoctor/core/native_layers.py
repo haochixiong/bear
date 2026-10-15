@@ -55,17 +55,26 @@ def clip(v, lo, hi) -> int:
     return int(np.clip(round(float(v)), lo, hi))
 
 
-def layer(kind: str, params: dict, scope: str = "global", name: str = "", at: str | None = None) -> dict:
+BLENDS = ("normal", "luminosity")
+
+
+def layer(kind: str, params: dict, scope: str = "global", name: str = "", at: str | None = None,
+          blend: str = "normal") -> dict:
+    """blend：图层混合模式。"luminosity"（明度）= 只改明暗不改颜色（影调曲线用）。"""
     d = {"kind": kind, "params": params, "scope": scope, "name": name or KIND_NAME[kind]}
     if at:
         d["_at"] = at
+    if blend != "normal":
+        assert blend in BLENDS, blend
+        d["blend"] = blend
     return d
 
 
 def adjustment(kind: str, params: dict, text: str, scope: str, name: str, at: str | None = None,
-               strength: str | None = "小幅", estimated: bool = True, tool: str | None = None) -> Adjustment:
+               strength: str | None = "小幅", estimated: bool = True, tool: str | None = None,
+               blend: str = "normal") -> Adjustment:
     """一条带图层的建议：卡片文字 text 里的数字就是 params 里的数字。"""
-    return Adjustment(tool or KIND_NAME[kind], text, strength, estimated, layer=layer(kind, params, scope, name, at))
+    return Adjustment(tool or KIND_NAME[kind], text, strength, estimated, layer=layer(kind, params, scope, name, at, blend))
 
 
 # ---------------------------------------------------------------- 色相/饱和度

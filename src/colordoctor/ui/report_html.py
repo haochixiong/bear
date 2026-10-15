@@ -177,7 +177,8 @@ def tone_grid_html(p) -> str:
     near = f"（接近{p.tone_class.near}）" if p.tone_class.near else ""
     hint = f"<p>现在是<b>{escape(cur)}</b>{escape(near)}：{escape(p.tone_class.desc)}。"
     if goal and goal != cur:
-        hint += f"目标「{escape(p.tone_label)}」{escape(goal)}：{escape(tcl.path_words(cur, goal))}。"
+        who = escape(goal) if p.tone_label == goal else f"「{escape(p.tone_label)}」{escape(goal)}"
+        hint += f"目标{who}：{escape(tcl.path_words(cur, goal))}。"
     hint += f"<br><span style='color:{TEXT_DIM}'>各影调风格离现在多远：{escape(tcl.suggestion_text(cur))}</span></p>"
     return f"<table cellpadding=4 cellspacing=2>{''.join(rows)}</table>" + hint
 

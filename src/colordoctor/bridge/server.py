@@ -116,11 +116,23 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
             manual = skin_mask(rgb, within=valid)[0]
             if int(manual.sum()) < 30:  # 透明图层里没找到皮肤：直接说清楚，而不是“蒙版内没有像素”
                 raise pixel_guard.BlockedError("没有在这个图层里找到皮肤。请确认选中的是人像图层，或把分析对象改为「合并可见图层」。")
+        if q.get("preset"):
+            from colordoctor.core import skin_presets as sp
+
+            if q["preset"] not in {p.key for p in sp.load_presets()}:
+                raise ValueError(f"不认识的肤色风格：{q['preset']}")
         return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=part, manual_mask=manual)
     if mode == "palette":
         from colordoctor.core import tone_class as tcl
 
+        from colordoctor.core import palette as pl
+        from colordoctor.core.color_spaces import HUE_SECTORS
+
         tone_style, tone_target = q.get("tone_style") or "", q.get("tone_target") or ""
+        if q.get("style") and q["style"] not in {s["key"] for s in pl.load_styles()}:
+            raise ValueError(f"不认识的颜色模板：{q['style']}")
+        if q.get("family") and q["family"] not in {name for name, _, _ in HUE_SECTORS}:
+            raise ValueError(f"不认识的颜色：{q['family']}")
         if tone_style and tone_style not in tcl.TONE_STYLES:
             raise ValueError(f"不认识的影调风格：{tone_style}")
         if tone_target and tone_target not in tcl.TONE_NAMES:

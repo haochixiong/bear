@@ -98,11 +98,13 @@ def _finalize(mode, context, stats, components, findings, extra_conf_reasons, co
     risk = dr.overall(components)
     sev = severity_from_score(risk)
     order = [Severity.NORMAL, Severity.MILD, Severity.NOTABLE, Severity.STRONG]
-    shown = max((order.index(f.severity) for f in findings), default=0)
+    # “影调”卡说的是离用户选的目标影调多远，不是脏色 / 偏色问题：不抬高总体程度，也不挡住“未发现明显问题”
+    problems = [f for f in findings if not f.problem.startswith("影调：")]
+    shown = max((order.index(f.severity) for f in problems), default=0)
     if shown > order.index(sev):  # 总体程度不低于任何一张卡片，风险分随之抬到该档的下限
         sev = order[shown]
         risk = max(risk, SEVERITY_FLOOR[sev])
-    if not [f for f in findings if f.severity != Severity.NORMAL]:
+    if not [f for f in problems if f.severity != Severity.NORMAL]:
         findings = [
             Finding(
                 problem="未发现明显的脏色、发灰或偏色问题",
@@ -412,7 +414,10 @@ def analyze_skin_region(
         fit = pa.preset_fit(skin, preset)
         # 卡片说“基本一致”（ΔE00 < 2）时不给调整
         # 目标的明度：风格区间内不动、超出才拉回区间边缘；“自然通用”保持当前明度（不因为画面暗就提亮皮肤）
-        adjustments = (tuple(rec.skin_adjustments(skin_px, preset.target_for(skin.mean_lab), keep_lightness=preset.keeps_lightness))
+        # 皮肤的明度一次最多拉 SKIN_MAX_DL（整张图的明暗由整图色彩的「影调风格」管，两边不要叠成一大步）
+        tgt = preset.target_for(skin.mean_lab)
+        tgt = (skin.mean_lab[0] + float(np.clip(tgt[0] - skin.mean_lab[0], -SKIN_MAX_DL, SKIN_MAX_DL)), tgt[1], tgt[2])
+        adjustments = (tuple(rec.skin_adjustments(skin_px, tgt, keep_lightness=preset.keeps_lightness))
                        if style_card
                        else (rec.near_hint(cmp.delta_e00),))
         if style_card:
@@ -698,7 +703,8 @@ def analyze_palette_report(
     pr = pl.analyze_palette(image, style_key, family, family_target_lab, offset=_offset(rect),
                             tone_style=tone_style, tone_target=tone_target)
     conf, reasons = dr.confidence(stats, context)
-    sub, _ = grid_downsample(image, MAX_SAMPLES)
+    # 和 analyze_palette 用同一批像素：标题 / 九宫格里的影调和影调卡、曲线一定一致
+    sub, _ = grid_downsample(image, pl.MAX_SAMPLES)
     tone_card, _tc, _target = tcl.tone_finding(sub[..., :3], None, tone_style, tone_target, conf)
     findings: list[Finding] = [tone_card]
     cf = pr.colorfulness
@@ -736,15 +742,21 @@ def analyze_palette_report(
         vib = nl.clip(10 + 40 * (lo - cf.value) / lo, 10, 25)  # 缺得越多加得越多（+10 ~ +25）
         # 颜色卡不改明暗：亮暗差偏小时只提示，反差由影调卡（影调风格）的曲线管，避免两条曲线叠加或互相抵消
         contrast = float(pr.tone[4] - pr.tone[0])
+        tone_has_curve = any(x.layer for x in tone_card.adjustments)
         if contrast >= LOW_CONTRAST:
             tone_adj = ()
-        elif pr.tone_target:
+        elif tone_has_curve:
             tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}）：反差按上面“影调”那张卡的曲线调，不要再另加 S 曲线",
                                    None, False),)
+        elif pr.tone_target:  # 已经符合目标影调：短调本来就反差小，不再提反差
+            tone_adj = ()
         else:
-            tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}，现在是{pr.tone_class.name}）：发闷可能是反差不够。"
-                                         "想加反差，在「影调风格」里选一个长调的风格（例如电影感、白亮通透），会生成对应的曲线",
-                                   None, False),)
+            # 不猜意图：只列出和现在同一基调的长调风格（暗的图不推荐往亮走）
+            cls = pr.tone_class
+            same = [v["name"] for v in tcl.TONE_STYLES.values() if v["target"] == f"{cls.key}长调"]
+            tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}，现在是{cls.name}）。如果想加反差，可以在「影调风格」里选"
+                                         f"{'、'.join(same) if same else f'{cls.key}长调'}（保持现在的{cls.key}调），会生成对应的曲线；"
+                                         "刻意的柔和效果就保持不动", None, False),)
         findings.append(Finding(
             problem=f"整体缺色/发灰：色彩丰富度 {cf.value:.0f}（{cf.label}）" + (f"，低于「{style.name}」的 {lo:g}" if style else ""),
             severity=sev,
@@ -810,6 +822,7 @@ def analyze_palette_report(
     return _finalize("palette", context, stats, comps, findings, reasons, conf, palette=pr, region=rect)
 
 
+SKIN_MAX_DL = 12.0  # 肤色风格一次最多把皮肤明度拉这么多 L*（约 30 级）
 LOW_CONTRAST = 50.0  # 整图亮暗差（P95 − P5 明度）低于此值才算“对比偏低”
 COLOURFUL_STYLE_MIN = 28.0  # 颜色模板的色彩丰富度下限不低于此值才算“鲜艳”（暗调 / 高调画面只有选了这种模板才按缺色处理）
 

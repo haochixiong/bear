@@ -39,12 +39,13 @@ class LayerSpec:
     mask: np.ndarray | None = field(default=None, repr=False)  # uint8 (H, W)，255 = 作用；None = 全图
     estimated: bool = True
     finding: int | None = None  # 修的是 report.findings 里的第几条；None = 不属于任何一条
+    blend: str = "normal"  # 图层混合模式："luminosity" = 只改明暗（影调曲线）
 
     def to_json(self) -> dict:
         cov = None if self.mask is None else round(float((self.mask > 127).mean()), 4)
         return {"id": self.id, "name": self.name, "kind": self.kind, "params": self.params,
                 "reason": self.reason, "has_mask": self.mask is not None, "mask_coverage": cov,
-                "estimated": self.estimated, "finding": self.finding}
+                "estimated": self.estimated, "finding": self.finding, "blend": self.blend}
 
 
 @dataclass
@@ -282,7 +283,7 @@ class _Masks:
 # ---------------------------------------------------------------- 同一张卡片里的图层合并
 def _merge_pair(a: dict, b: dict) -> dict | None:
     """同类型、同作用范围的两个图层能自然合成一层时返回合并后的参数，否则 None。"""
-    if a["kind"] != b["kind"] or a["scope"] != b["scope"] or a.get("_at") != b.get("_at"):
+    if a["kind"] != b["kind"] or a["scope"] != b["scope"] or a.get("_at") != b.get("_at") or a.get("blend") != b.get("blend"):
         return None
     pa, pb = a["params"], b["params"]
     if a["kind"] == "curves":
@@ -407,7 +408,7 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
             at = spec.get("_at")
             stem = at.partition("@")[0] if at else _ID_STEM[spec["kind"]]
             layers.append(LayerSpec(_unique(stem, used), spec["name"], spec["kind"], spec["params"], "；".join(texts),
-                                    mask, finding=i))
+                                    mask, finding=i, blend=spec.get("blend", "normal")))
     # 没有对应卡片的仿色曲线（例如只有 MatchReport 的报告）：仍给出，不挂在任何卡片上
     ref = getattr(report, "reference", None)
     if ref is not None and getattr(ref, "curve_points", None) and "ref_curve" not in used:

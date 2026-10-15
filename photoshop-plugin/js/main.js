@@ -55,11 +55,14 @@ function analyzeLabel() {
 // ---------------------------------------------------------------- 分析对象栏
 function refreshTarget() {
   const info = ps.inspectTarget($("target").value);
+  state.lastInfo = info;
   $("targetName").textContent = (info.label || "—") + ((info.notes || []).length ? `（${info.notes.join("；")}）` : "");
   $("analyze").textContent = analyzeLabel();
   if (state.sub === "reference") refreshRefDocs();
+  toneHint();
   const st = $("status");
   if (state.busy) return info;  // 进行中：状态栏显示进度，不覆盖
+  if (pruneMade(cur())) renderResult();  // 撤销了生成的图层：卡片上的“已生成 ✓”和按钮跟着恢复
   updateButtons();
   const e = cur();
   const a = e && e.analyzed;
@@ -83,12 +86,18 @@ function refreshTarget() {
     return info;
   }
   $("analyze").disabled = false;
-  if (a && info.doc && a.docId === info.doc.id && a.target === $("target").value && a.layerId === (info.layer ? info.layer.id : null)) {
+  const sameObject = a && info.doc && a.docId === info.doc.id && a.layerId === (info.layer ? info.layer.id : null);
+  if (sameObject && a.target === $("target").value) {
     const stale = isStale(a, info.doc);
-    st.className = stale ? "status warn" : "status ok";
-    st.textContent = stale
-      ? `文档在分析后有改动（不一定是这个图层），结果可能过期，可以再点一次「${analyzeLabel()}」`
-      : "已分析 · 下面的结果对应这个对象";
+    const changed = settingsChanged(e);
+    st.className = stale || changed ? "status warn" : "status ok";
+    st.textContent = changed
+      ? `设置改过了：下面的结果仍是按“${a.settingsText}”算的。要按新设置，请再点「${analyzeLabel()}」`
+      : (stale ? `文档在分析后有改动（不一定是这个图层），结果可能过期，可以再点一次「${analyzeLabel()}」`
+        : "已分析 · 下面的结果对应这个对象和设置");
+  } else if (sameObject) {
+    st.className = "status warn";
+    st.textContent = `下面的结果是按「${TARGET_NAME[a.target] || a.target}」分析的，现在选的是「${TARGET_NAME[$("target").value] || ""}」`;
   } else if (a) {
     st.className = "status";
     st.textContent = `下面的结果来自「${a.layerName}」（${a.docName}），不是当前选中的对象`;
@@ -97,6 +106,42 @@ function refreshTarget() {
     st.textContent = "只在点击按钮时分析";
   }
   return info;
+}
+
+const TARGET_NAME = { stack: "当前图层及以下的画面", layer: "只看当前图层", merged: "合并可见图层" };
+
+// 结果是按哪些设置算的：分析时记下，设置改了就提示（不能拿旧设置的结果当新设置的用）
+function settingsKey(sub) { return JSON.stringify(query(sub)); }
+function settingsChanged(e) {
+  return !!(e && e.analyzed && e.analyzed.settings != null && e.result && e.result.sub === state.sub
+    && e.analyzed.settings !== settingsKey(state.sub));
+}
+function optName(list, key, fallback) {
+  const it = (list || []).find((x) => x.key === key);
+  return it ? it.name : (key || fallback);
+}
+function settingsText(sub, q) {
+  const o = state.options || {};
+  if (sub === "style") {
+    const tone = q.tone_style ? `影调风格「${optName(o.tone_styles, q.tone_style)}」` : (q.tone_target ? `目标影调「${q.tone_target}」` : "不改影调");
+    return `${tone} · ${q.style ? `颜色「${optName(o.styles, q.style)}」` : "不改颜色"}`;
+  }
+  if (sub === "ratio") return q.family ? `统一色「${q.family}」` : "只看比例";
+  if (sub === "skin") return `肤色风格「${optName(o.presets, q.preset, "默认")}」 · ${q.part || "全部皮肤"} · ${q.seg === "color" ? "肤色规则" : "AI 分割"}`;
+  return "";
+}
+
+// 生成过的图层被撤销 / 删掉：不再算“已生成”。有变化时返回 true
+function pruneMade(e) {
+  if (!e || !e.analyzed || !e.made || !e.made.size) return false;
+  const doc = app.activeDocument;
+  if (!doc || doc.id !== e.analyzed.docId) return false;
+  let changed = false;
+  for (const id of [...e.made]) {
+    const ids = e.madeLayers && e.madeLayers[id];
+    if (!ids || !ids.every((lid) => ps.findLayer(doc, lid))) { e.made.delete(id); changed = true; }
+  }
+  return changed;
 }
 
 function isStale(a, doc) {
@@ -141,7 +186,8 @@ function toneStyleSelect(o) {
 function toneHint() {
   const el = $("toneHint");
   if (!el) return;
-  const o = state.options || {};
+  if (!state.options) { el.textContent = "影调风格列表还没加载出来（本机分析服务未启动）。启动 ColorDoctor 后会自动出现。"; return; }
+  const o = state.options;
   const v = $("toneStyle").value;
   let text;
   if (v.startsWith("s:")) {
@@ -153,11 +199,18 @@ function toneHint() {
   } else {
     text = "不改影调：只说明这张图现在是九种影调里的哪一种。想往某种影调走，在上面选一个影调风格。";
   }
+  // 只有结果属于现在选中的文档 / 图层时，才说“这张图要怎么改”
   const e = state.bySub.style;
+  const a = e && e.analyzed;
+  const info = state.lastInfo;
   const tone = e && e.result && e.result.tone;
-  if (tone && v.startsWith("s:")) {
+  const mine = tone && a && info && info.doc && a.docId === info.doc.id && a.target === $("target").value
+    && a.layerId === (info.layer ? info.layer.id : null);
+  if (mine && v.startsWith("s:")) {
     const s = (tone.suggestions || []).find((x) => x.key === v.slice(2));
     if (s) text += ` 这张图现在是${tone.name}：${s.change === "已经符合" ? "已经符合" : `要${s.change}（到${s.target}）`}。`;
+  } else if (mine && v.startsWith("t:") && tone.paths && tone.paths[v.slice(2)]) {
+    text += ` 这张图现在是${tone.name}：${tone.paths[v.slice(2)] === "已经是这种影调" ? "已经是这种影调" : `要${tone.paths[v.slice(2)]}`}。`;
   }
   el.textContent = text;
 }
@@ -165,6 +218,7 @@ function toneHint() {
 function colorHint() {
   const el = $("colorHint");
   if (!el) return;
+  if (!state.options) { el.textContent = "颜色模板列表还没加载出来（本机分析服务未启动）。"; return; }
   const o = state.options || {};
   const st = (o.styles || []).find((x) => x.key === $("style").value);
   const names = Object.fromEntries((o.tone_styles || []).map((t) => [t.key, t.name]));
@@ -189,10 +243,12 @@ function renderControls() {
     remember("style");
     $("toneStyle").addEventListener("change", toneHint);
     $("style").addEventListener("change", colorHint);
+    if (!state.options) { $("toneStyle").disabled = true; $("style").disabled = true; }
     toneHint();
     colorHint();
   } else if (state.sub === "ratio") {
     c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>
+      <div class="muted">影调风格和颜色模板在「影调与颜色」页选；这里只看比例和统一色。</div>
       <div class="muted">看主色 / 辅色 / 点缀色的面积是否接近 6:3:1；选一个色系时还会生成把杂色往它统一的调整图层。</div>`;
     remember("family");
   } else if (state.sub === "skin") {
@@ -303,8 +359,20 @@ async function runAnalyze() {
   // 开始时一次取定：页面、参数、参考图。分析过程中就算界面变化，也按点击时的设置算、结果归到这个页面
   const sub = state.sub;
   const mode = MODE_OF[sub];
-  if (!state.options) await loadOptions();
+  if (!state.options) {
+    // 先锁住界面再连服务：避免连点两次、或等待时切到别的页面
+    setBusy(true, "正在连接本机分析服务…");
+    await loadOptions();
+    setBusy(false);
+    if (state.options && ["style", "ratio", "skin"].includes(sub)) {
+      // 列表刚加载出来，会恢复上次的选择：先让用户看到再分析，而不是按用户没看到的设置直接算
+      $("status").className = "status warn";
+      $("status").textContent = `分析服务已连上，选项已加载（恢复了上次的选择）。请确认设置后再点「${analyzeLabel()}」。`;
+      return;
+    }
+  }
   const q = query(sub);
+  const settings = settingsKey(sub);
   if (sub === "style" && !state.options) {
     statusError(new Error("影调风格和颜色列表还没加载出来（分析服务未启动？），请先启动 ColorDoctor。"));
     return;
@@ -347,14 +415,16 @@ async function runAnalyze() {
         okHistory: new Set([historyBefore]), bounds: sb,
         docWidth: info.doc.width, docHeight: info.doc.height, depth: String(info.doc.bitsPerChannel || ""),
         refName: refFile ? refFile.name : (refDoc ? refDoc.name : null),
+        settings, settingsText: settingsText(sub, q),
       },
     };
   } catch (e) {
     // 失败：这个页面不再保留旧结果，避免用旧结果生成图层
     delete state.bySub[sub];
     setBusy(false);
+    serviceDown(e);
     if (state.sub === sub) renderError(e);
-    refreshTarget();
+    refreshTarget();  // 也会刷新影调说明（不再说“这张图现在是…”）
     return;
   }
   setBusy(false);
@@ -438,15 +508,22 @@ function updateButtons() {
   const busy = state.busy;
   const e = cur();
   const offDoc = e && e.analyzed && (!app.activeDocument || app.activeDocument.id !== e.analyzed.docId);
-  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc;
+  // 校正图层按 RGB 设计：CMYK / Lab / 灰度文档先说明，不要等点了才报错
+  const docMode = String((app.activeDocument && app.activeDocument.mode) || "");
+  const nonRgb = !!docMode && !/rgb/i.test(docMode);
+  const blockTitle = nonRgb ? "校正图层按 RGB 设计：请先把文档转换为 RGB（图像 → 模式 → RGB 颜色）" : "";
+  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb;
+  $("generateAll").title = blockTitle;
   if (e && hasLayers(e)) {
-    const left = e.result.plan.layers.filter((l) => !e.made.has(l.id)).length;
-    $("generateAll").textContent = left === 0 ? "全部已生成" : (e.made.size ? `生成其余 ${left} 层（带蒙版）` : "一键生成全部（带蒙版）");
-    if (left === 0) $("generateAll").disabled = true;
+    const rest = e.result.plan.layers.filter((l) => !e.made.has(l.id));
+    const mask = rest.some((l) => l.has_mask) ? "（带蒙版）" : "";
+    $("generateAll").textContent = rest.length === 0 ? "全部已生成" : (e.made.size ? `生成其余 ${rest.length} 层${mask}` : `一键生成全部${mask}`);
+    if (rest.length === 0) $("generateAll").disabled = true;
   } else {
-    $("generateAll").textContent = "一键生成全部（带蒙版）";
+    $("generateAll").textContent = "一键生成全部";
   }
-  document.querySelectorAll("[data-make],[data-make-all],[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc || b.dataset.done === "1"; });
+  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || b.dataset.done === "1"; b.title = blockTitle; });
+  document.querySelectorAll("[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc; });
   const acrOk = !busy && hasAcrSource();
   $("acrExport").disabled = !acrOk;
   $("acrLayer").disabled = !acrOk;
@@ -475,7 +552,8 @@ function resultHeader(e) {
   const a = e.analyzed;
   if (!a) return "";
   const ref = a.refName ? ` · 参考图「${esc(a.refName)}」` : "";
-  return `<div class="muted">结果：${esc(SUB_NAME[e.result.sub] || "")} · 「${esc(a.layerName)}」 · ${esc(a.docName)}${ref}</div>`;
+  const set = a.settingsText ? ` · ${esc(a.settingsText)}` : "";
+  return `<div class="muted">结果：${esc(SUB_NAME[e.result.sub] || "")} · 「${esc(a.layerName)}」 · ${esc(a.docName)}${ref}${set}</div>`;
 }
 
 function renderResult() {
@@ -491,7 +569,7 @@ function renderResult() {
   if (r.mode === "multipoint") return renderMultipoint(r);
   const cards = [resultHeader(e)];
   (r.notes || []).forEach((n) => cards.push(`<div class="muted">${esc(n)}</div>`));
-  if (r.tone) cards.push(toneGrid(r.tone));
+  if (r.tone && r.sub === "style") cards.push(toneGrid(r.tone));
   const layers = (r.plan && r.plan.layers) || [];
   const findings = r.findings || [];
   // 每张问题卡片里放修它的调整图层（layer.finding = 问题的序号）；没挂到问题上的放在最后“其他调整”
@@ -510,6 +588,7 @@ function renderResult() {
   };
   findings.forEach((f, i) => {
     const own = layers.filter((ly) => owner(ly) === i);
+    if (r.sub !== "style" && String(f.problem).startsWith("影调：") && !own.length) return;  // 比例页不管影调
     const tips = (f.adjustments || []).filter((x) => !x.layer);
     cards.push(`
     <div class="card problem">
@@ -567,7 +646,7 @@ function toneGrid(t) {
     <div class="title"><span>影调：${esc(t.name)}${t.near ? `（接近${esc(t.near)}）` : ""}</span>${t.target && t.target !== t.name ? `<span>→ ${esc(t.label)} ${esc(t.target)}</span>` : ""}</div>
     <div class="line">${esc(t.desc)}</div>
     ${grid}${hist}
-    <div class="muted">暗部 ${shares[0]} · 中间调 ${shares[1]} · 亮部 ${shares[2]}；跨度 ${Math.round(t.span)} 级（≥170 长调，&lt;90 短调）</div>
+    <div class="muted">暗部 ${shares[0]} · 中间调 ${shares[1]} · 亮部 ${shares[2]}；跨度 ${Math.round(t.span)} 级（≥${t.long_span || 170} 长调，&lt;${t.short_span || 90} 短调）</div>
     <div class="muted">各影调风格离现在多远：${esc(near)}</div>
   </div>`;
 }
@@ -641,14 +720,22 @@ async function generate(ids, single, findingIndex) {
     statusError(new Error(problem));
     return;
   }
+  if (settingsChanged(e)) {
+    // 设置在分析后改过：提醒一次；用户再点一次就按旧结果生成
+    const now = settingsKey(state.sub);
+    if (e.settingsAck !== now) {
+      e.settingsAck = now;
+      statusError(new Error(`设置在分析后改过了：这些图层仍是按“${a.settingsText}”算的。要按新设置请重新分析；确定用旧结果就再点一次生成。`));
+      return;
+    }
+  }
   const docMode = String((app.activeDocument && app.activeDocument.mode) || "");
   if (docMode && !/rgb/i.test(docMode)) {
     // 色彩平衡 / 自然饱和度等在 Lab、灰度里不可用，CMYK 里颜色范围和数值含义也不同
     statusError(new Error("校正图层按 RGB 设计：请先把文档转换为 RGB（图像 → 模式 → RGB 颜色），或在 RGB 副本上生成。"));
     return;
   }
-  // 撤销过的图层不算“已生成”
-  for (const id of [...e.made]) if (!e.madeLayers || !e.madeLayers[id] || !e.madeLayers[id].every((lid) => ps.findLayer(app.activeDocument, lid))) e.made.delete(id);
+  pruneMade(e);  // 撤销过的图层不算“已生成”
   // 一键生成只补还没生成的；单层按钮总是按用户的意思生成
   const todo = single ? ids : ids.filter((id) => !e.made.has(id));
   if (!todo.length) { statusError(new Error("全部已经生成过了。如需重新生成，请点各层的「再生成一次」。")); updateButtons(); return; }
@@ -691,6 +778,7 @@ async function generate(ids, single, findingIndex) {
     $("status").textContent = a.justMadeText;
   } catch (err) {
     setBusy(false);
+    serviceDown(err);
     statusError(err);
   }
 }
@@ -800,7 +888,11 @@ async function acrLayer() {
   const a = e && e.analyzed;
   let layerId = null;
   let layerName = "合并可见图层";
-  if (stack) {
+  if (stack && a && doc && a.docId === doc.id && a.target === "stack" && a.layerId != null && ps.findLayer(doc, a.layerId)) {
+    // 用分析过的那一层：一键生成后选中的是新调整图层，盖印它会把校正算两次
+    layerId = a.layerId;
+    layerName = `${a.layerName}及以下的画面`;
+  } else if (stack) {
     // 及以下的画面：在选中图层上方盖印“到这一层为止”的画面（上方图层临时隐藏），调整图层也可以
     const info = refreshTarget();
     if (!info.ok) { statusError(new Error(info.reason)); return; }
@@ -889,6 +981,14 @@ async function calibrate() {
 
 // ---------------------------------------------------------------- 启动
 // 服务可能在面板打开之后才启动：每次分析前没有选项就再试一次
+// 连不上本机服务（status 0）：右上角的服务状态跟着变红
+function serviceDown(err) {
+  if (err && err.status === 0) {
+    $("svc").className = "chip bad";
+    $("svc").textContent = "分析服务未启动";
+  }
+}
+
 async function loadOptions() {
   try {
     await bridge.health();
@@ -919,6 +1019,8 @@ async function init() {
   if (["stack", "layer", "merged"].includes(prefs.target)) $("target").value = prefs.target;
   $("target").addEventListener("change", () => { savePref("target", $("target").value); refreshTarget(); });
   $("analyze").addEventListener("click", runAnalyze);
+  // 改了影调风格 / 颜色 / 统一色 / 肤色设置：状态栏马上说明“结果是按旧设置算的”
+  $("controls").addEventListener("change", () => { if (!state.busy) refreshTarget(); });
   $("generateAll").addEventListener("click", () => {
     const e = cur();
     if (e && e.result && e.result.plan) generate(e.result.plan.layers.map((l) => l.id), false);

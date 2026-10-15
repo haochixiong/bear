@@ -521,7 +521,10 @@ class MainWindow(QMainWindow):
     def _load_settings(self):
         mode = str(self.settings.value("mode", "point"))
         self.set_mode(mode if mode in MODES else "point")
-        r = int(self.settings.value("radius", 2))
+        try:
+            r = int(self.settings.value("radius", 2))
+        except (TypeError, ValueError):  # 设置文件损坏时不能让程序起不来
+            r = 2
         idx = self.radius_box.findData(r)
         self.radius_box.setCurrentIndex(idx if idx >= 0 else 2)
         key = str(self.settings.value("preset", sp.DEFAULT_KEY))
@@ -642,10 +645,18 @@ class MainWindow(QMainWindow):
             text = "不改影调：只说明这张图现在是哪种影调。想往某种影调走，在「影调风格」里选（鼠标停在选项上有说明）。"
         cur = self._current
         rep = cur.result if cur is not None else None
-        if isinstance(rep, AnalysisReport) and rep.mode == "palette" and rep.palette is not None and rep.palette.tone_class is not None:
-            now = rep.palette.tone_class.name
-            goal = tcl.pick_goal(now, *tcl.resolve_target(st, tt)[:2])
-            text += f"这张图现在是{now}" + (f"，要{tcl.path_words(now, goal)}。" if goal and goal != now else "。")
+        if (isinstance(rep, AnalysisReport) and rep.mode == "palette" and rep.palette is not None
+                and rep.palette.tone_class is not None and cur is not self.ref_image_item):
+            p = rep.palette
+            now = p.tone_class.name
+            if self.session.report_choice(rep) != self.session.palette_choice():
+                # 显示的是按别的选择算的结果（例如从历史里打开的旧结果）：不拿现在的选择去描述它
+                tone = p.tone_label or "不改影调"
+                color = p.style.name if p.style else "不改颜色"
+                text += f"下面这条结果是按「{tone} · {color}」算的，和现在的选择不同；改一下选择就会按新选择重算。"
+            else:
+                goal = tcl.pick_goal(now, *tcl.resolve_target(st, tt)[:2])
+                text += f"这张图现在是{now}" + (f"，要{tcl.path_words(now, goal)}。" if goal and goal != now else "。")
         self.tone_hint.setText(text)
 
     def _toggle_ai_seg(self, v: bool):
@@ -1021,7 +1032,7 @@ class MainWindow(QMainWindow):
             if step == 0 or self.ref_image_item is None:
                 self._ref_busy = True
                 self.statusBar().showMessage("正在分析参考作品……")
-                self._start(self.session.compute_rect, region, ctx, rect, "palette",
+                self._start(self.session.compute_rect, region, ctx, rect, "palette", plain=True,
                             on_done=lambda rep: self._ref_image_done(region, rect, rep, label))
             else:
                 self.statusBar().showMessage("正在对比……")
@@ -1105,13 +1116,22 @@ class MainWindow(QMainWindow):
 
     def _rect_done(self, region, rect, rep, label, role=None, replace=None, lasso=None):
         was_ref = replace is not None and replace is self.session.reference
+        pos = None
         if replace is not None:
+            pos = next((i for i, h in enumerate(self.session.history) if h.id == replace.id), None)
             self.session.remove(replace.id)
         item = self.session.add_rect(region, rect, rep, label, role=role)
+        if pos is not None:  # 按新设置重算：留在原来的位置，不跳到历史最上面
+            self.session.history.remove(item)
+            self.session.history.insert(pos, item)
         item.lasso = lasso
         if was_ref:
             self.session.set_reference(item)  # 替换的是参考区：新结果继续作为参考区
         self._after_add(item)
+        # 计算过程中改了影调风格 / 颜色 / 统一色：结果是按旧选择算的，马上按现在的选择再算一次
+        choice = self.session.report_choice(rep)
+        if choice is not None and choice != self.session.palette_choice() and item is self._current:
+            self._rerun(item, "palette")
         sev = rep.overall_severity.value
         self.statusBar().showMessage(f"分析完成：{sev}（风险 {rep.overall_risk:.0f}，置信度 {rep.confidence:.2f}）", 8000)
 

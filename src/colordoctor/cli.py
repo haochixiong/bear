@@ -25,6 +25,7 @@ from colordoctor.core import report_json as rj
 from colordoctor.core import skin_presets as sp
 from colordoctor.core import tone_class as tcl
 from colordoctor.core.color_management import ImageLoadError, load_image
+from colordoctor.core.color_spaces import HUE_SECTORS
 from colordoctor.core.sampling import SampleError, crop
 
 MODES = ("general", "scan", "skin", "palette", "reference", "point")
@@ -46,7 +47,16 @@ def _text(report) -> str:
             f"{v.hex}  RGB {v.rgb}  HSB {tuple(round(x) for x in v.hsb)}  "
             f"Lab(D50) {tuple(round(x, 1) for x in v.lab)}  LCh {tuple(round(x, 1) for x in v.lch)}"
         )
-    lines = [f"[{report.mode}] 脏色风险 {report.overall_risk:.0f}/100（{report.overall_severity.value}），置信度 {report.confidence:.2f}"]
+    if report.mode == "palette" and report.palette is not None:
+        p = report.palette
+        head = [f"影调 {p.tone_class.name}" + (f" → {p.tone_target}" if p.tone_target and p.tone_target != p.tone_class.name else "")
+                if p.tone_class is not None else ""]
+        if p.style is not None:
+            head.append(f"颜色「{p.style.name}」匹配度 {p.style.score:.0f}/100")
+        head += [f"6:3:1 {p.ratio.score:.0f}", f"丰富度 {p.colorfulness.value:.0f}（{p.colorfulness.label}）"]
+        lines = [f"[整图色彩] {'；'.join(h for h in head if h)}，置信度 {report.confidence:.2f}"]
+    else:
+        lines = [f"[{report.mode}] 脏色风险 {report.overall_risk:.0f}/100（{report.overall_severity.value}），置信度 {report.confidence:.2f}"]
     for f in report.findings:
         lines.append(f"- [{f.severity.value}] {f.problem}")
         for e in f.evidence[:5]:
@@ -68,11 +78,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--rect", type=lambda t: _ints(t, 4), help="x,y,w,h（像素）；默认整张图")
     a.add_argument("--point", type=lambda t: _ints(t, 2), help="x,y（point 模式）")
     a.add_argument("--size", type=int, default=5, help="取样大小 N（N×N 平均，奇数），默认 5")
-    a.add_argument("--preset", help="肤色风格 key，例如 japanese / french / deep")
+    a.add_argument("--preset", choices=[pr.key for pr in sp.load_presets()], metavar="PRESET",
+                   help="肤色风格 key，例如 japanese / french / deep；见 colordoctor presets")
     a.add_argument("--part", help="肤色部位名称，例如 脸部 / 身体")
     a.add_argument("--no-auto-mask", action="store_true", help="不自动抠皮肤")
-    a.add_argument("--style", help="整图颜色模板 key（只管颜色），例如 teal_orange / black_gold / pink_blue")
-    a.add_argument("--family", help="检查哪种颜色是否统一：红/橙/黄/绿/青/蓝/紫/品红")
+    a.add_argument("--style", choices=[s["key"] for s in pl.load_styles()], metavar="STYLE",
+                   help="整图颜色模板 key（只管颜色，palette 模式），例如 teal_orange / black_gold / pink_blue；见 colordoctor styles")
+    a.add_argument("--family", choices=[name for name, _, _ in HUE_SECTORS], metavar="FAMILY",
+                   help="检查哪种颜色是否统一（palette 模式）：" + " / ".join(name for name, _, _ in HUE_SECTORS))
     a.add_argument("--tone-style", default="", choices=("", *tcl.TONE_STYLES),
                    help="影调风格（只管明暗和反差，和颜色模板互不绑定），例如 japanese / moody / film；见 colordoctor tones")
     a.add_argument("--tone-target", default="", choices=("", *tcl.TONE_NAMES),
@@ -112,6 +125,10 @@ def run(argv: list[str]) -> int:
         for s in pl.load_styles():
             print(f"{s['key']:22s} [{s.get('category', '')}] {s['name']}  {s['description']}")
         return 0
+    palette_only = [f"--{n.replace('_', '-')}" for n in ("style", "family", "tone_style", "tone_target") if getattr(args, n)]
+    if palette_only and args.mode != "palette":
+        print(f"错误：{'、'.join(palette_only)} 只用于整图色彩，请加 --mode palette", file=sys.stderr)
+        return 2
     try:
         src = load_image(args.image, use_raw_preview=args.raw_preview)
         img = src.pixels

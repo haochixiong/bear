@@ -273,3 +273,45 @@ def test_capture_multi_point_drag_counts_as_point(qtbot):
     qtbot.mouseMove(v, b)
     qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, pos=b)
     assert s.points == 2 and not done and s.overlays  # 拖框算一个点，会话继续
+
+
+def _pick_tone(win, data):
+    win.tone_style_box.setCurrentIndex(win.tone_style_box.findData(data))
+
+
+def test_reference_artwork_is_not_analysed_with_the_hidden_tone_style(win, qtbot):
+    """仿色的参考作品不是要改的图：不套用整图色彩页里选的影调风格 / 颜色（那一行在仿色模式下是隐藏的）。"""
+    win.set_mode("palette")
+    _pick_tone(win, "s:moody")
+    win.style_box.setCurrentIndex(win.style_box.findData("teal_orange"))
+    win.set_mode("reference")
+    win._run_rect(face_scene()[0], (0, 0, 200, 200), CTX, "参考", 0)
+    qtbot.waitUntil(lambda: win.ref_image_item is not None, timeout=15000)
+    p = win.ref_image_item.result.palette
+    assert p.tone_target == "" and p.style is None
+
+
+def test_rerun_keeps_history_position_and_hint_describes_the_shown_result(win, qtbot):
+    win.set_mode("palette")
+    img = noisy(flat(BLUE), 2)
+    win._run_rect(img, (0, 0, 160, 120), CTX, "a", 0)
+    _wait_items(qtbot, win, 1)
+    win._run_rect(face_scene()[0], (0, 0, 200, 200), CTX, "b", 0)
+    _wait_items(qtbot, win, 2)
+    older = win.session.history[1]
+    win._show_item(older)
+    _pick_tone(win, "s:japanese")  # 改选择：重算正在看的这一条
+    qtbot.waitUntil(lambda: win.session.history[1].result.palette.tone_choice == "s:japanese", timeout=15000)
+    assert win.session.history[1].label == older.label  # 留在原来的位置，不跳到最上面
+    # 打开另一条按旧选择算的结果：说明它是按什么算的，而不是拿现在的选择去描述它
+    win._show_item(win.session.history[0])
+    assert "和现在的选择不同" in win.tone_hint.text()
+
+
+def test_corrupt_radius_setting_does_not_stop_startup(qtbot, tmp_path):
+    s = QSettings(str(tmp_path / "bad.ini"), QSettings.Format.IniFormat)
+    s.setValue("radius", "abc")
+    s.sync()
+    w = MainWindow(settings=QSettings(str(tmp_path / "bad.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(w)
+    assert w.radius_box.currentIndex() >= 0
