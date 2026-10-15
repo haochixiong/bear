@@ -3,10 +3,12 @@
 示例：
   colordoctor analyze photo.jpg --mode skin --rect 820,400,300,260 --preset japanese --json
   colordoctor analyze photo.jpg --mode palette --style teal_orange --family 绿
+  colordoctor analyze photo.jpg --mode palette --tone-style japanese --style japanese_fresh
   colordoctor analyze photo.jpg --mode reference --reference ref.jpg
   colordoctor analyze photo.jpg --mode point --point 1200,800 --size 5
   colordoctor presets      列出肤色风格
-  colordoctor styles       列出整图风格模板
+  colordoctor styles       列出整图颜色模板
+  colordoctor tones        列出影调风格（预制的目标影调）和九种影调
 
 只读取图片，不修改原图；不联网。
 """
@@ -21,6 +23,7 @@ from colordoctor.core import analysis as an
 from colordoctor.core import palette as pl
 from colordoctor.core import report_json as rj
 from colordoctor.core import skin_presets as sp
+from colordoctor.core import tone_class as tcl
 from colordoctor.core.color_management import ImageLoadError, load_image
 from colordoctor.core.sampling import SampleError, crop
 
@@ -68,16 +71,19 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--preset", help="肤色风格 key，例如 japanese / french / deep")
     a.add_argument("--part", help="肤色部位名称，例如 脸部 / 身体")
     a.add_argument("--no-auto-mask", action="store_true", help="不自动抠皮肤")
-    a.add_argument("--style", help="整图风格模板 key，例如 teal_orange / black_gold / pink_blue")
+    a.add_argument("--style", help="整图颜色模板 key（只管颜色），例如 teal_orange / black_gold / pink_blue")
     a.add_argument("--family", help="检查哪种颜色是否统一：红/橙/黄/绿/青/蓝/紫/品红")
-    a.add_argument("--tone", choices=("auto", "low", "normal", "high"), default="auto",
-                   help="影调：auto 自动判断 / low 刻意暗调 / normal 正常曝光（暗了就按欠曝修正）/ high 刻意高调")
+    a.add_argument("--tone-style", default="", choices=("", *tcl.TONE_STYLES),
+                   help="影调风格（只管明暗和反差，和颜色模板互不绑定），例如 japanese / moody / film；见 colordoctor tones")
+    a.add_argument("--tone-target", default="", choices=("", *tcl.TONE_NAMES),
+                   help="直接指定目标影调（九种之一，例如 高中调），优先于 --tone-style")
     a.add_argument("--reference", help="仿色参考图（reference 模式）")
     a.add_argument("--json", action="store_true", help="输出完整 JSON")
     a.add_argument("--raw-preview", action="store_true", help="RAW 文件改用内嵌的 JPG 预览（相机直出的颜色）")
     a.add_argument("--summary", action="store_true", help="输出精简 JSON 摘要（适合给 AI）")
     sub.add_parser("presets", help="列出肤色风格")
-    sub.add_parser("styles", help="列出整图风格模板")
+    sub.add_parser("styles", help="列出整图颜色模板")
+    sub.add_parser("tones", help="列出影调风格和九种影调")
     sv = sub.add_parser("serve", help="启动给 Photoshop 插件用的本机服务（只监听 127.0.0.1）")
     sv.add_argument("--port", type=int, default=47321)
     return p
@@ -93,6 +99,14 @@ def run(argv: list[str]) -> int:
         from colordoctor.bridge.server import serve
 
         serve(args.port)
+        return 0
+    if args.cmd == "tones":
+        for k, s in tcl.TONE_STYLES.items():
+            also = f"（也可以是{'、'.join(s['also'])}）" if s["also"] else ""
+            print(f"{k:10s} {s['name']}：目标 {s['target']}{also}。{s['look']}；常用于{s['scene']}")
+        print()
+        for n in tcl.TONE_NAMES:
+            print(f"{n}：{tcl.TONE_DESC[n]}")
         return 0
     if args.cmd == "styles":
         for s in pl.load_styles():
@@ -115,7 +129,7 @@ def run(argv: list[str]) -> int:
             report = an.scan_image(region, ctx, rect=rect)
         elif args.mode == "palette":
             report = an.analyze_palette_report(region, ctx, style_key=args.style, family=args.family, rect=rect,
-                                               tone_intent=getattr(args, "tone", "auto"))
+                                               tone_style=args.tone_style, tone_target=args.tone_target)
         elif args.mode == "reference":
             if not args.reference:
                 raise SampleError("reference 模式需要 --reference 参考图.jpg")

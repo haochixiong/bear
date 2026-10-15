@@ -1,5 +1,5 @@
 {
- "_comment": "整图风格模板。sectors 的 hue 是 CIE Lab(D50) 色相角（度），可跨 0°（如 [345, 30]）。channel_targets 说明每个 Camera Raw 混色器通道应该怎么处理：toward:<区段名> 往该区段移动色相，desat 降饱和，darken 压暗，keep 保持。colorfulness 为 Hasler-Süsstrunk 色彩丰富度目标范围。shadow_tint / highlight_tint 为阴影/高光的目标色调（Lab 色相角范围与色度范围）。recipe 是常见做法，数值仅为起点。 category 为分组（色彩风格 / 富士胶片 / 柯达胶片）。black_point_min：黑场抬起的下限（P5 明度 ≥）；contrast：亮暗差 P95−P5 明度的目标范围。胶片类模板是根据公开评测与厂商描述整理的“观感近似”，不是厂商算法；basis 记录依据，数值是起点，需要按自己的图校准。 mood 为 \"dark\" 的是暗调/情绪类风格：暗调画面分析时提示保持暗部、不要提亮。",
+ "_comment": "整图颜色模板（只管颜色，不管明暗）。sectors 的 hue 是 CIE Lab(D50) 色相角（度），可跨 0°（如 [345, 30]）。channel_targets 说明每个 Camera Raw 混色器通道应该怎么处理：toward:<区段名> 往该区段移动色相，desat 降饱和，darken 压暗，keep 保持。colorfulness 为 Hasler-Süsstrunk 色彩丰富度目标范围。shadow_tint / highlight_tint 为阴影/高光的目标色调（Lab 色相角范围与色度范围）。recipe 是常见做法，数值仅为起点。 category 为分组（色彩风格 / 富士胶片 / 柯达胶片）。明暗、反差、黑位属于影调，由「影调风格」（core/tone_class.py 的 TONE_STYLES）单独决定；tone_pair 只是“常见搭配”的影调风格提示，不绑定。胶片类模板是根据公开评测与厂商描述整理的“观感近似”，不是厂商算法；basis 记录依据，数值是起点，需要按自己的图校准。",
  "styles": [
   {
    "key": "teal_orange",
@@ -79,13 +79,16 @@
     "深肤色做青橙时最容易失去暖意：用蒙版保护皮肤",
     "青色不要压进皮肤阴影，否则脸会发脏"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "cinematic",
+    "hongkong"
+   ]
   },
   {
    "key": "black_gold",
    "name": "黑金",
    "description": "暖色全部统一成金色，其余颜色降到接近黑灰；暗部压暗，金色提亮。",
-   "mood": "dark",
    "sectors": [
     {
      "name": "金",
@@ -99,7 +102,6 @@
     18,
     55
    ],
-   "black_point_max": 14,
    "shadow_tint": {
     "hue": [
      0,
@@ -151,7 +153,11 @@
     "先处理冷色再处理暖色，不要把所有滑块拉到底",
     "夜景城市最适合；人像使用时注意肤色不要变成蜡黄"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "moody",
+    "hongkong"
+   ]
   },
   {
    "key": "pink_blue",
@@ -230,7 +236,11 @@
    "notes": [
     "肤色可以略偏粉，但 a* 不要远大于 b*（会发紫）"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "korean",
+    "japanese"
+   ]
   },
   {
    "key": "morandi",
@@ -265,7 +275,11 @@
    "notes": [
     "低饱和≠脏：色相仍要干净，肤色不要发灰发青"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "film",
+    "french"
+   ]
   },
   {
    "key": "japanese_fresh",
@@ -298,7 +312,6 @@
     15,
     40
    ],
-   "min_median_L": 60,
    "shadow_tint": {
     "hue": [
      190,
@@ -334,7 +347,11 @@
    "notes": [
     "曝光偏亮但高光不要溢出"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "japanese",
+    "korean"
+   ]
   },
   {
    "key": "film_warm",
@@ -413,7 +430,11 @@
    "notes": [
     "暖调不等于把肤色变黄：肤色仍以 a*、b* 接近为好"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "film",
+    "french"
+   ]
   },
   {
    "key": "forest",
@@ -461,7 +482,11 @@
    "notes": [
     "树叶的高光和阴影要统一成同一种绿"
    ],
-   "category": "色彩风格"
+   "category": "色彩风格",
+   "tone_pair": [
+    "forest",
+    "japanese"
+   ]
   },
   {
    "key": "french",
@@ -487,11 +512,6 @@
    "colorfulness": [
     15,
     40
-   ],
-   "black_point_min": 6,
-   "contrast": [
-    55,
-    80
    ],
    "highlight_tint": {
     "hue": [
@@ -541,6 +561,10 @@
    ],
    "basis": [
     "常见描述：暖色调、复古、低对比、柔光"
+   ],
+   "tone_pair": [
+    "french",
+    "film"
    ]
   },
   {
@@ -552,10 +576,6 @@
    "colorfulness": [
     28,
     60
-   ],
-   "contrast": [
-    68,
-    92
    ],
    "channel_targets": {
     "红色": "keep",
@@ -577,6 +597,10 @@
    ],
    "basis": [
     "富士官方：基于 Provia 反转片，偏中性，适合所有题材"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -589,11 +613,6 @@
     55,
     110
    ],
-   "contrast": [
-    80,
-    98
-   ],
-   "black_point_max": 10,
    "channel_targets": {
     "红色": "keep",
     "橙色": "keep",
@@ -621,6 +640,9 @@
    ],
    "basis": [
     "富士官方：Velvia 50 反转片，色彩更浓、对比更高，常用于风光"
+   ],
+   "tone_pair": [
+    "cinematic"
    ]
   },
   {
@@ -632,10 +654,6 @@
    "colorfulness": [
     30,
     62
-   ],
-   "contrast": [
-    60,
-    85
    ],
    "channel_targets": {
     "红色": "keep",
@@ -661,6 +679,10 @@
    ],
    "basis": [
     "富士官方：优先柔和真实的肤色，同时保留鲜明的蓝天和绿色"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -668,17 +690,11 @@
    "name": "富士 · Classic Chrome",
    "category": "富士胶片",
    "description": "低饱和、偏冷的纪实感，暗部过渡偏硬，红色偏深、绿色和黄色收敛。",
-   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     14,
     38
    ],
-   "contrast": [
-    72,
-    95
-   ],
-   "black_point_max": 12,
    "shadow_tint": {
     "hue": [
      180,
@@ -720,6 +736,10 @@
    ],
    "basis": [
     "评测：低饱和、纪实感，暗部影调硬；比 Provia / Velvia / Astia 更冷、更淡"
+   ],
+   "tone_pair": [
+    "cinematic",
+    "hongkong"
    ]
   },
   {
@@ -746,10 +766,6 @@
    "colorfulness": [
     20,
     46
-   ],
-   "contrast": [
-    75,
-    96
    ],
    "shadow_tint": {
     "hue": [
@@ -789,6 +805,9 @@
    ],
    "basis": [
     "评测：仿 Superia 负片；绿色偏冷（偏蓝），亮部和暗部对比都高"
+   ],
+   "tone_pair": [
+    "cinematic"
    ]
   },
   {
@@ -800,10 +819,6 @@
    "colorfulness": [
     18,
     42
-   ],
-   "contrast": [
-    55,
-    78
    ],
    "channel_targets": {
     "红色": "keep",
@@ -828,6 +843,10 @@
    ],
    "basis": [
     "富士官方：Std 与 Hi 的区别只在影调曲线，Hi 亮暗更紧"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -835,17 +854,11 @@
    "name": "富士 · Eterna 电影",
    "category": "富士胶片",
    "description": "电影负片感：低对比、低饱和，暗部和高光都留有层次，适合人物与叙事画面。",
-   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     10,
     30
    ],
-   "contrast": [
-    45,
-    72
-   ],
-   "black_point_min": 5,
    "shadow_tint": {
     "hue": [
      170,
@@ -882,6 +895,10 @@
    ],
    "basis": [
     "富士官方：基于 Eterna 电影胶片；评测：低饱和、低对比"
+   ],
+   "tone_pair": [
+    "film",
+    "hongkong"
    ]
   },
   {
@@ -889,17 +906,11 @@
    "name": "富士 · Eterna 漂白",
    "category": "富士胶片",
    "description": "漂白效果：大幅去饱和，对比很硬，有金属感。",
-   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     4,
     22
    ],
-   "contrast": [
-    80,
-    98
-   ],
-   "black_point_max": 10,
    "channel_targets": {
     "红色": "desat",
     "橙色": "desat",
@@ -923,6 +934,10 @@
    ],
    "basis": [
     "评测：去饱和、对比硬"
+   ],
+   "tone_pair": [
+    "cinematic",
+    "hongkong"
    ]
   },
   {
@@ -930,7 +945,6 @@
    "name": "富士 · Nostalgic Neg",
    "category": "富士胶片",
    "description": "1970 年代美国新彩色摄影的印象：高光琥珀色，暗部浓重，绿色偏暖（往黄）。",
-   "mood": "dark",
    "sectors": [
     {
      "name": "琥珀",
@@ -950,10 +964,6 @@
    "colorfulness": [
     22,
     48
-   ],
-   "contrast": [
-    62,
-    88
    ],
    "highlight_tint": {
     "hue": [
@@ -992,6 +1002,10 @@
    ],
    "basis": [
     "评测：高光琥珀色、暗部浓重，灵感来自 Eggleston / Shore 等的新彩色摄影；绿色偏暖、偏黄"
+   ],
+   "tone_pair": [
+    "film",
+    "hongkong"
    ]
   },
   {
@@ -1003,10 +1017,6 @@
    "colorfulness": [
     26,
     55
-   ],
-   "contrast": [
-    60,
-    85
    ],
    "channel_targets": {
     "红色": "keep",
@@ -1028,6 +1038,10 @@
    ],
    "basis": [
     "评测：色彩真实自然、对比柔和"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -1039,10 +1053,6 @@
    "colorfulness": [
     0,
     4
-   ],
-   "contrast": [
-    70,
-    95
    ],
    "channel_targets": {
     "红色": "desat",
@@ -1071,6 +1081,10 @@
    ],
    "basis": [
     "富士官方：Acros 黑白胶片"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -1091,11 +1105,6 @@
     16,
     40
    ],
-   "contrast": [
-    55,
-    78
-   ],
-   "black_point_min": 5,
    "channel_targets": {
     "红色": "keep",
     "橙色": "keep",
@@ -1122,6 +1131,10 @@
    ],
    "basis": [
     "评测：自然肤色、细颗粒，适合影棚"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -1156,11 +1169,6 @@
     18,
     42
    ],
-   "contrast": [
-    55,
-    78
-   ],
-   "black_point_min": 6,
    "highlight_tint": {
     "hue": [
      40,
@@ -1203,6 +1211,10 @@
    ],
    "basis": [
     "评测：柔和对比、奶油肤色、克制饱和、黑场轻抬、轻微洋红；常见 HSL 思路：绿偏黄、蓝偏青"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -1223,11 +1235,6 @@
     22,
     50
    ],
-   "contrast": [
-    58,
-    82
-   ],
-   "black_point_min": 5,
    "highlight_tint": {
     "hue": [
      45,
@@ -1261,6 +1268,10 @@
    ],
    "basis": [
     "评测：Portra 160/400/800 色彩相近，各有细微差别"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -1273,11 +1284,6 @@
     50,
     100
    ],
-   "contrast": [
-    78,
-    96
-   ],
-   "black_point_max": 10,
    "channel_targets": {
     "红色": "keep",
     "橙色": "keep",
@@ -1304,6 +1310,9 @@
    ],
    "basis": [
     "评测：饱和、细颗粒、高对比，观感接近反转片"
+   ],
+   "tone_pair": [
+    "cinematic"
    ]
   },
   {
@@ -1323,10 +1332,6 @@
    "colorfulness": [
     28,
     58
-   ],
-   "contrast": [
-    62,
-    88
    ],
    "highlight_tint": {
     "hue": [
@@ -1364,6 +1369,10 @@
    ],
    "basis": [
     "评测：暖色调、细颗粒，常作 Portra 400 的平价替代；宽容度有限，暗部易丢"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   },
   {
@@ -1375,10 +1384,6 @@
    "colorfulness": [
     40,
     76
-   ],
-   "contrast": [
-    72,
-    92
    ],
    "channel_targets": {
     "红色": "keep",
@@ -1403,6 +1408,9 @@
    ],
    "basis": [
     "评测：色彩鲜艳有冲击力，比 Gold 更中性、对比更高、颗粒更粗"
+   ],
+   "tone_pair": [
+    "cinematic"
    ]
   },
   {
@@ -1415,11 +1423,6 @@
     32,
     68
    ],
-   "contrast": [
-    72,
-    92
-   ],
-   "black_point_max": 11,
    "shadow_tint": {
     "hue": [
      200,
@@ -1456,6 +1459,9 @@
    ],
    "basis": [
     "评测：中等对比，色彩比旧式高饱和反转片更克制"
+   ],
+   "tone_pair": [
+    "cinematic"
    ]
   },
   {
@@ -1463,17 +1469,11 @@
    "name": "柯达 · Kodachrome 64",
    "category": "柯达胶片",
    "description": "经典反转片印象：浓郁的红与黄，对比丰富，暗部厚重。",
-   "mood": "dark",
    "sectors": [],
    "colorfulness": [
     40,
     82
    ],
-   "contrast": [
-    78,
-    96
-   ],
-   "black_point_max": 9,
    "channel_targets": {
     "红色": "keep",
     "橙色": "keep",
@@ -1498,6 +1498,10 @@
    ],
    "basis": [
     "常见印象：深红、浓郁、对比高；无实测依据"
+   ],
+   "tone_pair": [
+    "cinematic",
+    "hongkong"
    ]
   },
   {
@@ -1510,11 +1514,6 @@
     22,
     46
    ],
-   "contrast": [
-    60,
-    84
-   ],
-   "black_point_min": 4,
    "highlight_tint": {
     "hue": [
      55,
@@ -1548,6 +1547,10 @@
    ],
    "basis": [
     "评测：入门级彩色负片，非专业级色彩"
+   ],
+   "tone_pair": [
+    "film",
+    "french"
    ]
   }
  ]

@@ -95,6 +95,10 @@ def summary(report) -> dict:
             "主辅点缀": [[c.family, c.share] for c in p.ratio.roles],
             "影调L分位": list(p.tone),
         }
+        if p.tone_class is not None:
+            out["整图色彩"]["影调"] = p.tone_class.name
+            if p.tone_target:
+                out["整图色彩"]["目标影调"] = [p.tone_label, p.tone_target]
     if report.reference is not None:
         out["仿色"] = {"相似度": report.reference.similarity, "合适性": list(report.reference.fit)}
     out["色彩管理"] = {

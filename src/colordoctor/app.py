@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     if "--selftest" in argv:
         return selftest()
-    if len(argv) > 1 and (argv[1] in ("analyze", "presets", "styles", "serve") or argv[1].startswith("-")):
+    if len(argv) > 1 and (argv[1] in ("analyze", "presets", "styles", "tones", "serve") or argv[1].startswith("-")):
         from colordoctor.cli import run
 
         return run(argv[1:])

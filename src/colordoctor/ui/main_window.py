@@ -48,6 +48,7 @@ from colordoctor.ui.report_html import point_html, report_html
 from colordoctor.ui.result_view import ResultView
 from colordoctor.ui.selection_widget import ImageSelectWidget
 from colordoctor.ui.session import MODES, RADIUS_CHOICES, HistoryItem, Session, crop_selection, point_patch_from
+from colordoctor.ui.theme import TEXT_DIM
 from colordoctor.ui.worker import run_in_background
 
 MIN_SIDE = 8  # 区域分析的最小边长（像素）；更小的选区统计没有意义，有的计算也会出错
@@ -249,6 +250,7 @@ class MainWindow(QMainWindow):
 
         self._build()
         self._load_settings()
+        self._palette_option_changed()  # 恢复的选择同步到分析参数，并显示影调风格说明
         self.hotkeys = hk.make_manager(self)
         self.hotkeys.triggered.connect(self._on_hotkey)
         self._register_hotkeys()
@@ -371,10 +373,25 @@ class MainWindow(QMainWindow):
         self.palette_row = QWidget()
         r = QHBoxLayout(self.palette_row)
         r.setContentsMargins(0, 0, 0, 0)
-        self.style_box = QComboBox()
-        self.style_box.addItem("（不比较风格）", None)
         from colordoctor.core import palette as pl
+        from colordoctor.core import tone_class as tcl
 
+        # 影调风格（只管明暗和反差）和颜色（只管颜色）互相独立：港风可以配青橙，也可以配黑金
+        self.tone_style_box = QComboBox()
+        self.tone_style_box.addItem("（不改影调，只看）", "")
+        for k, ts in tcl.TONE_STYLES.items():
+            self.tone_style_box.addItem(f"{ts['name']} · {ts['target']}", f"s:{k}")
+            self.tone_style_box.setItemData(self.tone_style_box.count() - 1, f"{ts['look']}\n常用于：{ts['scene']}",
+                                            Qt.ItemDataRole.ToolTipRole)
+        self.tone_style_box.insertSeparator(self.tone_style_box.count())
+        for n in tcl.TONE_NAMES:
+            self.tone_style_box.addItem(f"直接选：{n}", f"t:{n}")
+            self.tone_style_box.setItemData(self.tone_style_box.count() - 1, tcl.TONE_DESC[n], Qt.ItemDataRole.ToolTipRole)
+        self.tone_style_box.setToolTip("影调风格 = 预制的目标影调（明暗和反差往哪里走），和颜色互不绑定。\n"
+                                       "不选时只说明这张图现在是九种影调里的哪一种，不改明暗")
+        self.tone_style_box.currentIndexChanged.connect(self._palette_option_changed)
+        self.style_box = QComboBox()
+        self.style_box.addItem("（不改颜色）", None)
         last_cat = None
         for st in pl.load_styles():
             cat = st.get("category", "")
@@ -382,7 +399,10 @@ class MainWindow(QMainWindow):
                 self.style_box.insertSeparator(self.style_box.count())
                 last_cat = cat
             self.style_box.addItem(st["name"], st["key"])
-            self.style_box.setItemData(self.style_box.count() - 1, f"{cat}：{st['description']}", Qt.ItemDataRole.ToolTipRole)
+            pair = "、".join(tcl.TONE_STYLES[k]["name"] for k in st.get("tone_pair", ()) if k in tcl.TONE_STYLES)
+            self.style_box.setItemData(self.style_box.count() - 1,
+                                       f"{cat}：{st['description']}" + (f"\n常配影调风格：{pair}（只是常见搭配，可以随意换）" if pair else ""),
+                                       Qt.ItemDataRole.ToolTipRole)
         self.style_box.currentIndexChanged.connect(self._palette_option_changed)
         self.family_box = QComboBox()
         self.family_box.addItem("（不检查）", None)
@@ -390,20 +410,15 @@ class MainWindow(QMainWindow):
             self.family_box.addItem(f"统一：{fam}", fam)
         self.family_box.setToolTip("检查画面里某一种颜色（例如所有绿色）是不是同一种")
         self.family_box.currentIndexChanged.connect(self._palette_option_changed)
-        from colordoctor.core.exposure import TONE_INTENTS
-
-        self.tone_box = QComboBox()
-        for k, name in TONE_INTENTS.items():
-            self.tone_box.addItem(name, k)
-        self.tone_box.setToolTip(
-            "画面很暗 / 很亮时怎么处理：\n"
-            "自动判断：不替你判断拍摄意图，先不提亮、不压暗；说明卡列出主体（皮肤）亮度、明暗分布等线索供你判断\n"
-            "刻意暗调 / 刻意高调：情绪人像、日系高调等，保持基调\n"
-            "正常曝光：暗了就是欠曝、亮了就是过曝，给出带曲线的修正")
-        self.tone_box.currentIndexChanged.connect(self._palette_option_changed)
-        for wdg in (QLabel("风格模板"), self.style_box, QLabel("统一色"), self.family_box, QLabel("影调"), self.tone_box):
+        for wdg in (QLabel("影调风格"), self.tone_style_box, QLabel("颜色"), self.style_box, QLabel("统一色"), self.family_box):
             r.addWidget(wdg)
         lay.addWidget(self.palette_row)
+        # 影调风格的说明（不熟悉“日系”“港风”指什么的人看这里）
+        self.tone_hint = QLabel()
+        self.tone_hint.setWordWrap(True)
+        self.tone_hint.setStyleSheet(f"color: {TEXT_DIM};")
+        lay.addWidget(self.tone_hint)
+
         # 仿色：更换参考作品
         self.ref_row = QWidget()
         rr = QHBoxLayout(self.ref_row)
@@ -519,7 +534,7 @@ class MainWindow(QMainWindow):
         for w, key in ((self.top_check, "on_top"), (self.auto_mask_check, "auto_mask"), (self.lasso_check, "lasso"),
                        (self.scan_check, "scan_whole"), (self.skin_compare_check, "skin_compare"),
                        (self.details_check, "details"), (self.part_box, "part"), (self.style_box, "style"),
-                       (self.family_box, "family"), (self.tone_box, "tone")):
+                       (self.family_box, "family"), (self.tone_style_box, "tone_style")):
             self._persist(w, f"ui/{key}")
         geo = self.settings.value("ui/geometry")
         if isinstance(geo, (QByteArray, bytes, bytearray)) and geo:  # 设置文件损坏时不能让程序起不来
@@ -533,7 +548,7 @@ class MainWindow(QMainWindow):
                 w.setChecked(str(v).lower() == "true")
             w.toggled.connect(lambda on: self.settings.setValue(key, "true" if on else "false"))
             return
-        # 下拉框：有数据的（风格、统一色）按数据保存，“（不比较风格）”这类空选项存 ""；只有文字的（部位）按文字保存
+        # 下拉框：有数据的（影调风格、颜色、统一色）按数据保存，“（不改颜色）”这类空选项存 ""；只有文字的（部位）按文字保存
         by_text = all(w.itemData(i) is None for i in range(w.count()))
         if v is not None:
             v = str(v)
@@ -602,12 +617,36 @@ class MainWindow(QMainWindow):
     def _palette_option_changed(self, _i=None):
         self.session.style_key = self.style_box.currentData()
         self.session.family = self.family_box.currentData()
-        self.session.tone_intent = self.tone_box.currentData() or "auto"
+        tone = self.tone_style_box.currentData() or ""
+        self.session.tone_style = tone[2:] if tone.startswith("s:") else ""
+        self.session.tone_target = tone[2:] if tone.startswith("t:") else ""
+        self._update_tone_hint()
         cur = self._current
         # 当前显示的是整图色彩结果：按新的风格 / 统一色重新计算（和改肤色目标的行为一致）
         if cur is not None and isinstance(cur.result, AnalysisReport) and cur.result.mode == "palette" \
                 and cur is not self.ref_image_item:
             self._rerun(cur, "palette")
+
+    def _update_tone_hint(self):
+        """影调风格的说明：看起来是什么样、常用在哪；当前结果是整图色彩时，再说这张图从现在的影调要怎么改。"""
+        from colordoctor.core import tone_class as tcl
+
+        st, tt = self.session.tone_style, self.session.tone_target
+        if st:
+            s = tcl.TONE_STYLES[st]
+            also = f"（也可以是{'、'.join(s['also'])}，会往离现在最近的那种走）" if s["also"] else ""
+            text = f"「{s['name']}」= 目标 {s['target']}{also}：{s['look']}。常用于{s['scene']}。"
+        elif tt:
+            text = f"目标 {tt}：{tcl.TONE_DESC[tt]}。"
+        else:
+            text = "不改影调：只说明这张图现在是哪种影调。想往某种影调走，在「影调风格」里选（鼠标停在选项上有说明）。"
+        cur = self._current
+        rep = cur.result if cur is not None else None
+        if isinstance(rep, AnalysisReport) and rep.mode == "palette" and rep.palette is not None and rep.palette.tone_class is not None:
+            now = rep.palette.tone_class.name
+            goal = tcl.pick_goal(now, *tcl.resolve_target(st, tt)[:2])
+            text += f"这张图现在是{now}" + (f"，要{tcl.path_words(now, goal)}。" if goal and goal != now else "。")
+        self.tone_hint.setText(text)
 
     def _toggle_ai_seg(self, v: bool):
         self.session.ai_seg = v
@@ -665,6 +704,7 @@ class MainWindow(QMainWindow):
         self.skin_compare_check.setVisible(key == "compare")
         self.skin_row.setVisible(key == "skin")
         self.palette_row.setVisible(key == "palette")
+        self.tone_hint.setVisible(key == "palette")
         self.ref_row.setVisible(key in ("reference", "compare"))
         self.history_panel.ref_action_text = "设为参考作品" if key == "reference" else "设为参考区"
         self._update_ref_label()
@@ -673,7 +713,7 @@ class MainWindow(QMainWindow):
         self.preset_box.setVisible(key in ("skin", "point"))
         self.wheel.set_preset(self.session.preset if key in ("skin", "point") else None)
         hints = {
-            "palette": "整图色彩：框选整张照片，看缺色、6:3:1 比例、某种颜色是否统一、与风格模板的差距",
+            "palette": "整图色彩：框选整张照片，看影调（九种之一，可选影调风格往目标影调走）、缺色、6:3:1 比例、某种颜色是否统一、与颜色模板的差距",
             "reference": "仿色对比：先框参考作品，再框你的照片（可以在两张图上分别框）",
             "point": "单点取色：实时取色时按快捷键锁定读数，或“框选屏幕”后单击取点",
             "dirty": "脏色检查：框选一块颜色（衣服、背景）或整张照片，找出混入的对立色和发灰位置",
@@ -1106,6 +1146,7 @@ class MainWindow(QMainWindow):
             return
         self._current = item
         self.history_panel.highlight(item.id)
+        self._update_tone_hint()
         res = item.result
         if isinstance(res, PointSample):
             preset = self.session.preset

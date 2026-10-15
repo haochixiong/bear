@@ -207,14 +207,16 @@ def test_dull_but_contrasty_image_gets_no_contrast_curve():
     assert not any(ly.kind == "curves" for ly in lp.plan_from_report(rep, img.shape).layers)
 
 
-def test_dull_flat_image_still_gets_contrast_curve_unless_style_has_one():
+def test_dull_flat_image_gets_contrast_only_from_the_tone_style():
+    """颜色卡不改明暗：亮暗差小只提示去「影调风格」里选；选了长调的影调风格，曲线只有影调卡那一条。"""
     img = hue_ramp_image(9, L0=42, L1=66)  # 亮暗差约 22
     rep = an.analyze_palette_report(img, CTX)
     dull = next(f for f in rep.findings if f.problem.startswith("整体缺色"))
-    assert any(a.layer and a.layer["kind"] == "curves" and "对比偏低" in a.instruction for a in dull.adjustments)
-    rep = an.analyze_palette_report(img, CTX, style_key="kodak_ultramax400")  # 风格那一条已经有影调曲线
+    assert not any(a.layer and a.layer["kind"] == "curves" for a in dull.adjustments)
+    assert any("影调风格" in a.instruction for a in dull.adjustments)
+    rep = an.analyze_palette_report(img, CTX, style_key="kodak_ultramax400", tone_style="cinematic")
     curves_ = [ly for ly in lp.plan_from_report(rep, img.shape).layers if ly.kind == "curves"]
-    assert len(curves_) == 1 and curves_[0].name == "风格影调 · 曲线"
+    assert len(curves_) == 1 and curves_[0].name.startswith("影调 ")
 
 
 @pytest.mark.parametrize("style", ["kodak_portra400", "kodak_portra160", "fuji_pro_neg_std"])
@@ -317,7 +319,7 @@ def test_style_color_balance_reaches_the_target_without_overshoot(img, style):
 def test_style_shadow_tint_not_judged_without_real_shadows():
     img = morandi()  # 最暗 15% 的明度约 L* 55：这是浅灰，不是阴影（以前按“阴影色调”给了一条曲线去染它）
     rep = an.analyze_palette_report(img, CTX, style_key="pink_blue")
-    style = next(f for f in rep.findings if f.problem.startswith("与「"))
+    style = next(f for f in rep.findings if f.problem.startswith("与颜色「"))
     cb = [a for a in style.adjustments if a.layer and a.layer["kind"] == "colorBalance"]
     assert not cb or not any(cb[0].layer["params"]["shadows"])
     assert not any(a.instruction.startswith("阴影") for a in style.adjustments if not a.tool.startswith("常用做法"))

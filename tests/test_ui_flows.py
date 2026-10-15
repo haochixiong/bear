@@ -153,6 +153,9 @@ def test_user_choices_are_restored_after_restart(qtbot, tmp_path):
     w.details_check.setChecked(True)
     w.style_box.setCurrentIndex(w.style_box.findData("teal_orange"))
     w.family_box.setCurrentIndex(w.family_box.findData("绿"))
+    w.tone_style_box.setCurrentIndex(w.tone_style_box.findData("s:hongkong"))
+    assert w.session.tone_style == "hongkong" and w.session.tone_target == ""
+    assert "港风" in w.tone_hint.text() and "低中调" in w.tone_hint.text() and "常用于" in w.tone_hint.text()
     w.close()
     settings.sync()
     w2 = MainWindow(settings=QSettings(str(tmp_path / "keep.ini"), QSettings.Format.IniFormat))
@@ -162,11 +165,15 @@ def test_user_choices_are_restored_after_restart(qtbot, tmp_path):
     assert not w2.skin_compare_check.isChecked() and w2.details_check.isChecked()
     assert w2.style_box.currentData() == "teal_orange" and w2.session.style_key == "teal_orange"
     assert w2.family_box.currentData() == "绿" and w2.session.family == "绿"
-    w2.style_box.setCurrentIndex(0)  # “（不比较风格）”也要能存回去
+    assert w2.tone_style_box.currentData() == "s:hongkong" and w2.session.tone_style == "hongkong"
+    w2.tone_style_box.setCurrentIndex(w2.tone_style_box.findData("t:高中调"))
+    assert w2.session.tone_target == "高中调" and w2.session.tone_style == ""
+    w2.style_box.setCurrentIndex(0)  # “（不改颜色）”也要能存回去
     w2.close()
     w3 = MainWindow(settings=QSettings(str(tmp_path / "keep.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(w3)
     assert w3.style_box.currentData() is None
+    assert w3.session.tone_target == "高中调"
 
 
 def test_jpg_point_mode_takes_several_points_and_compares(win, qtbot, monkeypatch):

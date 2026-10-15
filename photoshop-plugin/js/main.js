@@ -5,7 +5,7 @@ const bridge = require("./bridge.js");
 const ps = require("./ps.js");
 
 const SUBS = {
-  color: [["dirty", "脏色"], ["patch", "取色"], ["ratio", "比例 6:3:1"], ["style", "风格"]],
+  color: [["dirty", "脏色"], ["patch", "取色"], ["ratio", "比例 6:3:1"], ["style", "影调与颜色"]],
   portrait: [["skin", "皮肤均匀"], ["skinpatch", "肤色取色"]],
   reference: [["reference", "仿色"]],
 };
@@ -128,10 +128,50 @@ function select(id, items, withNone) {
   return `<select id="${id}">${opts.join("")}</select>`;
 }
 
-// 影调：画面很暗 / 很亮时，是刻意的暗调 / 高调，还是欠曝 / 过曝（单看像素分不出，由用户决定；默认自动判断并说明）
-const TONE_SELECT = `<div class="row"><label>影调</label><select id="tone" title="自动判断：不替你判断拍摄意图，很暗 / 很亮的画面先不提亮、不压暗，说明卡列出主体（皮肤）亮度、明暗分布等线索供你判断。正常曝光：暗了按欠曝、亮了按过曝给出曲线修正。">
-  <option value="auto">自动判断</option><option value="low">刻意暗调（情绪 / 低调人像）</option>
-  <option value="normal">正常曝光（暗了就是欠曝）</option><option value="high">刻意高调（日系 / 明亮）</option></select></div>`;
+// 影调风格 = 预制的目标影调（只管明暗和反差）；颜色模板只管颜色。两者互不绑定：港风可以配青橙，也可以配黑金
+function toneStyleSelect(o) {
+  const styles = (o.tone_styles || []).map((t) =>
+    `<option value="s:${esc(t.key)}">${esc(t.name)} · ${esc(t.target)}</option>`).join("");
+  const tones = (o.tones || []).map((t) => `<option value="t:${esc(t.name)}">${esc(t.name)}</option>`).join("");
+  return `<select id="toneStyle"><option value="">（不改影调，只看）</option>
+    <optgroup label="影调风格">${styles}</optgroup><optgroup label="直接选影调">${tones}</optgroup></select>`;
+}
+
+// 影调风格的说明：不熟悉“日系”“港风”指什么的人看这里；分析过后再说这张图要怎么改
+function toneHint() {
+  const el = $("toneHint");
+  if (!el) return;
+  const o = state.options || {};
+  const v = $("toneStyle").value;
+  let text;
+  if (v.startsWith("s:")) {
+    const t = (o.tone_styles || []).find((x) => x.key === v.slice(2));
+    text = t ? `「${t.name}」= 目标 ${t.target}${t.also.length ? `（也可以是${t.also.join("、")}，往离现在最近的走）` : ""}：${t.look}。常用于${t.scene}。` : "";
+  } else if (v.startsWith("t:")) {
+    const t = (o.tones || []).find((x) => x.name === v.slice(2));
+    text = t ? `目标 ${t.name}：${t.desc}。` : "";
+  } else {
+    text = "不改影调：只说明这张图现在是九种影调里的哪一种。想往某种影调走，在上面选一个影调风格。";
+  }
+  const e = state.bySub.style;
+  const tone = e && e.result && e.result.tone;
+  if (tone && v.startsWith("s:")) {
+    const s = (tone.suggestions || []).find((x) => x.key === v.slice(2));
+    if (s) text += ` 这张图现在是${tone.name}：${s.change === "已经符合" ? "已经符合" : `要${s.change}（到${s.target}）`}。`;
+  }
+  el.textContent = text;
+}
+
+function colorHint() {
+  const el = $("colorHint");
+  if (!el) return;
+  const o = state.options || {};
+  const st = (o.styles || []).find((x) => x.key === $("style").value);
+  const names = Object.fromEntries((o.tone_styles || []).map((t) => [t.key, t.name]));
+  const pair = st ? (st.tone_pair || []).map((k) => names[k]).filter(Boolean) : [];
+  el.textContent = st ? `${st.description || ""}${pair.length ? ` 常配影调风格：${pair.join("、")}（只是常见搭配，可以随意换）。` : ""}`
+    : "不改颜色：只看影调和整体色彩（缺色、6:3:1）。";
+}
 
 function renderControls() {
   const o = state.options || { styles: [], presets: [], families: [] };
@@ -139,16 +179,22 @@ function renderControls() {
   if (state.sub === "style") {
     const groups = {};
     o.styles.forEach((s) => (groups[s.category] = groups[s.category] || []).push(s));
-    c.innerHTML = `<div class="row"><label>目标风格</label><select id="style">${Object.entries(groups).map(([g, ss]) =>
-      `<optgroup label="${esc(g)}">${ss.map((s) => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("")}</optgroup>`).join("")}</select></div>${TONE_SELECT}`;
+    c.innerHTML = `<div class="row"><label>影调风格</label>${toneStyleSelect(o)}</div>
+      <div class="muted" id="toneHint"></div>
+      <div class="row"><label>颜色</label><select id="style"><option value="">（不改颜色）</option>${Object.entries(groups).map(([g, ss]) =>
+      `<optgroup label="${esc(g)}">${ss.map((s) => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("")}</optgroup>`).join("")}</select></div>
+      <div class="muted" id="colorHint"></div>
+      <div class="muted">影调和颜色分开选：影调只改明暗和反差，颜色只改颜色。想照着参考图调颜色，用「仿色」页。</div>`;
+    remember("toneStyle");
     remember("style");
-    remember("tone");
+    $("toneStyle").addEventListener("change", toneHint);
+    $("style").addEventListener("change", colorHint);
+    toneHint();
+    colorHint();
   } else if (state.sub === "ratio") {
     c.innerHTML = `<div class="row"><label>颜色统一</label>${select("family", o.families.map((f) => ({ key: f, name: f })), "（只看比例）")}</div>
-      ${TONE_SELECT}
       <div class="muted">看主色 / 辅色 / 点缀色的面积是否接近 6:3:1；选一个色系时还会生成把杂色往它统一的调整图层。</div>`;
     remember("family");
-    remember("tone");
   } else if (state.sub === "skin") {
     c.innerHTML = `<div class="row"><label>抠皮肤</label><select id="seg"><option value="ai">AI 人像分割（显卡）</option><option value="color">肤色规则（不分脸和身体）</option></select></div>
       <div class="row"><label>肤色风格</label>${select("preset", o.presets)}</div>
@@ -228,9 +274,13 @@ async function chooseRefFile() {
 function query(sub) {
   const q = {};
   const v = (id) => ($(id) ? $(id).value : "");
-  if (sub === "style") q.style = v("style");
+  if (sub === "style") {
+    if (v("style")) q.style = v("style");
+    const t = v("toneStyle");
+    if (t.startsWith("s:")) q.tone_style = t.slice(2);
+    if (t.startsWith("t:")) q.tone_target = t.slice(2);
+  }
   if (sub === "ratio" && v("family")) q.family = v("family");
-  if ((sub === "style" || sub === "ratio") && v("tone")) q.tone = v("tone");
   if (sub === "skin") {
     q.preset = v("preset"); q.seg = v("seg");
     q.part = q.seg === "ai" ? v("part") : "";  // 肤色规则分不出脸和身体：不标部位
@@ -255,8 +305,8 @@ async function runAnalyze() {
   const mode = MODE_OF[sub];
   if (!state.options) await loadOptions();
   const q = query(sub);
-  if (sub === "style" && !q.style) {
-    statusError(new Error("风格列表还没加载出来（分析服务未启动？），请先启动 ColorDoctor 再选风格。"));
+  if (sub === "style" && !state.options) {
+    statusError(new Error("影调风格和颜色列表还没加载出来（分析服务未启动？），请先启动 ColorDoctor。"));
     return;
   }
   let refDoc = null;
@@ -308,7 +358,10 @@ async function runAnalyze() {
     return;
   }
   setBusy(false);
-  if (state.sub === sub) renderResult();
+  if (state.sub === sub) {
+    renderResult();
+    toneHint();  // 有了这张图的影调，说明里加上“要怎么改”
+  }
   refreshTarget();
 }
 
@@ -438,6 +491,7 @@ function renderResult() {
   if (r.mode === "multipoint") return renderMultipoint(r);
   const cards = [resultHeader(e)];
   (r.notes || []).forEach((n) => cards.push(`<div class="muted">${esc(n)}</div>`));
+  if (r.tone) cards.push(toneGrid(r.tone));
   const layers = (r.plan && r.plan.layers) || [];
   const findings = r.findings || [];
   // 每张问题卡片里放修它的调整图层（layer.finding = 问题的序号）；没挂到问题上的放在最后“其他调整”
@@ -488,6 +542,34 @@ function renderResult() {
   $("results").querySelectorAll("[data-sel]").forEach((b) => b.addEventListener("click", () => makeSelection(b.dataset.sel)));
   renderAcr(r.acr_params || {}, r.acr_calibrated);
   updateButtons();
+}
+
+// 九种影调的九宫格 + 明度直方图：实底 = 现在，橙框 = 目标；下面按“改动大小”列出各影调风格
+const KEYS = ["高", "中", "低"];
+const LENGTHS = ["长", "中", "短"];
+function toneGrid(t) {
+  const cell = (name) => {
+    const cls = [name === t.name ? "now" : "", name === t.target && t.target !== t.name ? "goal" : "", name === t.near ? "near" : ""].join(" ");
+    const tag = name === t.name ? "现在" : (name === t.target ? "目标" : "");
+    const info = ((state.options && state.options.tones) || []).find((x) => x.name === name);
+    return `<div class="tcell ${cls}" title="${esc(info ? info.desc : name)}">${esc(name)}${tag ? `<span>${tag}</span>` : ""}</div>`;
+  };
+  const grid = `<div class="tgrid"><div></div>${LENGTHS.map((n) => `<div class="thead">${n}调</div>`).join("")}
+    ${KEYS.map((k) => `<div class="thead">${k}调</div>${LENGTHS.map((n) => cell(`${k}${n}调`)).join("")}`).join("")}</div>`;
+  const max = Math.max(...t.histogram, 1e-6);
+  const hist = `<div class="thist">${t.histogram.map((v) => `<i style="height:${Math.round(100 * v / max)}%"></i>`).join("")}</div>`;
+  const groups = [[], [], []];
+  (t.suggestions || []).forEach((s) => groups[Math.min(s.distance, 2)].push(s.name));
+  const near = [["已经符合", groups[0]], ["稍改就到", groups[1]], ["变化较大", groups[2]]]
+    .filter(([, g]) => g.length).map(([w, g]) => `${w}：${g.join("、")}`).join("；");
+  const shares = t.shares.map((v) => `${Math.round(v * 100)}%`);
+  return `<div class="card tone">
+    <div class="title"><span>影调：${esc(t.name)}${t.near ? `（接近${esc(t.near)}）` : ""}</span>${t.target && t.target !== t.name ? `<span>→ ${esc(t.label)} ${esc(t.target)}</span>` : ""}</div>
+    <div class="line">${esc(t.desc)}</div>
+    ${grid}${hist}
+    <div class="muted">暗部 ${shares[0]} · 中间调 ${shares[1]} · 亮部 ${shares[2]}；跨度 ${Math.round(t.span)} 级（≥170 长调，&lt;90 短调）</div>
+    <div class="muted">各影调风格离现在多远：${esc(near)}</div>
+  </div>`;
 }
 
 function renderPatch(e) {

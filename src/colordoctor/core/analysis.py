@@ -114,8 +114,9 @@ def _finalize(mode, context, stats, components, findings, extra_conf_reasons, co
                 notes=tuple(extra_conf_reasons) or ("结论基于当前选区；换一个区域可能得到不同结果",),
             )
         ] + list(findings)
-    # 真实问题优先；“与目标风格的差距”不是错误，排在问题之后
-    findings = sorted(findings, key=lambda f: (f.problem.startswith("与目标风格"), -order.index(f.severity)))
+    # 整图的“影调”卡固定在最前（先定明暗，再看颜色）；其余真实问题优先，“与目标风格的差距”不是错误，排在问题之后
+    findings = sorted(findings, key=lambda f: (not f.problem.startswith("影调："), f.problem.startswith("与目标风格"),
+                                               -order.index(f.severity)))
     return AnalysisReport(
         mode=mode,
         context=context,
@@ -683,38 +684,28 @@ def scan_image(image: np.ndarray, context: ColorContext, rect=None, valid: np.nd
 # ------------------------------------------------------------------ 整图色彩
 def analyze_palette_report(
     image: np.ndarray, context: ColorContext, style_key: str | None = None, family: str | None = None,
-    family_target_lab=None, rect=None, tone_intent: str = "auto",
+    family_target_lab=None, rect=None, tone_style: str = "", tone_target: str = "",
 ) -> AnalysisReport:
-    """整图色彩：缺色/丰富度、6:3:1、颜色统一、与风格模板的差距。
+    """整图：影调（九种之一，选了影调风格时给出往目标影调走的曲线）、缺色/丰富度、6:3:1、颜色统一、与颜色模板的差距。
 
-    tone_intent：影调（auto 自动判断 / low 刻意暗调 / normal 正常曝光 / high 刻意高调，见 exposure.py）。
+    影调和颜色互相独立：tone_style（影调风格，见 tone_class.TONE_STYLES）/ tone_target（直接选的目标影调）只管明暗和反差，
+    style_key（颜色模板）只管颜色。两个都可以不选。
     """
-    from colordoctor.core import exposure as ex
     from colordoctor.core import palette as pl
+    from colordoctor.core import tone_class as tcl
 
     stats = rs.compute_stats(image, with_clusters=False)
-    pr = pl.analyze_palette(image, style_key, family, family_target_lab, offset=_offset(rect), tone_intent=tone_intent)
+    pr = pl.analyze_palette(image, style_key, family, family_target_lab, offset=_offset(rect),
+                            tone_style=tone_style, tone_target=tone_target)
     conf, reasons = dr.confidence(stats, context)
-    findings: list[Finding] = []
-    # 暗调还是欠曝：自动判断时只说明、不提亮；用户选「正常曝光」时才按欠曝 / 过曝修正
     sub, _ = grid_downsample(image, MAX_SAMPLES)
-    sub_L = cs.srgb8_to_lab(sub[..., :3]).reshape(-1, 3)[:, 0]
-    skin_L = None
-    if pr.detected_key:  # 很暗 / 很亮时，用画面里皮肤的亮度给用户做参考（主体是否也暗 / 也亮）
-        try:
-            sm, _info = skin_mask_mod.skin_mask(sub[..., :3])
-            if sm.mean() >= ex.SKIN_MIN_SHARE:
-                skin_L = float(np.median(sub_L.reshape(sm.shape)[sm]))
-        except Exception:
-            skin_L = None
-    exp = ex.exposure_finding(sub_L, pr.detected_key, tone_intent, conf, skin_L=skin_L)
-    if exp is not None:
-        findings.append(exp)
+    tone_card, _tc, _target = tcl.tone_finding(sub[..., :3], None, tone_style, tone_target, conf)
+    findings: list[Finding] = [tone_card]
     cf = pr.colorfulness
     style = pr.style
     lo, hi = style.colorfulness_range if style else (15.0, 200.0)
     mono = pl.is_monochrome(cf)
-    # 暗调 / 高调画面颜色少是常见的风格特点：没选风格、或选的不是鲜艳风格时不按“缺色”加饱和、加对比
+    # 暗调 / 高调画面颜色少是常见的特点：没选颜色模板、或选的不是鲜艳的模板时不按“缺色”加饱和
     keyed_soft = bool(pr.tone_key) and not mono and cf.value < lo and lo < COLOURFUL_STYLE_MIN
     if mono:  # 黑白作品：没有颜色可缺，不按“缺色/发灰”评估
         findings.append(Finding(
@@ -729,32 +720,31 @@ def analyze_palette_report(
         lo = min(lo, cf.value)
     elif keyed_soft:
         findings.append(Finding(
-            problem=f"{pl.KEY_NAME[pr.tone_key]}画面，颜色少不按缺色处理",
+            problem=(f"目标影调是{pr.tone_target}（{pl.KEY_NAME[pr.tone_key]}），颜色少不按缺色处理" if pr.tone_target
+                     else f"{pl.KEY_NAME[pr.tone_key]}画面，颜色少不按缺色处理"),
             severity=Severity.NORMAL,
             evidence=(f"色彩丰富度 {cf.value:.0f}（{cf.label}），中位明度 {pr.tone[2]:.0f}",
                       f"有彩像素平均色度 C* {cf.mean_chroma:.1f}，P90 色度 {cf.p90_chroma:.1f}"),
             causes=(),
             adjustments=(),
             confidence=conf,
-            notes=(f"{'暗' if pr.tone_key == 'low' else '亮'}调画面的颜色天然更少；想要更鲜艳时请选择对应的鲜艳风格再判断",),
+            notes=(f"{'暗' if pr.tone_key == 'low' else '亮'}调画面的颜色天然更少；想要更鲜艳时请在「颜色」里选鲜艳的模板再判断",),
         ))
         lo = min(lo, cf.value)
     elif cf.value < lo:
         sev = Severity.NOTABLE if cf.value < lo * 0.6 else Severity.MILD
         vib = nl.clip(10 + 40 * (lo - cf.value) / lo, 10, 25)  # 缺得越多加得越多（+10 ~ +25）
-        # 加对比只在亮暗差确实偏小时建议；风格那一条已经有影调曲线时不再另加一条（两条曲线会叠加或互相抵消）
+        # 颜色卡不改明暗：亮暗差偏小时只提示，反差由影调卡（影调风格）的曲线管，避免两条曲线叠加或互相抵消
         contrast = float(pr.tone[4] - pr.tone[0])
-        style_curve = style is not None and any(a.layer and a.layer["kind"] == "curves" for a in style.adjustments)
         if contrast >= LOW_CONTRAST:
             tone_adj = ()
-        elif pr.tone_key:  # 暗调 / 高调的亮暗差天然偏小：S 曲线会改变基调（高调更容易过曝，暗调亮部被提亮）
-            tone_adj = (Adjustment("提示", f"亮暗差（P95−P5 明度 {contrast:.0f}）偏小是{pl.KEY_NAME[pr.tone_key]}画面的特点，不另加对比曲线",
+        elif pr.tone_target:
+            tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}）：反差按上面“影调”那张卡的曲线调，不要再另加 S 曲线",
                                    None, False),)
-        elif style_curve:
-            tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}）：对比按“与「{style.name}」风格的差距”那一条的影调曲线调，"
-                                         "不要再另加一条 S 曲线", None, False),)
         else:
-            tone_adj = (rec.contrast_adjustment("global", where=f"整体（亮暗差 P95−P5 明度 {contrast:.0f}）"),)
+            tone_adj = (Adjustment("提示", f"亮暗差偏小（P95−P5 明度 {contrast:.0f}，现在是{pr.tone_class.name}）：发闷可能是反差不够。"
+                                         "想加反差，在「影调风格」里选一个长调的风格（例如电影感、白亮通透），会生成对应的曲线",
+                                   None, False),)
         findings.append(Finding(
             problem=f"整体缺色/发灰：色彩丰富度 {cf.value:.0f}（{cf.label}）" + (f"，低于「{style.name}」的 {lo:g}" if style else ""),
             severity=sev,
@@ -768,7 +758,7 @@ def analyze_palette_report(
                 Adjustment("Camera Raw 混色器", "只提高主色所在通道的饱和度，其他颜色保持", "小幅"),
             ),
             confidence=conf,
-            notes=("低饱和风格（莫兰迪、日系）本身不是错误；请选择对应风格再判断",),
+            notes=("低饱和的颜色（莫兰迪、日系清新）本身不是错误；请在「颜色」里选择对应模板再判断",),
         ))
     elif style and cf.value > hi:
         findings.append(Finding(
@@ -805,7 +795,7 @@ def analyze_palette_report(
         ))
     if style is not None:
         findings.append(Finding(
-            problem=f"与「{style.name}」风格的差距：匹配度 {style.score:.0f}/100",
+            problem=f"与颜色「{style.name}」的差距：匹配度 {style.score:.0f}/100",
             severity=Severity.NORMAL if style.score >= 80 else (Severity.MILD if style.score >= 60 else Severity.NOTABLE),
             evidence=style.gaps,
             causes=(),
@@ -821,7 +811,7 @@ def analyze_palette_report(
 
 
 LOW_CONTRAST = 50.0  # 整图亮暗差（P95 − P5 明度）低于此值才算“对比偏低”
-COLOURFUL_STYLE_MIN = 28.0  # 风格的色彩丰富度下限不低于此值才算“鲜艳风格”（暗调 / 高调画面只有选了这种风格才按缺色处理）
+COLOURFUL_STYLE_MIN = 28.0  # 颜色模板的色彩丰富度下限不低于此值才算“鲜艳”（暗调 / 高调画面只有选了这种模板才按缺色处理）
 
 _NO_DESAT = ("橙", "黑/深灰", "白/浅灰", "灰")  # 不自动降饱和：肤色所在的橙、无彩色
 

@@ -77,7 +77,8 @@ class Session:
         self.auto_mask = True
         self.ai_seg = False  # 用 AI 人像分割抠皮肤（需要 onnxruntime + 模型）
         self.style_key: str | None = None
-        self.tone_intent = "auto"  # 影调：auto 自动判断 / low 刻意暗调 / normal 正常曝光 / high 刻意高调
+        self.tone_style = ""  # 影调风格（tone_class.TONE_STYLES 的键），空 = 不改影调
+        self.tone_target = ""  # 直接选的目标影调（九种之一），优先于影调风格
         self.family: str | None = None
         self.family_target_lab = None
         self.skin_by_part: dict[str, tuple[float, float, float]] = {}
@@ -128,7 +129,7 @@ class Session:
             )
         if mode == "palette":
             return an.analyze_palette_report(region, ctx, self.style_key, self.family, self.family_target_lab, rect=rect,
-                                             tone_intent=self.tone_intent)
+                                             tone_style=self.tone_style, tone_target=self.tone_target)
         if mode == "dirty" and self.scan_whole:
             return an.scan_image(region, ctx, rect=rect)
         return an.analyze_region(region, ctx, rect=rect)

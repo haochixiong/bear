@@ -10,7 +10,6 @@ from synth import face_scene, highkey_face_scene, lab_color, lowkey_face_scene
 from colordoctor.core import analysis as an
 from colordoctor.core import color_spaces as cs
 from colordoctor.core import layer_plan as lp
-from colordoctor.core import native_layers as nl
 from colordoctor.core import palette as pl
 from colordoctor.core import portrait_analysis as pa
 from colordoctor.core import reference_match as rm
@@ -83,43 +82,37 @@ def _vibrance_up(layers):
     return [ly for ly in layers if ly.kind == "vibrance" and ly.params["vibrance"] > 0]
 
 
-@pytest.mark.parametrize("style", [None] + [s["key"] for s in STYLES if not s.get("min_median_L")])
+@pytest.mark.parametrize("style", [None] + [s["key"] for s in STYLES])
 def test_low_key_portrait_is_not_brightened_by_any_style(style):
+    """颜色模板只管颜色：没选影调风格时，任何颜色模板（包括日系清新）都不提亮暗调人像。"""
     img, _ = lowkey_face_scene()
     rep = an.analyze_palette_report(img, CTX, style_key=style)
     assert rep.palette.tone_key == "low"
     layers = _layers(rep, img)
     st = pl.get_style(style) if style else {}
-    # 只允许胶片风格明确要求的“黑场抬起”（输入 0 的那个点），中间调和亮部一律不提亮
-    lifts = [(x, y) for x, y in _composite_lifts(layers) if not (x == 0 and st.get("black_point_min"))]
-    assert not lifts, lifts
+    assert not _composite_lifts(layers)
     if not st or st["colorfulness"][0] < COLOURFUL:
         assert not _vibrance_up(layers)
         assert not any(f.problem.startswith("整体缺色") for f in rep.findings)
-    if st.get("mood") == "dark":
-        card = next(f for f in rep.findings if f.problem.startswith("与「"))
-        assert any("保持暗部，不要提亮" in e for e in card.evidence)
 
 
-def test_low_key_contrast_only_deepens_the_shadows():
+def test_low_key_with_moody_tone_style_never_lifts_the_shadows():
     img, _ = lowkey_face_scene()
-    m = pl.style_match(img, pl.get_style("fuji_provia"))  # 对比目标 68–92，这张暗调图只有约 41
-    curve = next(a for a in m.adjustments if a.layer and a.layer["kind"] == "curves")
-    pts = [(x, y) for x, y in curve.layer["params"]["channels"]["composite"] if (x, y) not in ((0, 0), (255, 255))]
-    assert pts and all(y < x for x, y in pts)  # 只压深暗部
-    assert all(y >= nl.gray8(pl.BLACK_FLOOR_L) for _, y in pts)  # 不压成死黑
-    assert m.score >= 95  # 暗调的亮暗差小不算差距（以前 82，并要把亮部 L* 50 提到 65）
+    rep = an.analyze_palette_report(img, CTX, tone_style="moody")
+    for x, y in _composite_lifts(_layers(rep, img)):
+        assert x >= 128, (x, y)  # 只可能拉开亮部，暗部和中间调不提亮
 
 
-def test_bright_style_median_lift_is_capped():
-    """明确选了「日系清新」：可以提亮，但和其他影调一样一次最多移动 15 L*（以前中位 18 → 60 一步到位）。"""
+def test_bright_tone_style_lift_is_capped():
+    """明确选了影调风格「日系」：可以提亮，但一次每个点最多移动 45 级，并提示调完再分析 / 回 RAW。"""
+    from colordoctor.core import tone_class as tc
+
     img, _ = lowkey_face_scene()
-    m = pl.style_match(img, pl.get_style("japanese_fresh"))
-    curve = next(a for a in m.adjustments if a.layer and a.layer["kind"] == "curves")
-    p50 = float(np.median(cs.srgb8_to_lab(img)[..., 0]))
-    (x, y), = [(x, y) for x, y in curve.layer["params"]["channels"]["composite"] if (x, y) not in ((0, 0), (255, 255))]
-    assert x == nl.gray8(p50) and y <= nl.gray8(p50 + pl.TONE_MOVE_CAP) + 1
-    assert "差得太多" in curve.instruction
+    rep = an.analyze_palette_report(img, CTX, tone_style="japanese")
+    card = next(f for f in rep.findings if f.problem.startswith("影调："))
+    curve = card.adjustments[0]
+    assert all(abs(y - x) <= tc.MAX_MOVE + 1 for x, y in curve.layer["params"]["channels"]["composite"])
+    assert any(y > x for x, y in curve.layer["params"]["channels"]["composite"])
 
 
 @pytest.mark.parametrize("style", [None, "fuji_provia", "kodak_portra400", "french", "fuji_eterna"])

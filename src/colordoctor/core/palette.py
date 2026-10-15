@@ -17,6 +17,9 @@ from colordoctor.core.perception import de_words
 from colordoctor.core.contamination import _components
 from colordoctor.core.region_statistics import weighted_circular_hue
 from colordoctor.core.sampling import SampleError, grid_downsample
+from colordoctor.core.tone_class import TONE_STYLES
+
+TONE_STYLE_NAMES = {k: v["name"] for k, v in TONE_STYLES.items()}
 
 MAX_SAMPLES = 200_000
 CHROMA_MIN = 8.0
@@ -126,9 +129,12 @@ class PaletteReport:
     tone: tuple[float, float, float, float, float]  # L* 的 P5/P25/P50/P75/P95
     unity: FamilyUnity | None = None
     style: StyleMatch | None = None
-    tone_key: str = ""  # 按哪种基调处理："low"（暗调）/ "high"（高调）/ ""（自动判断结果，或用户在「影调」里选的）
-    detected_key: str = ""  # 自动判断的基调（tone_key()）
-    tone_intent: str = "auto"  # 用户选的影调：auto / low / normal / high（见 exposure.TONE_INTENTS）
+    tone_key: str = ""  # 颜色分析按哪种基调处理："low"（暗调）/ "high"（高调）/ ""：选了目标影调时按目标，否则按画面本身
+    detected_key: str = ""  # 画面本身的基调（tone_key()）
+    tone_class: object = None  # 画面现在的影调（tone_class.ToneClass，九种之一）
+    tone_target: str = ""  # 目标影调（选了影调风格或直接选了影调时），例如“高短调”
+    tone_label: str = ""  # 目标的显示名（影调风格名，例如“日系”；直接选影调时就是影调名）
+    tone_also: tuple[str, ...] = ()  # 也算符合的影调（影调风格的备选影调）
 
 
 # ================================================================ 基础
@@ -433,13 +439,10 @@ def _center(lo: float, hi: float) -> float:
 # （任何风格要的色调都不超过 15；淡蓝的天空 C* 约 20，是有颜色的物体，不能当成高光色调）
 TINT_NEUTRAL_C = 8.0
 TINT_MAX_C = 15.0
-TONE_MIN_MOVE = 3  # 风格影调曲线最大移动不到这么多级（0–255）时不给曲线
-TONE_MOVE_CAP = 15.0  # 风格影调曲线一次最多把一个分位移动这么多 L*（更大的差距多半要从曝光/光线入手）
 GRADING_SAT_MAX = 30  # 颜色分级饱和度建议上限（常用做法 10–25）
 SHADOW_MAX_L = 45.0  # 阴影：最暗 15% 里 L* 不超过这个值的像素（高调画面最暗的地方是浅灰，不是阴影）
 HIGHLIGHT_MIN_L = 60.0  # 高光：最亮 15% 里 L* 不低于这个值的像素（暗调画面最亮的地方是中灰，不是高光）
 BAND_MIN_SHARE = 0.01  # 这样的阴影 / 高光不到全图 1%：画面里几乎没有这一段，不判断它的色调
-BLACK_FLOOR_L = 3.0  # 暗调画面只靠压深暗部加对比：P5 最多压到这里（再低就死黑）
 DESAT_SAT_FLOOR = 10.0  # 通道平均饱和度（HSB）已低于此值：不再建议降饱和
 
 
@@ -491,7 +494,11 @@ def _tint_ok(t, spec) -> bool | None:
     return bool(hue_ok and lo - 0.5 <= c <= hi + 0.5)
 
 
-def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, tone_intent: str = "auto") -> StyleMatch:
+def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, key: str | None = None) -> StyleMatch:
+    """与颜色模板的差距。只看颜色（色区、丰富度、阴影 / 高光色调），明暗和反差归「影调风格」管。
+
+    key：按哪种基调处理（"low" / "high" / ""）；None 时按画面本身判断。
+    """
     sub, _, lab, lch = _prep(image, max_samples)
     L, C, h = lch[..., 0].ravel(), lch[..., 1].ravel(), lch[..., 2].ravel()
     lab2 = lab.reshape(-1, 3)
@@ -526,9 +533,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
     cf_ok = cr[0] <= cf.value <= cr[1]
     p5, p15, p50, p85, p95 = np.percentile(L, [5, 15, 50, 85, 95])
     contrast = float(p95 - p5)
-    from colordoctor.core.exposure import resolve_key
-
-    tk = resolve_key(tone_key(L), tone_intent)  # 用户选了「刻意暗调 / 正常曝光 …」时按用户的
+    tk = tone_key(L) if key is None else key
     # 调色加在阴影/高光上的色调，主要体现在“接近中性”的像素上（灰墙、白衣、暗部），
     # 本身就很鲜艳的物体（绿叶、蓝天）不能代表色调。
     bands = tone_bands(L, sub)
@@ -550,33 +555,14 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
         if t is None and style.get(tkey):
             gaps.append(_no_band_text(label) if bands[band] is None else
                         f"{label}里接近中性的区域太少（有颜色的物体如天空、绿叶不算），无法判断{label}色调")
-    for label, t, ok, key in (("阴影", sh, sh_ok, "shadow_tint"), ("高光", hl, hl_ok, "highlight_tint")):
+    for label, t, ok, skey in (("阴影", sh, sh_ok, "shadow_tint"), ("高光", hl, hl_ok, "highlight_tint")):
         if t is not None and ok is False:
             now = f"色相 {t[0]:.0f}°、色度 {t[1]:.1f}" if t[1] >= 1.5 else f"接近中性（色度 {t[1]:.1f}）"
-            gaps.append(f"{label}色调：{now}，目标色相 {style[key]['hue']}、色度 {style[key]['chroma']}")
-    bp_max = style.get("black_point_max")
-    if bp_max is not None and p5 > bp_max:
-        gaps.append(f"黑位不够深：P5 明度 {p5:.0f}（目标 ≤ {bp_max}）")
-    if style.get("min_median_L") and p50 < style["min_median_L"]:
-        gaps.append(f"整体偏暗：中位明度 {p50:.0f}（目标 ≥ {style['min_median_L']}）"
-                    + (f"；「{style['name']}」是明亮的风格，暗调照片要做成这样主要靠曝光/光线，调色只提亮一部分" if tk == "low" else ""))
-    bp_min = style.get("black_point_min")
-    if bp_min is not None and p5 < bp_min:
-        gaps.append(f"黑位太深：P5 明度 {p5:.0f}（这种风格黑场是抬起的，目标 ≥ {bp_min}）")
-    ct = style.get("contrast")
-    ct_ok = None if ct is None else bool(ct[0] <= contrast <= ct[1])
-    # 暗调 / 高调画面的亮暗差天然偏小：不算差距（加对比时也只动不改变基调的那一端，见 _tone_curve）
-    key_flat = bool(tk and ct_ok is False and contrast < ct[0])
-    if key_flat:
-        gaps.append(f"对比度：亮暗差（P95−P5 明度）{contrast:.0f}，低于目标 {ct[0]}–{ct[1]}；{KEY_NAME[tk]}画面亮暗差小是正常的，不计入匹配度")
-    elif ct_ok is False:
-        gaps.append(f"对比度：亮暗差（P95−P5 明度）{contrast:.0f}，目标 {ct[0]}–{ct[1]}，需要{'降低' if contrast > ct[1] else '提高'}")
+            gaps.append(f"{label}色调：{now}，目标色相 {style[skey]['hue']}、色度 {style[skey]['chroma']}")
     if tk == "low":
-        gaps.append(f"暗调画面（中位明度 {p50:.0f}，L* ≥ 70 的亮部只占 {float((L >= 70).mean()):.0%}）：暗是这张图的基调，不按“偏暗”处理"
-                    + (f"；与「{style['name']}」的暗调一致，保持暗部，不要提亮" if style.get("mood") == "dark" else ""))
+        gaps.append(f"暗调画面（中位明度 {p50:.0f}）：颜色按暗调处理，暗部的颜色少、浅是正常的")
     elif tk == "high":
-        gaps.append(f"高调画面（中位明度 {p50:.0f}，L* ≤ 30 的暗部只占 {float((L <= 30).mean()):.0%}）：亮、淡是这张图的基调，"
-                    "不按“过亮”“对比不足”处理")
+        gaps.append(f"高调画面（中位明度 {p50:.0f}）：颜色按高调处理，亮、淡是这张图的基调")
 
     # 评分
     parts = [(0.5, min(1.0, on_target / 0.85)) if has_sectors else (0.5, 1.0 if cf_ok else 0.5)]
@@ -584,21 +570,10 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
     for ok, wgt in ((sh_ok, 0.15), (hl_ok, 0.15)):
         if ok is not None:
             parts.append((wgt, 1.0 if ok else 0.3))
-    if bp_max is not None:
-        parts.append((0.1, 1.0 if p5 <= bp_max else max(0.0, 1 - (p5 - bp_max) / 20)))
-    if bp_min is not None:
-        parts.append((0.1, 1.0 if p5 >= bp_min else max(0.0, 1 - (bp_min - p5) / 10)))
-    if ct_ok is not None:
-        dist = 0.0 if (ct_ok or key_flat) else min(abs(contrast - ct[0]), abs(contrast - ct[1]))
-        parts.append((0.15, max(0.0, 1 - dist / 25)))
     score = 100 * sum(wt * v for wt, v in parts) / sum(wt for wt, _ in parts)
 
     adjs = _style_adjustments(sub, style, lab2, L, (p15, p85), sh, hl, sh_ok, hl_ok, cf.value)
-    tone_adjs = []
-    tone = _tone_curve(style, p5, p50, p95, contrast, ct, ct_ok, bp_min, bp_max, tk)
-    if tone is not None:
-        tone_adjs.append(tone)
-    adjs[0:0] = tone_adjs
+    pair = [TONE_STYLE_NAMES[k] for k in style.get("tone_pair", ()) if k in TONE_STYLE_NAMES]
     return StyleMatch(
         key=style["key"],
         name=style["name"],
@@ -616,79 +591,11 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
         gaps=tuple(gaps),
         adjustments=tuple(adjs),
         recipe=style.get("recipe", {}),
-        notes=tuple(style.get("notes", ())),
+        notes=tuple(style.get("notes", ())) + ((f"明暗不在颜色模板里：「{style['name']}」常配的影调风格是{'、'.join(pair)}（在「影调风格」里选，也可以配别的）",) if pair else ()),
         contrast=round(contrast, 1),
         category=style.get("category", ""),
         tone_key=tk,
     )
-
-
-def _tone_curve(style, p5, p50, p95, contrast, ct, ct_ok, bp_min, bp_max, key="") -> Adjustment | None:
-    """风格的影调（黑场、黑位、对比、中间调）合成一条 RGB 曲线：几个要求一起算，不会两条曲线叠加把暗部压两次。
-
-    key（tone_key）为暗调 / 高调时保持基调：对比只动一端——暗调加对比只压深暗部、降对比只压暗亮部（不提亮），
-    高调加对比只提亮亮部、降对比只提亮暗部（不压暗）。
-    """
-    reasons, pts = [], {}
-    lo, hi = float(p5), float(p95)
-    capped = False
-    if ct_ok is False:
-        goal = ct[1] if contrast > ct[1] else ct[0]
-        need = goal - contrast  # > 0 加对比，< 0 降对比
-        word = "加对比" if need > 0 else "降低对比"
-        if key in KEY_NAME:
-            # 暗调：加对比 → 暗部往下（最多到 BLACK_FLOOR_L），降对比 → 亮部往下；高调：加对比 → 亮部往上，降对比 → 暗部往上
-            dark_end = (key == "low") == (need > 0)
-            room = (lo - BLACK_FLOOR_L if key == "low" else 99.0 - hi) if need > 0 else float("inf")
-            move = float(min(abs(need), max(0.0, room), TONE_MOVE_CAP))
-            capped |= move < abs(need) and move == TONE_MOVE_CAP
-            if move >= 1.0:
-                if dark_end:
-                    lo += move if key == "high" else -move
-                else:
-                    hi += move if key == "high" else -move
-                end = "暗部" if dark_end else "亮部"
-                how = "提亮" if key == "high" else ("压深" if dark_end else "压暗")
-                keep = "不提亮" if key == "low" else "不压暗"
-                reasons.append(f"{word}（{KEY_NAME[key]}画面：只{how}{end}，{keep}）：亮暗差 {contrast:.0f} → "
-                               f"{contrast + (move if need > 0 else -move):.0f}"
-                               + ("" if move >= abs(need) or capped else f"，其余差距是{KEY_NAME[key]}本身，不用补"))
-        else:
-            shift = need / 2.0
-            capped |= abs(shift) > TONE_MOVE_CAP
-            shift = float(np.clip(shift, -TONE_MOVE_CAP, TONE_MOVE_CAP))
-            lo, hi = lo - shift, hi + shift
-            reasons.append(f"降低对比：亮暗差 {contrast:.0f} → {ct[1]} 以内" if contrast > ct[1] else f"加对比：亮暗差 {contrast:.0f} → ≥ {ct[0]}")
-    if bp_max is not None and p5 > bp_max:
-        capped |= p5 - bp_max > TONE_MOVE_CAP
-        lo = min(lo, max(float(bp_max), p5 - TONE_MOVE_CAP))
-        reasons.append(f"黑位压深：P5 明度 {p5:.0f} → ≤ {bp_max}")
-    if bp_min is not None and p5 < bp_min:
-        pts[0] = nl.gray8(bp_min)
-        lo = max(lo, float(bp_min))
-        reasons.append(f"黑场抬起：输入 0 → 输出约 {pts[0]}（P5 明度 {p5:.0f} → ≥ {bp_min}）")
-    lo, hi = float(np.clip(lo, 0, 100)), float(np.clip(hi, 0, 100))
-    for x, y in ((nl.gray8(p5), nl.gray8(lo)), (nl.gray8(p95), nl.gray8(hi))):
-        if 0 < x < 255 and x != y:
-            pts[x] = y
-    if style.get("min_median_L") and p50 < style["min_median_L"]:
-        goal = min(float(style["min_median_L"]), float(p50) + TONE_MOVE_CAP)  # 和其他影调一样一次最多移动 TONE_MOVE_CAP
-        capped |= goal < style["min_median_L"]
-        pts[nl.gray8(p50)] = nl.gray8(goal)
-        reasons.append(f"中间调提亮：中位明度 {p50:.0f} → {goal:.0f}（目标 ≥ {style['min_median_L']}）")
-    if not reasons:
-        return None
-    curve, last = [], -1
-    for x in sorted(pts):  # 输出必须随输入单调增加，否则曲线会翻折
-        if pts[x] > last:
-            curve.append((x, pts[x]))
-            last = pts[x]
-    if max((abs(y - x) for x, y in curve), default=0) < TONE_MIN_MOVE:
-        return None  # 差距换成曲线不到 3 级：看不出来，不给曲线
-    p = nl.curves({"composite": curve})
-    moved = nl.curves_text(p)
-    note = "（差得太多，先调这么多，重新分析后再看）" if capped else ""
-    return nl.adjustment("curves", p, "RGB 曲线（风格影调）：" + "；".join(reasons) + f"。{moved}{note}", "global", "风格影调 · 曲线")
 
 
 def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None, cf_value=None) -> list[Adjustment]:
@@ -794,15 +701,21 @@ def _style_adjustments(sub, style, lab2, L, pct, sh, hl, sh_ok=None, hl_ok=None,
 
 # ================================================================ 汇总
 def analyze_palette(image: np.ndarray, style_key: str | None = None, family: str | None = None,
-                    family_target_lab=None, offset=(0, 0), tone_intent: str = "auto") -> PaletteReport:
-    from colordoctor.core.exposure import resolve_key
+                    family_target_lab=None, offset=(0, 0), tone_style: str = "", tone_target: str = "") -> PaletteReport:
+    """tone_style / tone_target：影调风格（tone_class.TONE_STYLES 的键）/ 直接选的目标影调（九种之一），都可以为空。"""
+    from colordoctor.core import tone_class as tcl
 
     sub, _, lab, lch = _prep(image)
     cf = colorfulness(sub, lch)
     palette, ratio = ratio_631(lab)
     tone = tuple(round(float(v), 1) for v in np.percentile(lch[..., 0], [5, 25, 50, 75, 95]))
     unity = family_unity(image, family, family_target_lab, offset) if family else None
-    style = style_match(image, get_style(style_key), tone_intent=tone_intent) if style_key else None
     detected = tone_key(lch[..., 0])
+    main, also, label = tcl.resolve_target(tone_style, tone_target)
+    cls = tcl.classify(sub)
+    target = tcl.pick_goal(cls.name, main, also)  # 影调风格有几种可接受的影调：往最近的那种走
+    key = tcl.key_code(target) if target else detected  # 选了目标影调：颜色按目标的基调处理
+    style = style_match(image, get_style(style_key), key=key) if style_key else None
     return PaletteReport(cf, palette, ratio, tuple(ac.channel_stats(sub)), tone, unity, style,
-                         tone_key=resolve_key(detected, tone_intent), detected_key=detected, tone_intent=tone_intent)
+                         tone_key=key, detected_key=detected, tone_class=cls,
+                         tone_target=target, tone_label=label, tone_also=also)

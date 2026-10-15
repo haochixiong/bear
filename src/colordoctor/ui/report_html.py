@@ -116,7 +116,11 @@ def report_html(r: AnalysisReport, details: bool = False) -> str:
             parts.insert(0, f"「{p.style.name}」匹配度 {p.style.score:.0f}/100")
         if p.unity is not None:
             parts.append(f"“{p.unity.family}”统一度 {p.unity.score:.0f}")
+        if p.tone_class is not None:
+            parts.insert(0, f"影调 {p.tone_class.name}" + (f" → {p.tone_target}" if p.tone_target and p.tone_target != p.tone_class.name else ""))
         head = f"<h2>{escape(mode_name)}：{escape('；'.join(parts))}</h2>"
+        if p.tone_class is not None:
+            head += tone_grid_html(p)
     elif r.mode == "reference" and r.reference is not None:
         head = f"<h2>{escape(mode_name)}：与参考相似度 {r.reference.similarity:.0f}/100</h2>"
     else:
@@ -153,6 +157,29 @@ def report_html(r: AnalysisReport, details: bool = False) -> str:
     if details:
         body += details_html(r)
     return body
+
+
+def tone_grid_html(p) -> str:
+    """九种影调的九宫格：实底 = 现在的影调，粗框 = 目标影调；下面一行说各影调风格离现在多远。"""
+    from colordoctor.core import tone_class as tcl
+
+    cur, goal = p.tone_class.name, p.tone_target
+    rows = ["<tr><td></td>" + "".join(f"<td align=center style='color:{TEXT_DIM}'>{n}调</td>" for n in tcl.LENGTHS) + "</tr>"]
+    for k in tcl.KEYS:
+        cells = []
+        for n in tcl.LENGTHS:
+            name = f"{k}{n}调"
+            style = "background:#5a4a3a;color:#fff;" if name == cur else ""
+            mark = "（现在）" if name == cur else ("（目标）" if name == goal else "")
+            border = "border:2px solid #e08a5f;" if name == goal and goal != cur else "border:1px solid #666;"
+            cells.append(f"<td style='{style}{border}' title='{escape(tcl.TONE_DESC[name])}'><b>{name}</b>{mark}</td>")
+        rows.append(f"<tr><td style='color:{TEXT_DIM}'>{k}调</td>{''.join(cells)}</tr>")
+    near = f"（接近{p.tone_class.near}）" if p.tone_class.near else ""
+    hint = f"<p>现在是<b>{escape(cur)}</b>{escape(near)}：{escape(p.tone_class.desc)}。"
+    if goal and goal != cur:
+        hint += f"目标「{escape(p.tone_label)}」{escape(goal)}：{escape(tcl.path_words(cur, goal))}。"
+    hint += f"<br><span style='color:{TEXT_DIM}'>各影调风格离现在多远：{escape(tcl.suggestion_text(cur))}</span></p>"
+    return f"<table cellpadding=4 cellspacing=2>{''.join(rows)}</table>" + hint
 
 
 def _bar(share: float, rgb, width: int = 220) -> str:

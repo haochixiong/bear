@@ -136,7 +136,9 @@ def test_black_gold_checks_black_point_and_cold_colors():
     img2 = flat(lch_color(40, 35, 260), 160, 200)  # 大面积蓝色、黑位不深
     bad = pl.style_match(img2, pl.get_style("black_gold"))
     assert good.score > bad.score
-    assert any("黑位" in g for g in bad.gaps)
+    # 黑位 / 压暗属于影调：颜色模板不判断，只提示常配的影调风格
+    assert not any("黑位" in g for g in bad.gaps)
+    assert any("暗调情绪" in n for n in bad.notes)
     assert any("蓝色" in a.instruction and "饱和度" in a.instruction for a in bad.adjustments)
 
 
@@ -203,22 +205,21 @@ def _gradient(lo, hi, h=120, w=160):
     return cs.lab_to_srgb8(lab)
 
 
-def test_film_look_flags_crushed_blacks_and_high_contrast():
+def test_film_color_template_leaves_blacks_and_contrast_to_the_tone_style():
+    """胶片的黑位抬起、低反差属于影调：颜色模板（Portra）不再按黑位 / 对比打分或给曲线，交给「影调风格 · 胶片」。"""
+    from colordoctor.core import tone_class as tc
+
     portra = pl.get_style("kodak_portra400")
     harsh = pl.style_match(_gradient(0, 100), portra)
     soft = pl.style_match(_gradient(12, 80), portra)
-    assert any("黑位太深" in g for g in harsh.gaps)
-    assert any("对比度" in g and "降低" in g for g in harsh.gaps)
-    assert not any("黑位太深" in g or "对比度" in g for g in soft.gaps)
-    assert soft.score > harsh.score
-    curves = [a.instruction for a in harsh.adjustments if a.tool == "曲线"]
-    assert any("黑场抬起" in t for t in curves) and any("降低对比" in t for t in curves)
+    for m in (harsh, soft):
+        assert not any("黑位" in g or "对比度" in g for g in m.gaps)
+        assert not any(a.tool == "曲线" and a.layer for a in m.adjustments)
+        assert any("胶片" in n for n in m.notes)
     assert harsh.contrast > soft.contrast
-
-
-def test_high_contrast_style_asks_for_more_contrast():
-    m = pl.style_match(_gradient(35, 65), pl.get_style("fuji_velvia"))
-    assert any("对比度" in g and "提高" in g for g in m.gaps)
+    # 影调风格「胶片」（中短调）：黑场抬起、亮部收住
+    pts, _ = tc.match_curve(tc.quantiles(_gradient(0, 100)), tc.target_quantiles("中短调"))
+    assert pts[1][1] > pts[1][0] and pts[-2][1] < pts[-2][0]
 
 
 def test_style_grading_not_suggested_when_tint_ok_or_neutral_spec():

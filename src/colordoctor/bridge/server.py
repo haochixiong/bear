@@ -8,7 +8,7 @@
 
 协议（全部 JSON，除像素和蒙版外）：
   GET  /health
-  POST /analyze?mode=dirty|skin|palette|reference[&preset=&part=&style=&family=&ref=]
+  POST /analyze?mode=dirty|skin|palette|reference[&preset=&part=&style=&family=&tone_style=&tone_target=&ref=]
        头：X-Width X-Height X-Components(3|4) [X-Doc-Width X-Doc-Height X-Layer-Kind X-Layer-Name]
        体：width*height*components 字节（行优先、交错 RGB(A)）
   POST /reference   同上的像素格式，存为参考图，返回 {"ref": id}
@@ -118,11 +118,15 @@ def run_analysis(prep, mode: str, q: dict, refs: Store, layer_name: str = ""):
                 raise pixel_guard.BlockedError("没有在这个图层里找到皮肤。请确认选中的是人像图层，或把分析对象改为「合并可见图层」。")
         return analysis.analyze_skin_region(rgb, ctx, preset_key=q.get("preset") or None, part=part, manual_mask=manual)
     if mode == "palette":
-        tone = q.get("tone") or "auto"
-        if tone not in ("auto", "low", "normal", "high"):
-            raise ValueError("影调应为 auto / low / normal / high")
+        from colordoctor.core import tone_class as tcl
+
+        tone_style, tone_target = q.get("tone_style") or "", q.get("tone_target") or ""
+        if tone_style and tone_style not in tcl.TONE_STYLES:
+            raise ValueError(f"不认识的影调风格：{tone_style}")
+        if tone_target and tone_target not in tcl.TONE_NAMES:
+            raise ValueError(f"不认识的影调：{tone_target}")
         return analysis.analyze_palette_report(prep.filled_for_statistics(), ctx, style_key=q.get("style") or None,
-                                               family=q.get("family") or None, tone_intent=tone)
+                                               family=q.get("family") or None, tone_style=tone_style, tone_target=tone_target)
     if mode == "reference":
         ref = refs.get(q.get("ref", ""))
         if ref is None:
@@ -242,7 +246,18 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "plan": plan_json,
         "acr_params": acr_preset.params_for_report(report),
         "acr_calibrated": acr_channels.is_calibrated(),
+        "tone": tone_json(report),
     }
+
+
+def tone_json(report) -> dict | None:
+    """整图模式：现在的影调、目标影调和各影调风格离现在多远（插件画九宫格、给提示用）。"""
+    from colordoctor.core import tone_class as tcl
+
+    p = report.palette
+    if p is None or p.tone_class is None:
+        return None
+    return tcl.to_json(p.tone_class, p.tone_target, p.tone_also, p.tone_label)
 
 
 def patch_values(pixels: np.ndarray) -> dict:
@@ -427,10 +442,16 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/options":
             from colordoctor.core import palette as pl
             from colordoctor.core import skin_presets as sp
+            from colordoctor.core import tone_class as tcl
             from colordoctor.core.color_spaces import HUE_SECTORS
 
             return self._send(200, {
-                "styles": [{"key": st["key"], "name": st["name"], "category": st.get("category", "")} for st in pl.load_styles()],
+                "styles": [{"key": st["key"], "name": st["name"], "category": st.get("category", ""),
+                            "description": st.get("description", ""), "tone_pair": st.get("tone_pair", [])}
+                           for st in pl.load_styles()],
+                "tone_styles": [{"key": k, **{f: v[f] for f in ("name", "target", "look", "scene")}, "also": list(v["also"])}
+                                for k, v in tcl.TONE_STYLES.items()],
+                "tones": [{"name": n, "desc": tcl.TONE_DESC[n]} for n in tcl.TONE_NAMES],
                 "presets": [{"key": pr.key, "name": pr.name} for pr in sp.load_presets()],
                 "families": [name for name, _, _ in HUE_SECTORS],
             })

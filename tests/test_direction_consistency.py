@@ -197,7 +197,7 @@ TONE_WORDS = (("提亮", 1), ("压深", -1), ("压暗", -1), ("抬起", 1))
 
 
 def check_tone_words(chk: Check, reason: str, params: dict):
-    """风格影调曲线：说“提亮 / 抬起”的要有往上的点，说“压深 / 压暗”的要有往下的点。"""
+    """影调曲线：说“提亮 / 抬起”的要有往上的点，说“压深 / 压暗”的要有往下的点。"""
     pts = params["channels"].get("composite", [])
     said = re.sub(r"不(提亮|压深|压暗|抬起)", "", reason)  # “只压深暗部，不提亮”里的“不提亮”不算
     for word, sign in TONE_WORDS:
@@ -410,23 +410,6 @@ def check_style(c: Check, img, after, style, ly, m0):
                 continue
             a0, a1 = lab0[sel[tone], 1:].mean(0), lab1[sel[tone], 1:].mean(0)
             c.toward_vec(f"{tone} 色调 (a*, b*)", a0, a1, _tint_goal(a0, style[key]), slack=1.0, hi=1.4)
-    elif ly.kind == "curves":
-        p0, p1 = _tone(img), _tone(after)
-        r = ly.reason
-        if "加对比" in r:
-            c.up("亮暗差 P95−P5", p0[2] - p0[0], p1[2] - p1[0], cap=style["contrast"][1] + 3)
-        if "降低对比" in r:
-            c.down("亮暗差 P95−P5", p0[2] - p0[0], p1[2] - p1[0], floor=style["contrast"][0] - 3)
-        if "黑位压深" in r:
-            c.down("黑位 P5", p0[0], p1[0], floor=-0.5)
-        if "黑场抬起" in r:
-            c.up("黑位 P5", p0[0], p1[0], cap=style["black_point_min"] + 4)
-        if "中间调提亮" in r:
-            c.up("中位明度", p0[1], p1[1], cap=style["min_median_L"] + 3)
-        if m0.tone_key == "low" and "中间调提亮" not in r:
-            if p1[1] > p0[1] + 1.0 or p1[2] > p0[2] + 1.0:
-                c.fail(f"暗调画面被提亮：P50 {p0[1]:.1f} → {p1[1]:.1f}，P95 {p0[2]:.1f} → {p1[2]:.1f}")
-        check_tone_words(c, r, ly.params)
     elif ly.kind == "hueSaturation":
         check_style_huesat(c, img, after, style, ly)
     else:
@@ -483,11 +466,10 @@ def check_palette_report(tag, img, rep, style_key=None, family_target=None):
             after = apply(img, plan, ly)
             c = Check(f"{tag} [{f.problem}] {ly.name}")
             p = f.problem
-            if p.startswith("整体缺色") and ly.kind == "curves":
-                t0, t1 = _tone(img), _tone(after)
-                c.up("亮暗差 P95−P5", t0[2] - t0[0], t1[2] - t1[0])
-                if rep.palette.tone_key:
-                    c.fail(f"{pl.KEY_NAME[rep.palette.tone_key]}画面不应该另加对比曲线")
+            if p.startswith("影调："):
+                check_tone_style(c, img, after, rep, ly)
+            elif ly.kind == "curves":
+                c.fail("明暗只由“影调”那张卡改：其他卡片（颜色、缺色）不应该有曲线图层")
             elif p.startswith("整体缺色"):
                 c.up("色彩丰富度", cf0, pl.colorfulness(after).value, cap=style["colorfulness"][1] + 5 if style else None)
             elif p.startswith("颜色过艳"):
@@ -496,12 +478,29 @@ def check_palette_report(tag, img, rep, style_key=None, family_target=None):
                 check_ratio_desat(c, img, after, rep, ly)
             elif "统一度" in p:
                 check_unity(c, img, after, rep, ly, family_target)
-            elif p.startswith("与「"):
+            elif p.startswith("与颜色「"):
                 check_style(c, img, after, style, ly, m0)
             else:
                 c.fail("没有对应的检查（新的问题类型？）")
             chk.bad += c.bad
     return chk.bad
+
+
+def check_tone_style(c: Check, img, after, rep, ly):
+    """影调卡的曲线：明度分位点整体更接近目标影调，影调（九宫格上）不会离目标更远；文字说的方向和曲线一致。"""
+    from colordoctor.core import tone_class as tcl
+
+    if ly.kind != "curves":
+        c.fail(f"影调卡只应该有曲线：{ly.kind}")
+        return
+    goal = rep.palette.tone_target
+    tq = np.array(tcl.target_quantiles(goal))
+    q0, q1 = np.array(tcl.quantiles(img)), np.array(tcl.quantiles(after))
+    c.down("分位点与目标影调的平均差", np.abs(q0 - tq).mean(), np.abs(q1 - tq).mean())
+    n0, n1 = tcl.classify(img).name, tcl.classify(after).name
+    if tcl.tone_distance(n1, goal) > tcl.tone_distance(n0, goal):
+        c.fail(f"影调离目标更远了：{n0} → {n1}（目标 {goal}）")
+    check_tone_words(c, ly.reason, ly.params)
 
 
 def check_ratio_desat(c: Check, img, after, rep, ly):
@@ -791,6 +790,20 @@ def test_palette_layers_move_toward_every_style(name):
     for fam, tl in (("绿", (50, -35, 30)), ("蓝", (60, -5, -35)), ("橙", None), ("橙", (66, 12, 24))):
         rep = an.analyze_palette_report(img, CTX, family=fam, family_target_lab=tl)
         bad += check_palette_report(f"{name} family={fam} target={tl}", img, rep, None, tl)
+    assert not bad, "\n".join(bad)
+
+
+@pytest.mark.parametrize("name", list(IMAGES))
+def test_tone_style_curves_move_toward_the_target_tone(name):
+    """每种影调风格、每种直接选的影调：曲线把明暗分布拉向目标影调。"""
+    from colordoctor.core import tone_class as tcl
+
+    img = IMAGES[name]
+    bad = []
+    for key in tcl.TONE_STYLES:
+        bad += check_palette_report(f"{name} tone_style={key}", img, an.analyze_palette_report(img, CTX, tone_style=key))
+    for t in tcl.TONE_NAMES:
+        bad += check_palette_report(f"{name} tone={t}", img, an.analyze_palette_report(img, CTX, tone_target=t))
     assert not bad, "\n".join(bad)
 
 

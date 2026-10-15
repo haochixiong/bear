@@ -6,7 +6,9 @@
 直方图按 PS 的“明度”算（0.30R + 0.59G + 0.11B，0–255），分成 10 格（每格约 25.5 级）：
   第 0–3 格为暗部、4–6 格为中间调、7–9 格为亮部，哪一段像素最多就是什么基调；
   去掉两端各 2% 的零星像素后量跨度：≥ 170 级（约 2/3 个直方图）为长调、90–170 为中调、< 90 为短调。
-例如：日系高调人像多是“高短调 / 高中调”，暗调情绪人像多是“低长调 / 低中调”，胶片、莫兰迪多是“中短调”。
+例如：日系高调人像多是“高短调 / 高中调”，暗调情绪人像多是“低长调 / 低中调”，胶片多是“中短调”。
+
+影调风格（TONE_STYLES）= 预制的目标影调，只管明暗和反差，和颜色模板互不绑定。
 """
 
 from __future__ import annotations
@@ -96,6 +98,7 @@ def classify(rgb: np.ndarray, valid: np.ndarray | None = None) -> ToneClass:
 # 每种影调的代表性分位点（明度 0–255）：P2 / P25 / P50 / P75 / P98。往目标影调调整时按分位点做直方图匹配。
 _CENTER = {"高": 200.0, "中": 128.0, "低": 55.0}
 _SPAN = {"长": 215.0, "中": 140.0, "短": 75.0}
+MID_HALF = 22.0  # 中调：P25 / P75 离 P50 最多这么远
 
 
 def target_quantiles(name: str) -> tuple[float, float, float, float, float]:
@@ -111,8 +114,12 @@ def target_quantiles(name: str) -> tuple[float, float, float, float, float]:
         p50 = c
     else:
         p2, p98, p50 = c - s / 2, c + s / 2, c
-    p25 = p2 + (p50 - p2) * 0.6
-    p75 = p50 + (p98 - p50) * 0.4
+    if key == "中":
+        # 中间的一半像素（P25–P75）都落在中间调一段（102–179）里：中间调一定占多数，调完不会被判成低调 / 高调
+        p25, p75 = p50 - min(MID_HALF, (p50 - p2) * 0.4), p50 + min(MID_HALF, (p98 - p50) * 0.4)
+    else:
+        p25 = p2 + (p50 - p2) * 0.6
+        p75 = p50 + (p98 - p50) * 0.4
     return (round(p2, 1), round(p25, 1), round(p50, 1), round(p75, 1), round(p98, 1))
 
 
@@ -137,7 +144,7 @@ def match_curve(current: tuple, target: tuple) -> tuple[list[list[int]], bool]:
         if y - x > MAX_MOVE or x - y > MAX_MOVE:
             capped = True
             y = x + np.clip(y - x, -MAX_MOVE, MAX_MOVE)
-        xi, yi = int(round(x)), int(round(y))
+        xi, yi = round(float(x)), round(float(y))
         if xi <= last_x + 3 or xi >= 252:  # 太近的点合并，避免曲线打折
             continue
         yi = max(yi, last_y + 1)
@@ -145,3 +152,203 @@ def match_curve(current: tuple, target: tuple) -> tuple[list[list[int]], bool]:
         last_x, last_y = xi, pts[-1][1]
     pts.append([255, 255])
     return pts, capped
+
+
+# ---------------------------------------------------------------- 影调风格（预制的目标影调）
+# 影调风格只决定“明暗和反差往哪里走”，和颜色无关：港风可以配青橙，也可以配黑金。
+# target：主目标影调；also：也算符合的影调（已经是这些影调就不生成曲线）。
+# look：看起来是什么样（给不熟悉这些叫法的人看）；scene：常见用在哪。
+TONE_STYLES: dict[str, dict] = {
+    "japanese": {"name": "日系", "target": "高短调", "also": ("高中调",),
+                 "look": "明亮、柔和、反差小；暗部是浅灰而不是黑，像窗边的自然光",
+                 "scene": "清新人像、生活照、街拍"},
+    "korean": {"name": "韩系", "target": "高中调", "also": ("高短调",),
+               "look": "明亮干净，比日系多一点层次和反差，皮肤白净",
+               "scene": "精致写真、棚拍人像"},
+    "bright": {"name": "白亮通透", "target": "高长调", "also": ("高中调",),
+               "look": "明亮为主，同时保留头发、眼睛这类少量深色，清爽有力度",
+               "scene": "商业人像、白底、明亮室内"},
+    "cos": {"name": "Cos", "target": "高长调", "also": ("中长调",),
+            "look": "主体亮、轮廓清楚、反差大，光影和颜色都偏强",
+            "scene": "Cosplay、角色写真、棚拍"},
+    "forest": {"name": "森系", "target": "中中调", "also": ("高中调", "中短调"),
+               "look": "自然柔和、略偏亮，以中间调为主，不压黑",
+               "scene": "草地树林、自然光人像"},
+    "french": {"name": "法式", "target": "中中调", "also": ("中短调",),
+               "look": "自然慵懒，反差适中，暗部柔和不死黑",
+               "scene": "咖啡馆、街头、生活方式人像"},
+    "film": {"name": "胶片", "target": "中短调", "also": ("中中调",),
+             "look": "柔和偏灰，黑位抬起（最暗处是深灰，不是纯黑），高光收住",
+             "scene": "复古、旅行、生活记录"},
+    "cinematic": {"name": "电影感", "target": "中长调", "also": ("低长调",),
+                  "look": "亮暗都有、反差大、层次丰富，有叙事感",
+                  "scene": "街拍、夜景、风光人像"},
+    "hongkong": {"name": "港风", "target": "低中调", "also": ("中中调",),
+                 "look": "整体偏暗、浓郁，暗部厚重但不死黑，像 90 年代港片",
+                 "scene": "霓虹夜景、复古人像、街头"},
+    "moody": {"name": "暗调情绪", "target": "低长调", "also": ("低中调",),
+              "look": "大面积暗部，只有主体或光源是亮的，戏剧性强",
+              "scene": "情绪人像、伦勃朗光、窗光、夜景"},
+}
+
+KEY_IDX = {"低": 0, "中": 1, "高": 2}
+LEN_IDX = {"短": 0, "中": 1, "长": 2}
+
+
+def resolve_target(style: str = "", tone: str = "") -> tuple[str, tuple[str, ...], str]:
+    """(目标影调, 也算符合的影调, 显示名)。tone（直接选的影调）优先于 style；都没有时目标为空（只看影调，不改）。"""
+    if tone:
+        if tone not in TONE_NAMES:
+            raise ValueError(f"不认识的影调：{tone}")
+        return tone, (), tone
+    if style:
+        if style not in TONE_STYLES:
+            raise ValueError(f"不认识的影调风格：{style}")
+        s = TONE_STYLES[style]
+        return s["target"], tuple(s["also"]), s["name"]
+    return "", (), ""
+
+
+def pick_goal(cur: str, target: str, also: tuple[str, ...] = ()) -> str:
+    """影调风格有几种可接受的影调时，往离现在最近的那一种走（改动最小）；一样近时用主目标。"""
+    if not target:
+        return ""
+    return min((target, *also), key=lambda t: tone_distance(cur, t))
+
+
+def key_code(name: str) -> str:
+    """影调 → 颜色分析按哪种基调处理："low" / "high" / ""（中调）。"""
+    return {"低": "low", "高": "high"}.get(name[:1], "") if name else ""
+
+
+def path_words(cur: str, target: str) -> str:
+    """从 cur 影调到 target 影调要做什么，例如“整体提亮一档、压缩反差”。"""
+    if cur == target:
+        return "已经是这种影调"
+    dk = KEY_IDX[target[0]] - KEY_IDX[cur[0]]
+    dl = LEN_IDX[target[1]] - LEN_IDX[cur[1]]
+    out = []
+    if dk:
+        out.append(("整体提亮" if dk > 0 else "整体压暗") + ("一大截" if abs(dk) == 2 else ""))
+    if dl > 0:
+        out.append("拉开反差（亮暗拉开）")
+    elif dl < 0:
+        out.append("压缩反差（亮暗靠拢）")
+    return "、".join(out)
+
+
+def curve_words(pts, mid_x: float | None = None) -> str:
+    """曲线实际怎么动：暗部 / 中间调（输入最接近 mid_x 的点）/ 亮部各往哪边走（按曲线点说，和图层一致）。"""
+    inner = [(x, y) for x, y in pts if 0 < x < 255]
+    if not inner:
+        return ""
+    picks = [("暗部", inner[0])]
+    if mid_x is not None and len(inner) > 2:
+        mid = min(inner[1:-1], key=lambda p: abs(p[0] - mid_x))
+        if abs(mid[0] - mid_x) <= 12:
+            picks.append(("中间调", mid))
+    if len(inner) > 1:
+        picks.append(("亮部", inner[-1]))
+    return "、".join(f"{name}{'提亮' if y > x else '压暗'}（{x} → {y}）" for name, (x, y) in picks if abs(y - x) >= 3)
+
+
+def tone_distance(cur: str, target: str) -> int:
+    return abs(KEY_IDX[target[0]] - KEY_IDX[cur[0]]) + abs(LEN_IDX[target[1]] - LEN_IDX[cur[1]])
+
+
+def suggestions(cur: str) -> list[dict]:
+    """每种影调风格离现在的影调有多远、要怎么改（按远近排序），给用户选方向时参考。"""
+    out = []
+    for k, s in TONE_STYLES.items():
+        goal = pick_goal(cur, s["target"], tuple(s["also"]))
+        out.append({"key": k, "name": s["name"], "target": goal, "distance": tone_distance(cur, goal),
+                    "change": "已经符合" if goal == cur else path_words(cur, goal)})
+    out.sort(key=lambda x: x["distance"])
+    return out
+
+
+def suggestion_text(cur: str) -> str:
+    groups = {0: [], 1: [], 2: []}
+    for s in suggestions(cur):
+        groups[min(s["distance"], 2)].append(s["name"])
+    parts = []
+    if groups[0]:
+        parts.append(f"已经符合：{'、'.join(groups[0])}")
+    if groups[1]:
+        parts.append(f"稍改就到：{'、'.join(groups[1])}")
+    if groups[2]:
+        parts.append(f"变化较大：{'、'.join(groups[2])}")
+    return "；".join(parts)
+
+
+def to_json(tc: ToneClass, target: str = "", also: tuple[str, ...] = (), label: str = "") -> dict:
+    """给插件 / 界面画九宫格和直方图用。"""
+    return {"name": tc.name, "key": tc.key, "length": tc.length, "desc": tc.desc, "near": tc.near,
+            "shares": list(tc.shares), "lo": tc.lo, "hi": tc.hi, "span": tc.span, "histogram": list(tc.histogram),
+            "target": target, "also": list(also), "label": label,
+            "suggestions": suggestions(tc.name)}
+
+
+BIG_JUMP_NOTE = "影调变化很大（跨了一个基调以上）：曲线只能拉近一部分，硬拉会让暗部噪点和断层变明显；有 RAW 时先在 Camera Raw 里调曝光 / 阴影 / 高光，再回来分析"
+
+
+def tone_finding(rgb: np.ndarray, valid: np.ndarray | None, style: str, tone: str, confidence: float):
+    """影调卡：现在是哪种影调；选了影调风格（或直接选了影调）时，给出往目标影调走的曲线图层。
+
+    返回 (Finding, ToneClass, 目标影调)。
+    """
+    from colordoctor.core import native_layers as nl
+    from colordoctor.core.color_models import Finding, Severity
+
+    tc = classify(rgb, valid)
+    main, also, label = resolve_target(style, tone)
+    target = pick_goal(tc.name, main, also)
+    shares = f"暗部 {tc.shares[0]:.0%} · 中间调 {tc.shares[1]:.0%} · 亮部 {tc.shares[2]:.0%}"
+    evidence = [
+        f"明度分布（PS 明度直方图）：{shares}",
+        f"去掉两端各 2% 后从 {tc.lo:.0f} 到 {tc.hi:.0f}，跨度 {tc.span:.0f} 级（≥ {LONG_SPAN:.0f} 长调，< {SHORT_SPAN:.0f} 短调）",
+    ]
+    if tc.near:
+        evidence.append(f"处在分界附近，也接近{tc.near}")
+    head = f"影调：{tc.name}（{tc.desc}）"
+    if not target:
+        return Finding(
+            problem=head, severity=Severity.NORMAL, evidence=tuple(evidence), causes=(), adjustments=(),
+            confidence=confidence,
+            notes=("只描述现在的影调，不改明暗。想往某种影调走，请在「影调风格」里选一个（各影调风格离现在多远：" + suggestion_text(tc.name) + "）",),
+        ), tc, ""
+    who = label if label == target else f"「{label}」（{target}）"
+    if tc.name == target:
+        return Finding(
+            problem=f"{head}：已经符合{who}",
+            severity=Severity.NORMAL, evidence=tuple(evidence), causes=(), adjustments=(), confidence=confidence,
+            notes=("影调已经到位，不生成曲线；颜色按「颜色」里选的模板单独判断",),
+        ), tc, target
+    cur_q = quantiles(rgb, valid)
+    tgt_q = target_quantiles(target)
+    pts, capped = match_curve(cur_q, tgt_q)
+    dist = tone_distance(tc.name, target)
+    evidence.append("分位点（P2 / P25 / P50 / P75 / P98）：现在 " + " / ".join(f"{v:.0f}" for v in cur_q)
+                    + "，目标 " + " / ".join(f"{v:.0f}" for v in tgt_q))
+    params = nl.curves({"composite": pts})
+    moved = nl.curves_text(params)
+    text = (f"RGB 曲线（{curve_words(pts, cur_q[2])}）：{moved}。按直方图匹配，把现在的明暗分布拉向{target}"
+            + ("；一次每个点最多移动 45 级，调完重新分析再看" if capped else ""))
+    adjs = [nl.adjustment("curves", params, text, "global", f"影调 {tc.name}→{target} · 曲线",
+                          strength="中等" if dist >= 2 or capped else "小幅")]
+    notes = []
+    if abs(KEY_IDX[target[0]] - KEY_IDX[tc.name[0]]) == 2 or capped:
+        notes.append(BIG_JUMP_NOTE)
+        adjs.append(_raw_hint("有 RAW 时优先在 Camera Raw 里调曝光 / 阴影 / 高光：暗部噪点和断层更少"))
+    notes.append("曲线只改明暗、不改颜色（PS 曲线图层的混合模式可改成“明度”，避免提亮 / 压暗时饱和度跟着变）")
+    return Finding(
+        problem=f"{head} → 目标{who}：{path_words(tc.name, target)}",
+        severity=Severity.MILD if dist == 1 else Severity.NOTABLE,
+        evidence=tuple(evidence), causes=(), adjustments=tuple(adjs), confidence=confidence, notes=tuple(notes),
+    ), tc, target
+
+
+def _raw_hint(text: str):
+    from colordoctor.core.color_models import Adjustment
+
+    return Adjustment("Camera Raw", text, None, True)
