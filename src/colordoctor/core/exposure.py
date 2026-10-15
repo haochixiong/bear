@@ -1,8 +1,8 @@
 """曝光 / 影调意图：画面很暗时，到底是刻意的暗调（情绪人像），还是欠曝？
 
 单看像素分不出拍摄者的意图，所以由用户选择“影调”：
-  auto   自动判断（默认）：很暗 / 很亮的画面按刻意的暗调 / 高调处理，不提亮也不压暗，
-         但一定出一张说明卡；画面里几乎没有高光（像欠曝）时会明说，并给出提亮的数值供参考（不生成图层）。
+  auto   自动判断（默认）：不替用户判断拍摄意图。很暗 / 很亮的画面先不提亮、不压暗，
+         出一张说明卡：列出主体（皮肤）亮度、明暗分布等线索，以及两种选择的做法和参考数值（不生成图层）。
   low    刻意暗调：按暗调处理，不提亮。
   high   刻意高调：按高调处理，不压暗。
   normal 正常曝光：画面偏暗就是欠曝、偏亮就是过曝，给出带曲线图层的修正。
@@ -22,7 +22,6 @@ UNDER_MEDIAN_L = 40.0  # 正常曝光时，中位明度低于此值算欠曝
 OVER_MEDIAN_L = 75.0  # 正常曝光时，中位明度高于此值算过曝
 TARGET_MEDIAN_L = 50.0  # 欠曝 / 过曝修正后中位明度的目标
 MAX_STEP_L = 20.0  # 一次最多改这么多 L*（其余靠重新分析后再调或回到 RAW 调曝光）
-NO_HIGHLIGHT_P99 = 60.0  # 最亮的 1% 像素都不到这个明度：几乎没有高光，更像欠曝而不是布光造成的暗调
 HIGHLIGHT_LIMIT = 250  # 提亮曲线让最亮处不超过这个值，避免把高光推到死白
 
 
@@ -61,8 +60,40 @@ def _curve(L, target: float) -> tuple[list[list[int]], float, float]:
     return pts, float(p50), goal
 
 
-def exposure_finding(L, detected: str, intent: str, confidence: float) -> Finding | None:
-    """根据影调意图给出曝光说明或修正。L：分析区域的明度（L*）。"""
+SKIN_MIN_SHARE = 0.02  # 画面里像皮肤的像素至少占这么多，才用“主体（皮肤）亮度”做提示
+SKIN_DARK_L = 45.0  # 浅中肤色正常曝光时一般在 L* 55–75；低于这个值提示“主体也偏暗”
+SKIN_BRIGHT_L = 85.0
+
+
+def _hints(L, skin_L: float | None, dark: bool) -> tuple[str, ...]:
+    """给用户判断用的线索（不是结论）。
+
+    摄影上区分暗调和欠曝看的是主体：暗调 = 主体曝光正常、周围压暗；欠曝 = 主体也暗。
+    但深肤色正常曝光时本来就更暗、主体也不一定是人，所以这里只列出数字，由用户决定。
+    """
+    mid = float(((L >= 40) & (L <= 75)).mean())
+    out = [f"中间调（L* 40–75）占 {mid:.0%}，" + (f"暗部（L* < 25）占 {float((L < 25).mean()):.0%}" if dark
+                                              else f"亮部（L* > 85）占 {float((L > 85).mean()):.0%}")]
+    if skin_L is None:
+        out.append("画面里没有找到明显的皮肤，没法用主体亮度来参考")
+    elif dark:
+        out.append(f"画面里像皮肤的部分平均明度 L* {skin_L:.0f}：" + (
+            "主体也偏暗（浅中肤色正常曝光时多在 L* 55–75），要考虑是否欠曝" if skin_L < SKIN_DARK_L
+            else "主体亮度在正常范围，更接近“主体正常、周围压暗”的暗调")
+            + "；深肤色本身就更暗，只作参考")
+    else:
+        out.append(f"画面里像皮肤的部分平均明度 L* {skin_L:.0f}：" + (
+            "主体也很亮，皮肤细节可能已经损失，要考虑是否过曝" if skin_L > SKIN_BRIGHT_L
+            else "主体亮度在正常范围，更接近“主体正常、周围提亮”的高调") + "，只作参考")
+    return tuple(out)
+
+
+def exposure_finding(L, detected: str, intent: str, confidence: float, skin_L: float | None = None) -> Finding | None:
+    """根据影调意图给出曝光说明或修正。L：分析区域的明度（L*）；skin_L：画面里皮肤的平均明度（没有为 None）。
+
+    自动判断时不替用户判断拍摄意图：很暗 / 很亮的画面先不提亮、不压暗（把刻意的暗调提亮会毁掉氛围，
+    而欠曝的照片先保持原样只是等用户决定），卡片列出线索和两种选择。
+    """
     L = np.asarray(L, dtype=float).ravel()
     if L.size == 0:
         return None
@@ -70,35 +101,39 @@ def exposure_finding(L, detected: str, intent: str, confidence: float) -> Findin
     p1, p50, p99 = (float(v) for v in np.percentile(L, [1, 50, 99]))
     clip_hi = float((L >= 99.0).mean())
     ev_line = f"中位明度 L* {p50:.0f}，最暗 1% {p1:.0f}，最亮 1% {p99:.0f}"
-    switch = "；如果判断不对，在「影调」里改选"
+    why_default = ("工具没法只凭像素判断拍摄意图，默认先不改明暗：刻意的暗调 / 高调被改了会毁掉氛围，"
+                   "曝光问题先保持原样只是等你决定")
 
     if intent == "auto" and detected == "low":
-        looks_under = p99 < NO_HIGHLIGHT_P99
         pts, cur, goal = _curve(L, TARGET_MEDIAN_L)
-        hint = (f"如果其实是欠曝：把「影调」改为「正常曝光」再分析，会生成提亮曲线图层"
-                f"（参考：RGB 曲线 输入 {pts[1][0]} → 输出 {pts[1][1]}，约等于 Camera Raw 曝光 +{_ev(cur, goal):.1f}）")
         return Finding(
-            problem="画面整体很暗：" + ("看起来更像欠曝（几乎没有高光），暂按暗调处理、没有提亮" if looks_under
-                                        else "按刻意的暗调（情绪 / 低调人像）处理，没有提亮"),
-            severity=Severity.MILD if looks_under else Severity.NORMAL,
-            evidence=(ev_line, "画面里有明显高光（轮廓光、眼神光等），更像刻意的暗调" if not looks_under
-                      else f"最亮的 1% 像素也只有 L* {p99:.0f}：没有真正的高光，欠曝的可能性大"),
+            problem="画面整体很暗：没法只凭像素确定是刻意的暗调还是欠曝，暂不提亮",
+            severity=Severity.NORMAL,
+            evidence=(ev_line, *_hints(L, skin_L, dark=True)),
             causes=(),
-            adjustments=(Adjustment("提示", hint, None, True),),
+            adjustments=(
+                Adjustment("提示", f"如果是欠曝：「影调」选「正常曝光」再分析，会生成提亮曲线图层"
+                                   f"（参考：RGB 曲线 输入 {pts[1][0]} → 输出 {pts[1][1]}，约等于 Camera Raw 曝光 +{_ev(cur, goal):.1f}）",
+                           None, True),
+                Adjustment("提示", "如果是刻意的暗调（情绪 / 低调人像）：「影调」选「刻意暗调」，这张说明就不再出现", None, False),
+            ),
             confidence=confidence,
-            notes=("单看像素分不出是刻意压暗还是欠曝" + switch + "「刻意暗调」或「正常曝光」",),
+            notes=(why_default,),
         )
     if intent == "auto" and detected == "high":
-        pts, cur, goal = _curve(L, TARGET_MEDIAN_L + 10)
+        pts, cur, goal = _curve(L, TARGET_MEDIAN_L + 15)
         return Finding(
-            problem="画面整体很亮：按刻意的高调（日系 / 明亮）处理，没有压暗",
+            problem="画面整体很亮：没法只凭像素确定是刻意的高调还是过曝，暂不压暗",
             severity=Severity.NORMAL,
-            evidence=(ev_line, f"死白（L* ≥ 99）占 {clip_hi:.1%}"),
+            evidence=(ev_line, f"死白（L* ≥ 99）占 {clip_hi:.1%}", *_hints(L, skin_L, dark=False)),
             causes=(),
-            adjustments=(Adjustment("提示", f"如果其实是过曝：把「影调」改为「正常曝光」再分析，会生成压暗曲线图层"
-                                          f"（参考：RGB 曲线 输入 {pts[1][0]} → 输出 {pts[1][1]}）", None, True),),
+            adjustments=(
+                Adjustment("提示", f"如果是过曝：「影调」选「正常曝光」再分析，会生成压暗曲线图层"
+                                   f"（参考：RGB 曲线 输入 {pts[1][0]} → 输出 {pts[1][1]}）", None, True),
+                Adjustment("提示", "如果是刻意的高调（日系 / 明亮）：「影调」选「刻意高调」，这张说明就不再出现", None, False),
+            ),
             confidence=confidence,
-            notes=("单看像素分不出是刻意提亮还是过曝" + switch + "「刻意高调」或「正常曝光」",),
+            notes=(why_default,),
         )
     if intent != "normal":
         return None

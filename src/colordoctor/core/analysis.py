@@ -698,7 +698,16 @@ def analyze_palette_report(
     findings: list[Finding] = []
     # 暗调还是欠曝：自动判断时只说明、不提亮；用户选「正常曝光」时才按欠曝 / 过曝修正
     sub, _ = grid_downsample(image, MAX_SAMPLES)
-    exp = ex.exposure_finding(cs.srgb8_to_lab(sub.reshape(-1, 3)[:, :3])[:, 0], pr.detected_key, tone_intent, conf)
+    sub_L = cs.srgb8_to_lab(sub[..., :3]).reshape(-1, 3)[:, 0]
+    skin_L = None
+    if pr.detected_key:  # 很暗 / 很亮时，用画面里皮肤的亮度给用户做参考（主体是否也暗 / 也亮）
+        try:
+            sm, _info = skin_mask_mod.skin_mask(sub[..., :3])
+            if sm.mean() >= ex.SKIN_MIN_SHARE:
+                skin_L = float(np.median(sub_L.reshape(sm.shape)[sm]))
+        except Exception:
+            skin_L = None
+    exp = ex.exposure_finding(sub_L, pr.detected_key, tone_intent, conf, skin_L=skin_L)
     if exp is not None:
         findings.append(exp)
     cf = pr.colorfulness

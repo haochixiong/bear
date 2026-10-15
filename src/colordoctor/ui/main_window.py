@@ -397,7 +397,7 @@ class MainWindow(QMainWindow):
             self.tone_box.addItem(name, k)
         self.tone_box.setToolTip(
             "画面很暗 / 很亮时怎么处理：\n"
-            "自动判断：按刻意的暗调 / 高调处理（不提亮、不压暗），并说明判断依据，看起来像欠曝时会提醒\n"
+            "自动判断：不替你判断拍摄意图，先不提亮、不压暗；说明卡列出主体（皮肤）亮度、明暗分布等线索供你判断\n"
             "刻意暗调 / 刻意高调：情绪人像、日系高调等，保持基调\n"
             "正常曝光：暗了就是欠曝、亮了就是过曝，给出带曲线的修正")
         self.tone_box.currentIndexChanged.connect(self._palette_option_changed)

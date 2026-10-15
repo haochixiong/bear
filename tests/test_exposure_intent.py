@@ -13,17 +13,15 @@ from colordoctor.core.color_models import Severity
 CTX = synthetic_context()
 
 
-def _moody_with_rim_light():
-    """刻意的暗调人像：暗背景、正常的脸，再加一条轮廓光（真正的高光）。"""
-    img, _ = lowkey_face_scene()
-    img = img.copy()
-    img[20:200, 150:156] = (235, 228, 220)  # 轮廓光
+def _moody():
+    """刻意的暗调人像：主体（脸）曝光正常，周围压得很暗。"""
+    img, _ = lowkey_face_scene(skin_lab=(62.0, 13.0, 17.0))
     return img
 
 
 def _underexposed():
     img, _ = face_scene()
-    return (img.astype(float) * 0.35).astype(np.uint8)  # 整体欠曝：连最亮的地方也很暗
+    return (img.astype(float) * 0.35).astype(np.uint8)  # 整体欠曝：主体也很暗
 
 
 def _exposure(rep):
@@ -34,25 +32,36 @@ def _curves(rep, img):
     return [ly for ly in lp.plan_from_report(rep, img.shape).layers if ly.kind == "curves"]
 
 
-def test_auto_treats_moody_portrait_as_intentional_and_never_brightens():
-    img = _moody_with_rim_light()
+@pytest.mark.parametrize("make", [_moody, _underexposed])
+def test_auto_never_claims_the_intent_and_never_brightens(make):
+    """自动判断不替用户下结论（轮廓光、有没有高光都不能说明是刻意暗调）：中性说明 + 两种选择，不生成图层。"""
+    img = make()
     rep = an.analyze_palette_report(img, CTX)
     f = _exposure(rep)
-    assert f is not None and "刻意的暗调" in f.problem and f.severity == Severity.NORMAL
-    assert not _curves(rep, img)  # 不提亮
-    assert any("正常曝光" in a.instruction for a in f.adjustments)  # 告诉用户判断不对时怎么改
+    assert f is not None and "没法只凭像素确定" in f.problem and f.severity == Severity.NORMAL
+    assert "刻意的暗调处理" not in f.problem and "更像欠曝" not in f.problem
+    assert not _curves(rep, img)
+    texts = " ".join(a.instruction for a in f.adjustments)
+    assert "正常曝光" in texts and "刻意暗调" in texts and "输入" in texts
 
 
-def test_auto_says_it_looks_underexposed_but_does_not_force_it():
-    img = _underexposed()
-    rep = an.analyze_palette_report(img, CTX)
-    f = _exposure(rep)
-    assert f is not None and "欠曝" in f.problem and f.severity == Severity.MILD
-    assert not _curves(rep, img)  # 自动判断不替用户决定
-    assert any("输入" in a.instruction and "Camera Raw 曝光 +" in a.instruction for a in f.adjustments)
+def test_auto_hints_follow_the_subject_exposure():
+    moody = _exposure(an.analyze_palette_report(_moody(), CTX))
+    under = _exposure(an.analyze_palette_report(_underexposed(), CTX))
+    m, u = " ".join(moody.evidence), " ".join(under.evidence)
+    assert "主体亮度在正常范围" in m  # 主体正常、周围压暗
+    assert ("主体也偏暗" in u) or ("没有找到明显的皮肤" in u)  # 欠曝的皮肤可能连“像皮肤”都认不出
+    assert "只作参考" in m
 
 
-@pytest.mark.parametrize("make", [_underexposed, _moody_with_rim_light])
+def test_rim_light_does_not_decide_anything():
+    img = _underexposed().copy()
+    img[20:200, 150:156] = (235, 228, 220)  # 欠曝照片里也可能有窗户 / 灯 / 反光
+    f = _exposure(an.analyze_palette_report(img, CTX))
+    assert f is not None and "没法只凭像素确定" in f.problem
+
+
+@pytest.mark.parametrize("make", [_underexposed, _moody])
 def test_normal_exposure_brightens_with_a_curve_and_protects_highlights(make):
     img = make()
     rep = an.analyze_palette_report(img, CTX, tone_intent="normal")
@@ -69,7 +78,7 @@ def test_normal_exposure_brightens_with_a_curve_and_protects_highlights(make):
 
 
 def test_chosen_low_key_has_no_exposure_card_and_no_brightening():
-    for img in (_underexposed(), _moody_with_rim_light()):
+    for img in (_underexposed(), _moody()):
         rep = an.analyze_palette_report(img, CTX, tone_intent="low")
         assert _exposure(rep) is None and not _curves(rep, img)
 
@@ -79,7 +88,7 @@ def test_high_key_auto_note_and_normal_darkens():
     rep = an.analyze_palette_report(img, CTX)
     f = _exposure(rep)
     if rep.palette.detected_key == "high":
-        assert "刻意的高调" in f.problem and not _curves(rep, img)
+        assert "没法只凭像素确定" in f.problem and not _curves(rep, img)
     bright = np.clip(face_scene()[0].astype(float) * 1.6 + 60, 0, 255).astype(np.uint8)
     rep = an.analyze_palette_report(bright, CTX, tone_intent="normal")
     f = _exposure(rep)

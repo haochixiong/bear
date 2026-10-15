@@ -129,7 +129,7 @@ function select(id, items, withNone) {
 }
 
 // 影调：画面很暗 / 很亮时，是刻意的暗调 / 高调，还是欠曝 / 过曝（单看像素分不出，由用户决定；默认自动判断并说明）
-const TONE_SELECT = `<div class="row"><label>影调</label><select id="tone" title="自动判断：很暗 / 很亮的画面按刻意的暗调 / 高调处理（不提亮、不压暗），并说明依据，像欠曝时会提醒。正常曝光：暗了按欠曝、亮了按过曝给出曲线修正。">
+const TONE_SELECT = `<div class="row"><label>影调</label><select id="tone" title="自动判断：不替你判断拍摄意图，很暗 / 很亮的画面先不提亮、不压暗，说明卡列出主体（皮肤）亮度、明暗分布等线索供你判断。正常曝光：暗了按欠曝、亮了按过曝给出曲线修正。">
   <option value="auto">自动判断</option><option value="low">刻意暗调（情绪 / 低调人像）</option>
   <option value="normal">正常曝光（暗了就是欠曝）</option><option value="high">刻意高调（日系 / 明亮）</option></select></div>`;
 
