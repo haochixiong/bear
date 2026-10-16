@@ -70,14 +70,26 @@ def is_supported() -> bool:
     return sys.platform.startswith("win")
 
 
+_FILTER = None  # 整个程序只装一个原生事件过滤器，永不卸下（见 make_manager）
+_IDS = iter(range(0xB000, 0xC000))  # RegisterHotKey 编号全程序唯一，多个窗口也不撞车
+
+
 def make_manager(parent=None):
-    """返回一个 GlobalHotkeys 对象（Qt）；非 Windows 平台返回的对象注册总是失败。"""
+    """返回一个 GlobalHotkeys 对象（Qt）；非 Windows 平台返回的对象注册总是失败。
+
+    原生事件过滤器整个程序只装一个、一直留着，用弱引用把 WM_HOTKEY 转给还活着的管理器。
+    以前每个窗口各装一个、从不卸下：窗口销毁后过滤器由 Python 回收时析构，回收可能发生在
+    分析线程里，和主线程的事件循环同时改过滤器列表，Windows 上会随机崩溃。"""
+    import weakref
+
     from PyQt6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QObject, pyqtSignal
 
+    global _FILTER
+
     class _Filter(QAbstractNativeEventFilter):
-        def __init__(self, owner):
+        def __init__(self):
             super().__init__()
-            self.owner = owner
+            self.owners = weakref.WeakSet()
 
         def nativeEventFilter(self, event_type, message):  # pragma: no cover - Windows only
             try:
@@ -87,10 +99,11 @@ def make_manager(parent=None):
 
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == WM_HOTKEY:
-                    name = self.owner._ids.get(int(msg.wParam))
-                    if name:
-                        self.owner.triggered.emit(name)
-                        return True, 0
+                    for owner in list(self.owners):
+                        name = owner._ids.get(int(msg.wParam))
+                        if name:
+                            owner.triggered.emit(name)
+                            return True, 0
             except Exception:
                 pass
             return False, 0
@@ -101,11 +114,12 @@ def make_manager(parent=None):
         def __init__(self, parent=None):
             super().__init__(parent)
             self._ids: dict[int, str] = {}
-            self._next = 0xB000
-            self._filter = None
             if is_supported():
-                self._filter = _Filter(self)
-                QCoreApplication.instance().installNativeEventFilter(self._filter)
+                global _FILTER
+                if _FILTER is None:
+                    _FILTER = _Filter()
+                    QCoreApplication.instance().installNativeEventFilter(_FILTER)
+                _FILTER.owners.add(self)
 
         def register(self, name: str, text: str) -> tuple[bool, str]:
             try:
@@ -117,8 +131,9 @@ def make_manager(parent=None):
             import ctypes  # pragma: no cover - Windows only
 
             self.unregister(name)
-            hid = self._next
-            self._next += 1
+            hid = next(_IDS, None)
+            if hid is None:
+                return False, "快捷键注册次数过多，请重启本工具"
             ok = ctypes.windll.user32.RegisterHotKey(None, hid, mods | MOD_NOREPEAT, vk)
             if not ok:
                 return False, f"{text} 已被其他程序占用"
@@ -137,5 +152,11 @@ def make_manager(parent=None):
         def unregister_all(self) -> None:
             for name in set(self._ids.values()):
                 self.unregister(name)
+
+        def close(self) -> None:
+            """注销全部快捷键，不再接收（过滤器本身留着给其他窗口用）。"""
+            self.unregister_all()
+            if _FILTER is not None:
+                _FILTER.owners.discard(self)
 
     return GlobalHotkeys(parent)

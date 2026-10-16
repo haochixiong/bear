@@ -109,3 +109,13 @@ def test_freeze_all_screens_offscreen(qapp):
     caps = sc.freeze_all_screens()
     assert caps  # offscreen 平台也有一块虚拟屏幕
     assert caps[0].pixels.ndim == 3
+
+
+def test_hotkey_managers_close_cleanly(qapp):
+    """多个窗口各有一个快捷键管理器；关闭后不再接收，过滤器全程序只有一个。"""
+    a, b = hk.make_manager(), hk.make_manager()
+    a.close()
+    b.close()
+    a.close()  # 重复关闭无害
+    if hk.is_supported():  # pragma: no cover - Windows only
+        assert hk._FILTER is not None and len(hk._FILTER.owners) == 0

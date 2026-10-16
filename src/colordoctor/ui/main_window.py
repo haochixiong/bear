@@ -582,7 +582,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("managed", "true" if self._managed() else "false")
         self.settings.setValue("ui/geometry", self.saveGeometry())
         self.live_timer.stop()
-        self.hotkeys.unregister_all()
+        self.hotkeys.close()
         super().closeEvent(ev)
 
     def _ai_settings(self) -> dict:
