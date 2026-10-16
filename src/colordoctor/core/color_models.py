@@ -167,8 +167,8 @@ class ContaminationResult:
     mask: object = None  # np.ndarray (h, w) uint8：0 正常 1 无彩/忽略 2 对立色 3 发灰
     mask_scale: float = 1.0  # mask 像素到源像素的倍数
     blobs: tuple[Blob, ...] = ()
-    # 掩码里“正常”的像素按颜色数好的个数（与分析用的像素表的颜色一一对应）：阴影 / 高光分段直接用，
-    # 不必再把整幅掩码扫一遍。不进 JSON
+    # 掩码里“正常”的像素按颜色数好的 (不同的颜色, 个数)：阴影 / 高光分段直接用，不必再把整幅掩码扫一遍。
+    # 只在分析过程中用，放进报告前清掉（不把它留在历史记录里）；不进 JSON
     normal_counts: object = field(default=None, repr=False)
 
 

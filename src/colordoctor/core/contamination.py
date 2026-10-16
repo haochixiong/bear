@@ -22,7 +22,7 @@ import numpy as np
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.color_models import Blob, ContaminationResult
 from colordoctor.core.pixel_table import _cancel as _cancel_var
-from colordoctor.core.pixel_table import par_ranges, par_rows, table, wmedian
+from colordoctor.core.pixel_table import par_ranges, par_rows, table, tally, wmedian
 from colordoctor.core.region_statistics import weighted_circular_hue
 from colordoctor.core.sampling import FULL_RES_MAX, grid_downsample
 
@@ -252,11 +252,12 @@ def _drop_edges(pt, cand: np.ndarray) -> np.ndarray:
         cand[ys[drop], xs[drop]] = False
         return np.bincount(ci[drop], minlength=pt.n)
     clipped = pt.clipped if pt.clipped.any() else None
+    nothing = np.zeros(0, dtype=pt.index.dtype)
 
-    def part(y0, y1):
+    def part(y0, y1):  # 返回这几行里去掉的像素的颜色编号（最后一起数：不是每段一张 n 长的计数表）
         c = cand[y0:y1]
         if not c.any():
-            return none
+            return nothing
         idx = pt.index[y0:y1]
         drop = np.zeros(c.shape, dtype=bool)
         if clipped is not None:
@@ -266,9 +267,9 @@ def _drop_edges(pt, cand: np.ndarray) -> np.ndarray:
             drop |= g2 > lim
         drop &= c
         c &= ~drop
-        return np.bincount(idx[drop], minlength=pt.n)
+        return idx[drop]
 
-    return np.sum(par_rows(part, hh, ww), axis=0)
+    return np.bincount(np.concatenate(par_rows(part, hh, ww)), minlength=pt.n)
 
 
 def _grad2_rows(index, L32, y0: int, y1: int) -> np.ndarray:
@@ -397,9 +398,8 @@ def _blobs(mask, kind_value, kind, pt, step, offset, base_name, min_count, min_d
     """base_name 为 None 时（整图扫描）按每一处自己的主色命名。色度、色相按像素的颜色编号查 pt。"""
     def ch_of(box, sel):
         """这一处 sel 像素按颜色数好的个数：(颜色编号, 个数)；统计按“颜色 × 个数”加权（和逐个像素一样）。"""
-        cnt = np.bincount(pt.index[box][sel], minlength=pt.n)
-        k = np.flatnonzero(cnt)
-        return k, cnt[k].astype(np.float64)
+        k, cnt = tally(pt.index[box][sel], pt.n)  # 只和这一处的大小有关（颜色极多时不建 n 长的计数表）
+        return k, cnt.astype(np.float64)
 
     hh, ww = mask.shape
     bt = int(max(4, round(min(hh, ww) / 16)))
@@ -513,10 +513,11 @@ def analyze(
     Lu, Cu, hu = pt.L, pt.C, pt.h
     wv = pt.count(None if valid is None else vsub)  # 每种颜色在有效范围内的像素数
     chrom_u = Cu >= C_MIN
-    n_total = max(1, int(wv.sum()))
+    n_valid = int(wv.sum())
+    n_total = max(1, n_valid)
     n_chrom = int(wv[chrom_u].sum())
     chrom_frac = float(n_chrom / n_total)
-    all_valid = n_total == hh * ww
+    all_valid = n_valid == hh * ww  # 蒙版全是 False 时 n_total 是 1：不能拿它比（1×1 的图会被当成整幅有效）
 
     if mode == "scan":
         if all_valid:  # 整幅都有效：掩码按颜色查一次就是（有彩色 = 正常，其余 = 忽略），不另建“有彩色”图
@@ -620,6 +621,9 @@ def analyze(
     if n_gray:
         normal = normal - gw
 
+    keep = normal > 0  # 只留阴影 / 高光分段要用的（颜色, 个数），不把整张像素表连同结果一起留在历史记录里
+    normal_counts = (pt.colours[keep], normal[keep])
+
     rest_u = family_u if bicolor else (chrom_u & ~opp_u)
     rw = wv * rest_u
     _, _, spread = weighted_circular_hue(hu[rw > 0], (Cu * rw)[rw > 0]) if rw.any() else (None, 0, None)
@@ -653,7 +657,7 @@ def analyze(
         mask=mask,
         mask_scale=float(step),
         blobs=tuple(blobs),
-        normal_counts=(pt, normal),
+        normal_counts=normal_counts,
     )
 
 
@@ -706,7 +710,9 @@ def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> Conta
     cancel = _cancel_event()
 
     def scan_tiles(a, b):  # 各块互不重叠：多个线程同时写 opp_all 的不同块
-        found = []
+        # 每块的工作量只和这块的像素数有关：颜色极多（噪声很重，几百万种颜色）时不给每块建 n 长的数组
+        found = []  # 各块散点对立色像素的颜色编号，最后一起数（不是每块一张 n 长的计数表）
+        lut = None  # 这几块共用一张按颜色的标记表，每块用完把用过的位置清零
         for y0, x0 in tiles[a:b]:
             if cancel is not None and cancel.is_set():
                 return found  # 已被取消：par_ranges 结束后会抛 Cancelled
@@ -715,12 +721,11 @@ def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> Conta
             # 先数这一块里每种颜色有几个有彩色像素，主色相、对立色有多少都按颜色算（和逐像素算一样）；
             # 大多数块到这里就知道没有散点，不用逐像素建图
             if all_valid:
-                cnt = np.bincount(idx_t.ravel(), minlength=pt.n)
-                cnt[~chrom_u] = 0
+                u, w_u = tally(idx_t, pt.n)
+                ch = chrom_u[u]
+                u, w_u = u[ch], w_u[ch]
             else:
-                cnt = np.bincount(idx_t[chromatic[sl]], minlength=pt.n)
-            u = np.flatnonzero(cnt)
-            w_u = cnt[u]
+                u, w_u = tally(idx_t[chromatic[sl]], pt.n)
             n_ch = int(w_u.sum())
             if n_ch < 0.3 * idx_t.size:
                 continue
@@ -730,10 +735,12 @@ def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> Conta
             n = int(w_u[opp_c].sum())
             if n < 2 or n / max(1, n_ch) >= 0.2:
                 continue
-            lut = np.zeros(pt.n, dtype=np.uint8)
+            if lut is None:
+                lut = np.zeros(pt.n, dtype=np.uint8)
             lut[u[opp_c]] = 1  # u 只含有彩色的颜色：对立色、主色族都在有彩色里
             lut[u[hd <= FAMILY_HALF_WIDTH]] |= 2
             code = lut[idx_t]
+            lut[u] = 0
             opp = (code & 1).astype(bool)
             fam = (code & 2).astype(bool)
             if not all_valid:
@@ -743,12 +750,13 @@ def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> Conta
             if _pairs(opp, fam) / n < 2.0:  # 成片 -> 物体边界/小物件，不算混杂
                 continue
             opp_all[sl] |= opp
-            found.append(np.bincount(idx_t[opp], minlength=pt.n))  # 这块的散点按颜色的个数（后面不必再扫整幅）
+            found.append(idx_t[opp])  # 这块散点的颜色编号（后面不必再扫整幅）
 
         return found
 
     found = [c for part in par_ranges(scan_tiles, len(tiles), 1) for c in part]
-    opp_cnt = np.sum(found, axis=0) if found else np.zeros(pt.n, dtype=np.int64)  # 散点对立色按颜色的个数
+    # 散点对立色按颜色的个数：所有块的编号一起数一次（和每块数完再相加一样）
+    opp_cnt = np.bincount(np.concatenate(found), minlength=pt.n) if found else np.zeros(pt.n, dtype=np.int64)
 
     chrom_u = Cu >= C_MIN
     sel = chrom_u & (wv > 0)

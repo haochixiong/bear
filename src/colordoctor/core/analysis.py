@@ -89,11 +89,9 @@ BAND_MIN_DL = 6.0  # 阴影 / 高光段的平均明度与中间调至少差这�
 
 
 def _bands(region: np.ndarray, mask: np.ndarray | None, normal_counts=None) -> dict:
-    """normal_counts：脏色检查按颜色数好的“正常”像素个数 (像素表, 个数)，给出时不再扫整幅掩码。"""
+    """normal_counts：脏色检查按颜色数好的“正常”像素 (颜色, 个数)，给出时不再扫整幅掩码。"""
     if normal_counts is not None:
-        pt, cnt = normal_counts
-        keep = cnt > 0
-        cols, w = pt.colours[keep], cnt[keep]
+        cols, w = normal_counts
     else:
         sub, _ = grid_downsample(region, MAX_SAMPLES)
         keep_px = None
@@ -145,6 +143,9 @@ def _finalize(mode, context, stats, components, findings, extra_conf_reasons, co
     # 整图的“影调”卡固定在最前（先定明暗，再看颜色）；其余真实问题优先，“与目标风格的差距”不是错误，排在问题之后
     findings = sorted(findings, key=lambda f: (not f.problem.startswith("影调："), f.problem.startswith("与目标风格"),
                                                -order.index(f.severity)))
+    ct = kw.get("contamination")
+    if ct is not None and ct.normal_counts is not None:  # 只在分析过程中用（阴影 / 高光分段）：不跟着报告留在历史记录里
+        kw["contamination"] = dataclasses.replace(ct, normal_counts=None)
     return AnalysisReport(
         mode=mode,
         context=context,

@@ -16,7 +16,7 @@ import numpy as np
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.contamination import _components, downsample_mask
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.pixel_table import par_ranges, table, wmedian
+from colordoctor.core.pixel_table import par_ranges, table, tally, wmedian
 from colordoctor.core.sampling import FULL_RES_MAX, grid_downsample
 
 HUE_MILD = 6.0  # 色相偏离（度）：轻微
@@ -101,13 +101,14 @@ def analyze_uniformity(
         for ty, tx in cells[a:b]:
             sl = (slice(ty * ts, (ty + 1) * ts), slice(tx * ts, (tx + 1) * ts))
             idx = pt.index[sl]
-            cnt = np.bincount(idx.ravel() if mask is None else idx[valid[sl]], minlength=pt.n)
-            cnt[~ok_u] = 0
+            # 这一块按颜色数（只和这块的像素数有关：颜色极多时不给每块建 n 长的计数表）
+            k, cnt = tally(idx if mask is None else idx[valid[sl]], pt.n)
+            ok = ok_u[k]
+            k, cnt = k[ok], cnt[ok]
             nv = int(cnt.sum())
             if idx.size == 0 or nv / idx.size < MIN_TILE_SKIN or nv < 6:
                 continue
-            k = np.flatnonzero(cnt)
-            c = cnt[k].astype(np.float64)
+            c = cnt.astype(np.float64)
             ht, _, _ = weighted_circular_hue(hu[k], Cu[k] * c)
             if ht is None:
                 continue

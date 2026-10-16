@@ -77,10 +77,11 @@ def prepare(pixels: np.ndarray) -> Prepared:
     frac = 1.0
     if pixels.shape[2] == 4:
         opaque = pixels[..., 3] >= ALPHA_MIN
-        frac = float(opaque.mean())
+        n_opaque = int(np.count_nonzero(opaque))
+        frac = n_opaque / opaque.size
         if frac < MIN_OPAQUE:
             raise BlockedError("当前图层是空白图层（几乎没有不透明像素），无法分析。")
-        if frac < 0.999:
+        if n_opaque < opaque.size:  # 哪怕只有零星几个透明像素（擦掉的小点）也排除：透明处的 RGB 不是画面的颜色
             # 外接矩形用行 / 列的 any 求（不用 nonzero 列出几千万个坐标）
             rows, cols = np.flatnonzero(opaque.any(axis=1)), np.flatnonzero(opaque.any(axis=0))
             y0, y1, x0, x1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
@@ -88,7 +89,8 @@ def prepare(pixels: np.ndarray) -> Prepared:
             rgb = rgb[y0:y1, x0:x1].copy()
             valid = opaque[y0:y1, x0:x1].copy()
             rgb[~valid] = 128  # 中性灰；各分析通过 valid 蒙版排除这些像素
-            notes.append(f"图层有 {1 - frac:.0%} 是透明的，只分析不透明部分")
+            if frac < 0.999:  # 零星几个透明像素不必提示
+                notes.append(f"图层有 {1 - frac:.0%} 是透明的，只分析不透明部分")
     flat = rgb.reshape(-1, 3)
     # 看每一个像素（以前只抽查 20 万个：一整块纯色里零星几个杂色点会被漏掉、整张图被拒绝分析）
     if int((flat.max(axis=0).astype(np.int16) - flat.min(axis=0)).max()) <= 1:

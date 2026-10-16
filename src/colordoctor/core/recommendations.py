@@ -174,11 +174,11 @@ def skin_adjustments(pixels_rgb8: np.ndarray, target_lab, keep_lightness: bool =
             )
         )
     color_tgt = np.array([cur_lab[0], tgt[1], tgt[2]])
-    # 色彩平衡等模型估算只需要一批有代表性的像素：按像素数抽（固定种子，结果可复现）
-    if px.shape[0] > pm_SAMPLE:
+    # 色彩平衡等模型估算只需要一批有代表性的像素：按像素数抽（固定种子，结果可复现）。
+    # 颜色不多但像素数不一样时也这样抽（按比例）：不给每种颜色至少一个名额，否则零星的颜色被放大。
+    # 传进来的是按颜色排好的 (颜色, 像素数)（unique_colours / colour_counts），大图小图抽到的一样
+    if px.shape[0] > pm_SAMPLE or not np.all(w == w[0]):
         px = px[np.random.default_rng(0).choice(px.shape[0], pm_SAMPLE, replace=True, p=w / w.sum())]
-    elif not np.all(w == w[0]):
-        px = np.repeat(px, np.maximum(1, np.rint(w * (pm_SAMPLE / w.sum()))).astype(int), axis=0)
     x = px / 255.0
     sol = pm.solve(x, color_tgt, "color_balance")
     out.append(

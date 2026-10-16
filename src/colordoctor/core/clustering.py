@@ -7,30 +7,39 @@ import numpy as np
 from colordoctor.core import color_spaces as cs
 
 
-def kmeans(points: np.ndarray, k: int, iters: int = 40, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+def kmeans(points: np.ndarray, k: int, iters: int = 40, seed: int = 0, weights=None) -> tuple[np.ndarray, np.ndarray]:
+    """weights：每个点代表多少个像素（按不同颜色统计时传像素数）：和把每个点重复这么多次再聚类一样
+    （只有 k-means++ 抽初始中心时按权重抽）。"""
     pts = np.asarray(points, dtype=np.float64)
     n = pts.shape[0]
     if n == 0:
         return np.zeros((0, pts.shape[1] if pts.ndim == 2 else 3)), np.zeros(0, dtype=int)
     k = max(1, min(int(k), n))
+    w = None if weights is None else np.asarray(weights, dtype=np.float64).ravel()
     rng = np.random.default_rng(seed)
     # k-means++ 初始化（固定随机种子 -> 结果可复现）
-    centers = [pts[rng.integers(n)]]
+    if w is None:
+        centers = [pts[rng.integers(n)]]
+    else:
+        cw = np.cumsum(w)
+        centers = [pts[min(int(np.searchsorted(cw, rng.random() * cw[-1], side="right")), n - 1)]]
     d2 = np.sum((pts - centers[0]) ** 2, axis=1)
     for _ in range(1, k):
-        total = d2.sum()
+        p = d2 if w is None else d2 * w
+        total = p.sum()
         if total <= 0:
             break
-        idx = int(np.searchsorted(np.cumsum(d2), rng.random() * total))
+        idx = int(np.searchsorted(np.cumsum(p), rng.random() * total))
         centers.append(pts[min(idx, n - 1)])
         d2 = np.minimum(d2, np.sum((pts - centers[-1]) ** 2, axis=1))
     C = np.array(centers)
     labels = np.zeros(n, dtype=int)
     for _ in range(iters):
         new_labels = nearest(pts, C)
-        cnt = np.bincount(new_labels, minlength=len(C))
-        sums = np.stack([np.bincount(new_labels, weights=pts[:, d], minlength=len(C)) for d in range(pts.shape[1])], axis=1)
-        newC = np.where(cnt[:, None] > 0, sums / np.maximum(cnt, 1)[:, None], C)
+        cnt = np.bincount(new_labels, weights=w, minlength=len(C))
+        wp = pts if w is None else pts * w[:, None]
+        sums = np.stack([np.bincount(new_labels, weights=wp[:, d], minlength=len(C)) for d in range(pts.shape[1])], axis=1)
+        newC = np.where(cnt[:, None] > 0, sums / np.where(cnt > 0, cnt, 1)[:, None], C)  # 权重可以是小数
         if np.array_equal(new_labels, labels) and np.allclose(newC, C):
             break
         labels, C = new_labels, newC
@@ -48,22 +57,25 @@ def dominant_clusters(
 ) -> list[tuple[np.ndarray, float]]:
     """返回 [(Lab 中心, 占比)]，按占比降序；ΔE00 < merge_de 的簇会合并。
 
-    weights：每个点代表多少个像素（按不同颜色统计时传像素数），占比按像素算。
+    weights：每个点代表多少个像素（按不同颜色统计时传像素数），占比按像素算，找中心时也按像素数
+    （颜色不多时按权重聚类，多时按像素数抽样），和对每个像素聚类是同一件事。
     """
     pts = np.asarray(lab, dtype=np.float64).reshape(-1, 3)
     n = pts.shape[0]
     if n == 0:
         return []
     w_all = np.ones(n) if weights is None else np.asarray(weights, dtype=np.float64).ravel()
-    fit = pts
+    fit, fit_w = pts, None
     if weights is not None and n > max_points:
         # 按像素数抽样找中心（固定随机种子，结果可复现）：像素多的颜色被抽到的机会大
         rng = np.random.default_rng(0)
         fit = pts[rng.choice(n, max_points, replace=True, p=w_all / w_all.sum())]
+    elif weights is not None:
+        fit_w = w_all  # 颜色不多：全部颜色按像素数加权聚类（不按“一种颜色一票”，否则零星的颜色被放大）
     elif n > max_points:
         step = int(np.ceil(n / max_points))
         fit = pts[step // 2 :: step]
-    centers, _ = kmeans(fit, max_k)
+    centers, _ = kmeans(fit, max_k, weights=fit_w)
     # 用全部采样点重新分配，得到准确占比
     labels = np.empty(n, dtype=int)
     for s in range(0, n, 200_000):

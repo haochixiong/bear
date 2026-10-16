@@ -54,7 +54,9 @@ _LINEAR_LUT = _srgb8_to_linear_calc(np.arange(256))
 
 # ---------------------------------------------------------------- 大图：按“不同的颜色”换算
 # 一张照片的像素有几千万个，但不同的颜色一般只有一两百万种：每种颜色只换算一次、再按像素查回去，
-# 结果和逐个像素换算完全一样（不是降采样），快很多；结果用 float32 存，几千万个像素时内存省一半。
+# 结果和逐个像素换算完全一样（不是降采样），快很多。整幅图 (h, w, 3) 的结果用 float32 存（几千万个像素时
+# 内存省一半，精度约 1e-5，远小于任何判断阈值）；一组颜色 (n, 3) 的结果仍是 float64（这些数组小，
+# 后面还要按像素数加权求和、求分位数，和小图逐个像素算的精度一样）。
 PER_COLOUR_MIN = 400_000  # 像素数达到这么多才走这条路（小图直接算更快）
 
 
@@ -70,7 +72,7 @@ def per_colour(fn):
         from colordoctor.core.pixel_table import PixelTable, table
 
         pt = table(rgb) if rgb.ndim == 3 else PixelTable(rgb.reshape(-1, 1, 3))  # 一次分析内同一张图只编号一次
-        vals = np.asarray(fn(pt.colours, *args, **kwargs), dtype=np.float32)
+        vals = np.asarray(fn(pt.colours, *args, **kwargs), dtype=np.float32 if rgb.ndim == 3 else np.float64)
         return pt.pix(vals).reshape(*rgb.shape[:-1], *vals.shape[1:])
 
     return wrapper
@@ -80,11 +82,18 @@ def unique_colours(px) -> tuple[np.ndarray, np.ndarray]:
     """一组像素 -> (不同的颜色 (U, 3), 每种颜色的像素数 (U,))。
 
     只看颜色分布的统计（平均、分位数、占比、聚类、通道占比……）按“颜色 × 像素数”加权算，
-    和逐个像素算完全一样，但几千万个像素时快得多。像素不多时原样返回（每个像素权重 1）。
+    和逐个像素算完全一样，但几千万个像素时快得多。像素多时用像素表编号，少时直接排序数；
+    两种做法给出的颜色顺序（按 R | G << 8 | B << 16 从小到大）和个数完全一样：后面要抽样的地方
+    （主色聚类、调整建议的模型估算）结果和像素多少走哪条路无关。不是 8 位整数时原样返回（每个像素权重 1）。
     """
     flat = np.asarray(px).reshape(-1, 3)
-    if flat.dtype != np.uint8 or flat.shape[0] < PER_COLOUR_MIN:
+    if flat.dtype != np.uint8:
         return flat, np.ones(flat.shape[0], dtype=np.int64)
+    if flat.shape[0] < PER_COLOUR_MIN:
+        packed = flat[:, 0].astype(np.uint32) | (flat[:, 1].astype(np.uint32) << 8) | (flat[:, 2].astype(np.uint32) << 16)
+        u, cnt = np.unique(packed, return_counts=True)
+        cols = np.stack([u & 255, (u >> 8) & 255, (u >> 16) & 255], axis=-1).astype(np.uint8)
+        return cols, cnt.astype(np.int64)
     from colordoctor.core.pixel_table import PixelTable
 
     return PixelTable(np.ascontiguousarray(flat).reshape(-1, 1, 3)).colour_counts()
