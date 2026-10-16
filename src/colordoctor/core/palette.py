@@ -283,6 +283,8 @@ def ratio_631(lab: np.ndarray, weights=None) -> tuple[tuple[PaletteColor, ...], 
 
 # ================================================================ 颜色统一
 FAMILY_SECTORS = {name: (lo, hi) for name, lo, hi in cs.HUE_SECTORS}
+UNITY_HUE_OK = 4.0  # 色相标准差低于这么多度：已经是同一个色相（统一度不扣分），不给“收拢色相”的建议
+UNITY_OK_SCORE = 80.0  # 统一度不低于这个分数时卡片不算问题（“基本统一”、正常）：不再给收拢的建议和图层
 
 
 def family_unity(
@@ -315,7 +317,7 @@ def family_unity(
     l_std = float(np.sqrt(max(0.0, (w * (L - l_mean) ** 2).sum() / n)))
     target = np.array(target_lab, float) if target_lab is not None else None
     de = float(cs.delta_e_2000(mean, target)) if target is not None else None
-    score = float(np.clip(100 - 3.5 * max(0.0, spread - 4) - 60 * max(0.0, sat_cv - 0.15), 0, 100))
+    score = float(np.clip(100 - 3.5 * max(0.0, spread - UNITY_HUE_OK) - 60 * max(0.0, sat_cv - 0.15), 0, 100))
     if de is not None:
         score = float(np.clip(score - 3 * max(0.0, de - 3), 0, 100))
 
@@ -359,14 +361,17 @@ def family_unity(
     # 混色器建议：涉及的通道往统一的目标色相收拢
     stats = [c for c in ac.channel_stats(pt.colours[sel_u], primary=True, weights=w[sel_u]) if c.share >= 0.08 and c.mean_hue is not None]
     goal_lab_h = float(cs.lab_to_lch(target)[2]) if target is not None else float(hm)
-    goal = ac.lab_hue_to_hsb_hue(goal_lab_h)
     sat_goal = float(np.median([c.mean_sat for c in stats])) if stats else 0
     adjs = []
+    chan_adjs = []  # Camera Raw 混色器：各通道往同一个色相收拢
     rows = []  # PS 色相/饱和度：(通道, HSB 中心, 色相度数, 饱和度, 明亮度)
     for c in stats:
+        # 目标色相按这个通道颜色自己的明度、色度换成 HSB（同一个 Lab 色相在深色 / 淡色时 HSB 色相不一样，按默认值换会凭空差几度）
+        cl = c.mean_lab
+        goal = ac.lab_hue_to_hsb_hue(goal_lab_h, L=cl[0], C=max(float(np.hypot(cl[1], cl[2])), 8.0))
         hs, h_note = ac.cap_slider(ac.hue_slider(c.mean_hue, goal, channel=c.name))
-        if hs * cs.hue_diff(ac.lab_hue_of(c.mean_lab), goal_lab_h) <= 0:
-            hs, h_note = 0, ""  # 这一通道的颜色要往相反方向走（或已在目标上）：不给色相建议
+        if hs * cs.hue_diff(ac.lab_hue_of(c.mean_lab), goal_lab_h) <= 0 or spread < UNITY_HUE_OK:
+            hs, h_note = 0, ""  # 这一通道的颜色要往相反方向走（或已在目标上）、色相本来就统一：不给色相建议
         ss, s_note = ac.cap_slider(ac.sat_slider(c.mean_sat, sat_goal, channel=c.name) if len(stats) > 1 else 0)
         parts = []
         if abs(hs) >= 5:
@@ -376,7 +381,7 @@ def family_unity(
         if parts:
             rows.append((c.name, c.mean_hue, float(cs.hue_diff(c.mean_hue, goal)) if abs(hs) >= 5 else 0.0,
                          ss if abs(ss) >= 8 else 0, 0, c.share))
-            adjs.append(
+            chan_adjs.append(
                 Adjustment(
                     "Camera Raw 混色器",
                     f"{c.name}（管着这种{family}的 {c.share:.0%}）：" + "，".join(parts) + f" → 收拢到同一个{family}",
@@ -410,8 +415,12 @@ def family_unity(
             adjs.append(nl.adjustment("hueSaturation", params, f"往目标{family}靠：{words}（PS 做法，与“Camera Raw 混色器”那一条二选一）",
                                       "global", f"{family}往目标靠 · 色相/饱和度"))
             toward = True
-    # 有“往目标靠”那一层时，各通道收拢的那一层做的是同一件事（都往目标转），不再另给（否则同一批像素转两次）
-    adjs += _unity_native(family, mean, patches[:8], [] if toward else rows)
+    # 有“往目标靠”那一层时，各通道收拢做的是同一件事（都往目标转），Camera Raw 和 PS 做法都不再另给（否则同一批像素转两次）；
+    # 统一度已经不算问题（卡片“基本统一”、正常）时也不给收拢的建议和图层
+    unify = score < UNITY_OK_SCORE
+    if unify and not toward:
+        adjs = chan_adjs + adjs
+    adjs += _unity_native(family, mean, patches[:8] if unify else [], rows if unify and not toward else [])
     if not adjs:
         adjs.append(Adjustment("提示", f"画面中的{family}已经比较统一", None, False))
     adjs.append(Adjustment("提示", "混色器调整会影响整张照片中同一通道的颜色；只想改局部时用蒙版", None, False))
@@ -477,6 +486,14 @@ def get_style(key: str) -> dict:
 def _in_range(h: np.ndarray, lo: float, hi: float) -> np.ndarray:
     h = np.asarray(h) % 360
     return (h >= lo) & (h <= hi) if lo <= hi else (h >= lo) | (h <= hi)
+
+
+def _in_range_padded(h: np.ndarray, lo: float, hi: float, pad: float) -> np.ndarray:
+    """色相范围 [lo, hi] 前后各放宽 pad 度：取模，范围放宽后跨过 0° / 360° 时（例如 [0, 30] → 355–35）才不会丢掉另一边。"""
+    width = (hi - lo) if hi >= lo else (hi - lo + 360)
+    if width + 2 * pad >= 360:
+        return np.ones(np.shape(h), dtype=bool)  # 放宽后已经是一整圈
+    return _in_range(h, (lo - pad) % 360, (hi + pad) % 360)
 
 
 def _center(lo: float, hi: float) -> float:
@@ -560,7 +577,7 @@ def style_match(image: np.ndarray, style: dict, max_samples: int = MAX_SAMPLES, 
     on = np.zeros_like(chrom)
     for sec in style.get("sectors", []):
         lo, hi = sec["hue"]
-        inside = chrom & _in_range(h, lo - 5, hi + 5)
+        inside = chrom & _in_range_padded(h, lo, hi, 5.0)
         on |= inside
         share = float(w[inside].sum() / tot)
         mh, _, _ = weighted_circular_hue(h[inside], w[inside]) if inside.any() else (None, 0, None)

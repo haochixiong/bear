@@ -1,6 +1,7 @@
 """第九轮审计（调整动作与实际、PS / 桌面版兼容、性能与指标）的回归测试。"""
 
 import json
+import os
 import socket
 import threading
 import urllib.request
@@ -41,7 +42,8 @@ def test_second_server_on_the_same_port_fails():
     try:
         with pytest.raises(OSError):
             bs.make_server(srv.server_address[1])
-        assert srv.allow_reuse_address is False
+        # Windows 关掉 SO_REUSEADDR（否则两个服务能同时监听）；macOS / Linux 打开它只为重启时能绑定 TIME_WAIT 端口
+        assert srv.allow_reuse_address is (os.name != "nt")
     finally:
         srv.server_close()
 

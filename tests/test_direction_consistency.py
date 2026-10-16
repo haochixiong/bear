@@ -591,7 +591,10 @@ def check_reference_report(tag, mine, ref, rep):
     lab_r, sel_r = _ref_bands(ref)
     cb = next((ly for ly in plan.layers if ly.kind == "colorBalance"), None)
     tone = next((ly for ly in plan.layers if ly.kind == "curves"), None)
-    curved = apply(mine, plan, tone) if tone is not None else mine  # 颜色都按“曲线之后”的图算（建议顺序：先曲线）
+    # 参考是黑白作品时，“转黑白”那一层在曲线下面：颜色都按“转黑白、曲线之后”的图算
+    bw = next((ly for ly in plan.layers if ly.kind == "hueSaturation" and ly.params["master"]["saturation"] == -100), None)
+    base0 = apply(mine, plan, bw) if bw is not None else mine
+    curved = apply(base0, plan, tone) if tone is not None else base0  # 颜色都按“曲线之后”的图算（建议顺序：先曲线）
     lab_m, sel_m = _ref_bands(curved)
     for ly in plan.layers:
         c = Check(f"{tag} {ly.name}")

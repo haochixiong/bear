@@ -56,6 +56,8 @@ class LayerPlan:
     layers: list[LayerSpec]
     # 没有生成图层的建议：(问题序号, 建议原文, 原因)。例如作用范围是皮肤 / 问题位置，但没能单独选出来
     skipped: list[tuple[int, str, str]] = field(default_factory=list)
+    # 图层只生成了一部分的建议：(问题序号, 建议原文, 说明)。例如色相/饱和度里和前面卡片重叠的范围被去掉
+    partial: list[tuple[int, str, str]] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {"group_name": self.group_name, "width": self.width, "height": self.height,
@@ -320,8 +322,17 @@ def _merge_pair(a: dict, b: dict) -> dict | None:
 
 
 SKIP_SAME_PIXELS = "同一张卡片上已经有一层色相/饱和度改这些颜色（二选一），没有再生成一层"
-SKIP_OTHER_CARD = "前面一张卡片已经有一层改这些颜色的饱和度 / 色相（一键生成时会叠加成两倍），这里没有再生成；按那一层调整即可"
+SKIP_OTHER_CARD = ("前面一张卡片已经有一层同类图层改到这些颜色（一键生成时同一批颜色会被改两次），这里没有再生成；"
+                   "这里的数值是单独按这张卡片算的，和那一层不一定相同，需要时在那一层上手动调整")
+PART_OTHER_CARD = ("其中{names}和前面一张卡片的色相/饱和度图层改到同一批颜色，没有放进这一层（一键生成时会被改两次）；"
+                   "这些数值需要时在那一层上手动调整")
+
 SKIP_NO_MASK = "没能单独选出要改的区域（皮肤或问题位置），直接生成会改到整张图，所以没有生成图层；可以先手动建选区或蒙版，再按这里的数值调"
+
+
+def _range_words(r: dict) -> str:
+    c = (int(r["beginSustain"]) + ((int(r["endSustain"]) - int(r["beginSustain"])) % 360) / 2) % 360
+    return f"对准色相 {c:.0f}° 的范围"
 
 
 def _finding_layers(f, skipped: list | None = None) -> list[tuple[dict, list[str]]]:
@@ -384,23 +395,32 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     """
     h, w = shape[:2]
     findings = list(getattr(report, "findings", ()) or ())
-    per_finding, skipped = [], []
+    per_finding, skipped, partial = [], [], []
     for i, f in enumerate(findings):
         sk: list = []
         per_finding.append(_finding_layers(f, sk))
         skipped += [(i, t, why) for t, why in sk]
-    # 不同卡片改同一批颜色（例如 6:3:1 和颜色模板都给洋红降饱和、缺色 / 过艳都用自然饱和度）：只留前面那一层
+    # 不同卡片改同一批颜色（例如 6:3:1 和颜色模板都给洋红降饱和、缺色 / 过艳都用自然饱和度）：重叠的部分只留前面那一层
     for i in range(1, len(per_finding)):
         keep = []
         for spec, texts in per_finding[i]:
             earlier = [o for j in range(i) for o, _ in per_finding[j]
                        if o["scope"] == spec["scope"] == "global" and o["kind"] == spec["kind"]]
-            dup = (spec["kind"] == "hueSaturation" and any(nl.huesat_overlap(o["params"], spec["params"]) for o in earlier)) \
-                or (spec["kind"] == "vibrance" and earlier)
-            if dup:
+            if spec["kind"] == "hueSaturation" and any(nl.huesat_overlap(o["params"], spec["params"]) for o in earlier):
+                pa = spec["params"]
+                # 没有“全图”数值时按范围拆：只去掉和前面重叠的范围，其余范围照常生成（以前一个范围重叠就整层都不生成）
+                rest = [] if any(pa["master"].values()) or any(any(o["params"]["master"].values()) for o in earlier) else [
+                    r for r in pa["ranges"] if not any(nl.ranges_overlap(r, q) for o in earlier for q in o["params"]["ranges"])]
+                if not rest:
+                    skipped += [(i, t, SKIP_OTHER_CARD) for t in texts]
+                    continue
+                gone = "、".join(_range_words(r) for r in pa["ranges"] if r not in rest)
+                spec = {**spec, "params": {**pa, "ranges": rest}}
+                partial += [(i, t, PART_OTHER_CARD.format(names=gone)) for t in texts]
+            elif spec["kind"] == "vibrance" and earlier:
                 skipped += [(i, t, SKIP_OTHER_CARD) for t in texts]
-            else:
-                keep.append((spec, texts))
+                continue
+            keep.append((spec, texts))
         per_finding[i] = keep
     spots: dict[str, list[int]] = {}
     for specs in per_finding:
@@ -421,7 +441,8 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
                 continue
             at = spec.get("_at")
             stem = at.partition("@")[0] if at else _ID_STEM[spec["kind"]]
-            layers.append(LayerSpec(_unique(stem, used), spec["name"], spec["kind"], spec["params"], "；".join(texts),
+            note = "".join(f"（{why}）" for j, t, why in partial if j == i and t in texts)
+            layers.append(LayerSpec(_unique(stem, used), spec["name"], spec["kind"], spec["params"], "；".join(texts) + note,
                                     mask, finding=i, blend=spec.get("blend", "normal")))
     # 没有对应卡片的仿色曲线（例如只有 MatchReport 的报告）：仍给出，不挂在任何卡片上
     ref = getattr(report, "reference", None)
@@ -432,13 +453,14 @@ def plan_from_report(report: AnalysisReport, shape, offset=(0, 0), group_name: s
     # “明度”混合的影调曲线放在最上面：它只改明暗、不改颜色，下面的颜色图层都是按原图的明暗算的
     layers.sort(key=lambda ly: ly.blend == "luminosity")
     name = group_name or f"ColorDoctor · {_MODE_NAME.get(report.mode, report.mode)}"
-    return LayerPlan(name, w, h, layers, skipped)
+    return LayerPlan(name, w, h, layers, skipped, partial)
 
 
 def annotate_findings(findings_json: list[dict], plan: LayerPlan) -> list[dict]:
     """问题卡片的 JSON（顺序与 report.findings 相同）加上 index 和修它的图层 id；
     没有生成图层的建议去掉 layer（插件就把它当文字建议显示），并在文字后注明原因。"""
     skip = {(i, t): why for i, t, why in plan.skipped}
+    part = {(i, t): why for i, t, why in plan.partial}
     for i, fj in enumerate(findings_json):
         fj["index"] = i
         fj["layers"] = [ly.id for ly in plan.layers if ly.finding == i]
@@ -447,6 +469,8 @@ def annotate_findings(findings_json: list[dict], plan: LayerPlan) -> list[dict]:
             if why and a.get("layer"):
                 a["layer"] = None
                 a["instruction"] = f"{a['instruction']}（{why}）"
+            elif (i, a.get("instruction")) in part and a.get("layer"):
+                a["instruction"] = f"{a['instruction']}（{part[(i, a['instruction'])]}）"  # 图层只生成了一部分：保留图层，注明少了哪些
     return findings_json
 
 

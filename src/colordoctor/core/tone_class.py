@@ -158,7 +158,7 @@ def match_curve(current: tuple, target: tuple) -> tuple[list[list[int]], bool]:
     """按分位点做直方图匹配：把当前的 P2/P25/P50/P75/P98 映射到目标的分位点，得到 RGB 复合曲线的点。
 
     - 每个点一次最多移动 MAX_MOVE 级；
-    - 最暗 / 最亮的分位已经贴着 0 / 255（死黑、死白）时移动端点本身（抬黑场 / 压白场），否则调长改不了；
+    - 最暗 / 最亮的分位离 0 / 255 不到 MIN_GAP 级（放不下一个点）时移动端点本身（抬黑场 / 压白场），否则调长改不了；
     - 点之间至少相隔 MIN_GAP 级，相邻斜率限制在 1/3 – 3，输出严格递增。
     返回 (曲线点（含输入 0 和 255 两个端点），是否被限幅)。
     """
@@ -170,21 +170,26 @@ def match_curve(current: tuple, target: tuple) -> tuple[list[list[int]], bool]:
         if abs(y - x) > MAX_MOVE:
             capped = True
             y = x + float(np.clip(y - x, -MAX_MOVE, MAX_MOVE))
-        if x <= 3:
-            lo = float(np.clip(y - x, 0.0, MAX_MOVE))  # 死黑：移动黑场端点
-        elif x >= 252:
-            hi = float(np.clip(y + (255 - x), 255 - MAX_MOVE, 255.0))  # 死白：移动白场端点
-        elif (not mid or x - mid[-1][0] >= MIN_GAP) and x >= MIN_GAP and 255 - x >= MIN_GAP:
+        if x < MIN_GAP:
+            # 离 0 不到 MIN_GAP 级，放不下一个点：整段按同样的量平移黑场端点（以前只在 ≤ 3 时移动，4–11 的点被悄悄丢掉）
+            lo = float(np.clip(y - x, 0.0, MAX_MOVE))
+        elif 255 - x < MIN_GAP:
+            hi = float(np.clip(y + (255 - x), 255 - MAX_MOVE, 255.0))  # 离 255 太近：同样平移白场端点
+        elif not mid or x - mid[-1][0] >= MIN_GAP:
             mid.append((x, y))
     pts, changed = limit_slopes([[0.0, lo], *[[x, y] for x, y in mid], [255.0, hi]])
-    capped |= changed
+    return round_points(pts), capped | changed
+
+
+def round_points(pts) -> list[list[int]]:
+    """曲线点取整：输出限制在 0–255 且严格递增（相邻两点取整后不会落在同一级上）。"""
     out, last = [], -1
     for x, y in pts:
         yi = int(np.clip(round(y), 0, 255))
         yi = max(yi, last + 1) if out else yi
         out.append([int(round(x)), min(yi, 255)])
         last = out[-1][1]
-    return out, capped
+    return out
 
 
 def limit_slopes(pts) -> tuple[list[list[float]], bool]:
@@ -194,12 +199,21 @@ def limit_slopes(pts) -> tuple[list[list[float]], bool]:
     """
     pts = [[float(x), float(y)] for x, y in pts]
     changed = False
+
+    def clamp(i):  # 端点被推出 0–255 时拉回来，另一遍再把相邻的点让开（否则最后被截断，斜率又超限）
+        nonlocal changed
+        y = float(np.clip(pts[i][1], 0.0, 255.0))
+        changed |= abs(y - pts[i][1]) > 1.0
+        pts[i][1] = y
+
     for _ in range(2):
+        clamp(0)
         for i in range(1, len(pts)):
             dx = pts[i][0] - pts[i - 1][0]
             y = float(np.clip(pts[i][1], pts[i - 1][1] + dx / MAX_SLOPE, pts[i - 1][1] + dx * MAX_SLOPE))
             changed |= abs(y - pts[i][1]) > 1.0
             pts[i][1] = y
+        clamp(len(pts) - 1)
         for i in range(len(pts) - 2, -1, -1):
             dx = pts[i + 1][0] - pts[i][0]
             y = float(np.clip(pts[i][1], pts[i + 1][1] - dx * MAX_SLOPE, pts[i + 1][1] - dx / MAX_SLOPE))

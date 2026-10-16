@@ -325,9 +325,10 @@ def _three_greens(target=None):
 
 
 def test_unity_mixer_hue_moves_each_channel_toward_target():
-    """目标绿色相 120：偏黄的绿（105，黄色通道）只能往右（+），主体绿（135，绿色通道）只能往左（−）。
-    以前黄色通道的平均色相被相邻的绿拉偏，算出了反方向的滑块。"""
-    u = _three_greens(_lchlab(55, 30, 120))
+    """往共同的色相（这里没有目标，是这种绿的平均色相，约 133）收拢：偏黄的绿（105，黄色通道）只能往右（+），
+    主体绿（135，绿色通道）不能往右。以前黄色通道的平均色相被相邻的绿拉偏，算出了反方向的滑块。
+    （给了离得远的目标时只给“整体往目标靠”一条，不再逐通道给，见 test_audit14_colour）"""
+    u = _three_greens()
     hue = {a.instruction.split("（")[0]: dict(a.params).get("色相", 0) for a in _mixer(u.adjustments)}
     assert hue.get("黄色", 0) > 0, hue
     assert hue.get("绿色", 0) <= 0, hue

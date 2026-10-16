@@ -84,8 +84,9 @@ def _neutral_cast(lab: np.ndarray, sel: np.ndarray | None = None, weights=None) 
     return None if m is None else (float(m[1]), float(m[2]))
 
 
-def _huesat_rows(ch_m: dict, ch_r: dict) -> list[tuple]:
-    """PS 色相/饱和度用的混色器行 (通道, HSB 中心, 色相度数, 饱和度, 明亮度, 我的占比)，取舍规则与 Camera Raw 混色器建议相同。"""
+def _huesat_rows(ch_m: dict, ch_r: dict, rest=None) -> list[tuple]:
+    """PS 色相/饱和度用的混色器行 (通道, HSB 中心, 色相度数, 饱和度, 明亮度, 我的占比)，取舍规则与 Camera Raw 混色器建议相同。
+    rest：曲线做完以后影调还差的明度（见 _channel_diffs），不算进明亮度。"""
     rows = []
     for name in ac.NAMES:
         a, b = ch_m[name], ch_r[name]
@@ -98,58 +99,26 @@ def _huesat_rows(ch_m: dict, ch_r: dict) -> list[tuple]:
             continue
         hs = ac.cap_slider(ac.hue_slider(a.mean_hue, b.mean_hue, channel=name))[0]
         ss = ac.cap_slider(ac.sat_slider(a.mean_sat, b.mean_sat, channel=name))[0]
-        ls = ac.cap_slider(ac.lum_slider((b.mean_lab[0] - a.mean_lab[0]) if (a.mean_lab and b.mean_lab) else 0.0, channel=name))[0]
+        ls = ac.cap_slider(ac.lum_slider(_lum_gap(a, b, rest), channel=name))[0]
         if abs(hs) >= 8 or abs(ss) >= 10 or abs(ls) >= 10:
             rows.append((name, a.mean_hue, float(cs.hue_diff(a.mean_hue, b.mean_hue)) if abs(hs) >= 8 else 0.0,
                          ss if abs(ss) >= 10 else 0, ls if abs(ls) >= 10 else 0, a.share))
     return rows
 
 
-def _gray(L: float) -> int:
-    return int(cs.lab_to_srgb8(np.array([L, 0.0, 0.0]))[0])
+def _lum_gap(a, b, rest=None) -> float:
+    """通道 a（我的）要往参考通道 b 提亮 / 压暗多少 L*。rest(L)：曲线做完以后，我的图里明度 L 那一档影调和参考还差多少。
+    曲线斜率有限制，影调差很多时拉不到位：明亮度只管各颜色之间的相对明暗，不替曲线补影调
+    （否则每个通道都 ±40，PS 的明度还会把颜色冲淡）。"""
+    if not (a.mean_lab and b.mean_lab):
+        return 0.0
+    return b.mean_lab[0] - a.mean_lab[0] - (rest(a.mean_lab[0]) if rest is not None else 0.0)
 
 
-def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=None) -> MatchReport:
-    # 原图尺寸、每个像素都算：只看颜色分布，按“不同的颜色 × 像素数”加权，和逐个像素算完全一样
-    (s_m, w_m, lm, lch_m), (s_r, w_r, lr, lch_r) = together(lambda: pl._colours(mine), lambda: pl._colours(ref))
-    tm = tuple(float(v) for v in cs.weighted_percentile(lm[:, 0], w_m, np.array(PCTS)))
-    tr = tuple(float(v) for v in cs.weighted_percentile(lr[:, 0], w_r, np.array(PCTS)))
-    pts: list[tuple[int, int]] = []
-    for a, b in zip(tm, tr, strict=True):
-        x, y = _gray(a), _gray(b)
-        if abs(x - y) < 2:
-            y = x  # 这一段已经和参考一致：保留为不动的锚点，否则曲线会从旁边的点直接插值过来，把它也带着动
-        # 曲线点之间至少相隔 12 级、输出单调不降，否则曲线过陡会出现断层（PS 也可能合并太近的点）
-        if pts and (x - pts[-1][0] < 12 or y < pts[-1][1]):
-            continue
-        pts.append((x, y))
-    if any(x != y for x, y in pts):
-        # PS 的曲线是平滑样条：在会冲过头 / 往回走的段中间加辅助点，实际曲线才和这些点一致
-        safe = tcl.spline_safe(nl.curve_points(pts))  # 端点 0 / 255 只留一个（点落在 0 或 255 上时不重复）
-        curve = tuple((x, y) for x, y in safe if (x, y) not in ((0, 0), (255, 255)))
-    else:
-        curve = ()  # 全部一致：不给曲线
-    # 建议顺序是先用曲线定影调、再调颜色：白平衡、阴影 / 高光色调、混色器都在“曲线之后”的图上和参考比。
-    # 否则混色器的明亮度会把曲线已经提亮 / 压暗的部分再调一次，色彩平衡也会按曲线之前的明度去求
-    if curve:
-        lut = np.rint(tcl.spline_lut(nl.curve_points(curve))).astype(np.uint8)  # 按 PS 的平滑曲线算
-        s_c = lut[s_m]  # 每种颜色过曲线以后的颜色（像素数不变）
-        lc = np.asarray(cs.srgb8_to_lab(s_c), dtype=np.float64)
-    else:
-        s_c, lc = s_m, lm
-    # 被裁切的纯白 / 死黑“中性”只是因为被裁切：不参与白平衡和阴影 / 高光色调的估计
-    ok_m, ok_r = ~cs.clipped(s_c), ~cs.clipped(s_r)
-    cast_m, cast_r = _neutral_cast(lc, ok_m, w_m), _neutral_cast(lr, ok_r, w_r)
-    cfo_m, cfo_r = pl.colorfulness(s_m, lch_m, w_m), pl.colorfulness(s_r, lch_r, w_r)
-    cf_m, cf_r = cfo_m.value, cfo_r.value
-    # 参考是黑白作品、我的明显是彩色：不按通道逐个降饱和，直接建议转黑白（色调/颜色分级仍照常比较，适用于棕调等单色调）
-    ref_bw = pl.is_monochrome(cfo_r) and not pl.is_monochrome(cfo_m) and cf_m >= pl.COLORFULNESS_LEVELS[0][0]
-
-    # 通道
-    ch_m = {c.name: c for c in ac.channel_stats(s_c, weights=w_m)}
-    ch_r = {c.name: c for c in ac.channel_stats(s_r, weights=w_r)}
+def _channel_diffs(ch_m: dict, ch_r: dict, rest=None) -> list[ChannelDiff]:
+    """Camera Raw 混色器 8 个通道：我的（ch_m）往参考（ch_r）的色相 / 饱和度 / 明亮度滑块（rest 见 _lum_gap）。"""
     diffs = []
-    for name in () if ref_bw else ac.NAMES:
+    for name in ac.NAMES:
         a, b = ch_m[name], ch_r[name]
         if b.share < 0.03 and a.share < 0.03:
             continue
@@ -160,8 +129,67 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
             continue  # 我的图里几乎没有这种颜色：没有可调的，也不能拿零星几个像素的色相去推整段范围
         hs = ac.hue_slider(a.mean_hue, b.mean_hue, channel=a.name)
         ss = ac.sat_slider(a.mean_sat, b.mean_sat, channel=a.name)
-        ls = ac.lum_slider((b.mean_lab[0] - a.mean_lab[0]) if (a.mean_lab and b.mean_lab) else 0.0, channel=a.name)
+        ls = ac.lum_slider(_lum_gap(a, b, rest), channel=a.name)
         diffs.append(ChannelDiff(name, b.share, a.share, hs, ss, ls))
+    return diffs
+
+
+def _gray(L: float) -> int:
+    return int(cs.lab_to_srgb8(np.array([L, 0.0, 0.0]))[0])
+
+
+def tone_curve(tm, tr) -> tuple[tuple[int, int], ...]:
+    """我的 L* 分位点 tm -> 参考的 tr：RGB 复合曲线点（不含没动的端点 (0,0)、(255,255)）；全部一致时为空。"""
+    lo, hi = 0, 255
+    mid: list[tuple[int, int]] = []
+    for a, b in zip(tm, tr, strict=True):
+        x, y = _gray(a), _gray(b)
+        if abs(x - y) < 2:
+            y = x  # 这一段已经和参考一致：保留为不动的锚点，否则曲线会从旁边的点直接插值过来，把它也带着动
+        if x < tcl.MIN_GAP:
+            lo = int(np.clip(y - x, 0, 255))  # 离 0 太近、放不下一个点：按同样的量移动黑场端点（和影调曲线一样）
+        elif 255 - x < tcl.MIN_GAP:
+            hi = int(np.clip(y + (255 - x), 0, 255))  # 离 255 太近：移动白场端点
+        # 曲线点之间至少相隔 12 级、输出单调不降，否则曲线过陡会出现断层（PS 也可能合并太近的点）
+        elif not mid or (x - mid[-1][0] >= tcl.MIN_GAP and y >= mid[-1][1]):
+            mid.append((x, y))
+    pts = [(0, lo), *mid, (255, hi)]
+    if all(x == y for x, y in pts):
+        return ()  # 全部一致：不给曲线
+    # 端点不动时，我的 P95 比参考亮得多，最上面一段会从参考的 P95 直接拉到 255（斜率 5–6，高光被拉断层）：
+    # 相邻斜率限制在 1/3 – 3（端点跟着让），再在 PS 平滑曲线会冲过头 / 往回走的段中间加辅助点
+    safe = tcl.spline_safe(tcl.round_points(tcl.limit_slopes(pts)[0]))
+    if all(x == y for x, y in safe):
+        return ()
+    return tuple((x, y) for x, y in safe if (x, y) not in ((0, 0), (255, 255)))
+
+
+def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=None) -> MatchReport:
+    # 原图尺寸、每个像素都算：只看颜色分布，按“不同的颜色 × 像素数”加权，和逐个像素算完全一样
+    (s_m, w_m, lm, lch_m), (s_r, w_r, lr, lch_r) = together(lambda: pl._colours(mine), lambda: pl._colours(ref))
+    cfo_m, cfo_r = pl.colorfulness(s_m, lch_m, w_m), pl.colorfulness(s_r, lch_r, w_r)
+    cf_m, cf_r = cfo_m.value, cfo_r.value
+    # 参考是黑白作品、我的明显是彩色：不按通道逐个降饱和，直接建议转黑白（色调/颜色分级仍照常比较，适用于棕调等单色调）
+    ref_bw = pl.is_monochrome(cfo_r) and not pl.is_monochrome(cfo_m) and cf_m >= pl.COLORFULNESS_LEVELS[0][0]
+    # 转黑白那一层（饱和度 -100）在曲线下面：影调和之后的色调都按转完黑白的灰度比（彩色像素转灰后的明暗和原来差很多）
+    s_b, lb = s_m, lm
+    if ref_bw:
+        s_b = np.clip(np.rint(pm_mod.hue_saturation(s_m / 255.0, saturation=-100) * 255.0), 0, 255).astype(np.uint8)
+        lb = np.asarray(cs.srgb8_to_lab(s_b), dtype=np.float64)
+    tm = tuple(float(v) for v in cs.weighted_percentile(lb[:, 0], w_m, np.array(PCTS)))
+    tr = tuple(float(v) for v in cs.weighted_percentile(lr[:, 0], w_r, np.array(PCTS)))
+    curve = tone_curve(tm, tr)
+    # 建议顺序是先用曲线定影调、再调颜色：白平衡、阴影 / 高光色调、混色器都在“曲线之后”的图上和参考比。
+    # 否则混色器的明亮度会把曲线已经提亮 / 压暗的部分再调一次，色彩平衡也会按曲线之前的明度去求
+    if curve:
+        lut = np.rint(tcl.spline_lut(nl.curve_points(curve))).astype(np.uint8)  # 按 PS 的平滑曲线算
+        s_c = lut[s_b]  # 每种颜色过曲线以后的颜色（像素数不变）
+        lc = np.asarray(cs.srgb8_to_lab(s_c), dtype=np.float64)
+    else:
+        s_c, lc = s_b, lb
+    # 被裁切的纯白 / 死黑“中性”只是因为被裁切：不参与白平衡和阴影 / 高光色调的估计
+    ok_m, ok_r = ~cs.clipped(s_c), ~cs.clipped(s_r)
+    cast_m, cast_r = _neutral_cast(lc, ok_m, w_m), _neutral_cast(lr, ok_r, w_r)
 
     # 主色对应
     (pal_r, _), (pal_m, _) = together(lambda: pl.ratio_631(lr, weights=w_r), lambda: pl.ratio_631(lm, weights=w_m))
@@ -235,6 +263,8 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         adjs.append(Adjustment("Camera Raw", f"色温往{'黄' if db > 0 else '蓝'}（中性区域 b* 需要 {db:+.1f}）", "小幅"))
     if abs(da) >= 1.5:
         adjs.append(Adjustment("Camera Raw", f"色调往{'洋红' if da > 0 else '绿'}（中性区域 a* 需要 {da:+.1f}）", "小幅"))
+    # Camera Raw 的色温 / 色调对阴影、高光一样起作用：颜色分级只给扣掉它以后还差的部分（否则同一个偏色被修两三次）
+    wb = (da if abs(da) >= 1.5 else 0.0, db if abs(db) >= 1.5 else 0.0)
     # 阴影 / 高光：与“整图色彩”相同的分段（暗调画面最亮处是中灰、高调画面最暗处是浅灰，都不算），已去掉被裁切的像素
     bands_m, bands_r = pl.tone_bands(lc[:, 0], s_c, w_m), pl.tone_bands(lr[:, 0], s_r, w_r)
     for label, key in (("阴影", "shadow"), ("高光", "highlight")):
@@ -245,7 +275,6 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
         if tm_ is None or tr_ is None:
             continue  # 这一段没有可比较的中性色
         if np.hypot(tr_[0] - tm_[0], tr_[1] - tm_[1]) >= 2:
-            gh, gs = ac.tint_to_grading(60.0, tr_[0] - tm_[0], tr_[1] - tm_[1])  # 要加的是差值
             # PS 色彩平衡：阴影/高光只补中间调那一层在这一段上没修到的部分（按模型算中间调那一层对这一段实际改了多少）
             band = _neutral_lab(lc, bands_m[key], w_m)
             done = nl.balance_effect(band, "midtones", balance["midtones"]) if any(balance["midtones"]) else np.zeros(2)
@@ -255,8 +284,25 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
                 lv = nl.balance_for_shift(ra, rb, tone, lab=band)
                 if any(lv):
                     balance[tone] = lv
-            adjs.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（参考{label}色调 a* {tr_[0]:+.1f}、b* {tr_[1]:+.1f}，我的 a* {tm_[0]:+.1f}、b* {tm_[1]:+.1f}）", "小幅",
+        ga, gb = tr_[0] - tm_[0] - wb[0], tr_[1] - tm_[1] - wb[1]  # 做完色温 / 色调以后这一段还差的
+        if np.hypot(ga, gb) >= 2:
+            gh, gs = ac.tint_to_grading(60.0, ga, gb)  # 要加的是差值
+            left = f"；做完色温/色调后还差 a* {ga:+.1f}、b* {gb:+.1f}" if any(wb) else ""
+            adjs.append(Adjustment("Camera Raw 颜色分级", f"{label}：色相 {gh}，饱和度 {gs}（参考{label}色调 a* {tr_[0]:+.1f}、b* {tr_[1]:+.1f}，我的 a* {tm_[0]:+.1f}、b* {tm_[1]:+.1f}{left}）", "小幅",
                                    True, (("色相", gh), ("饱和度", gs))))
+    has_balance = any(any(v) for v in balance.values())
+    # 混色器按“白平衡做完以后”的颜色和参考比，否则整体偏色会被色温、颜色分级、混色器各修一次。
+    # Camera Raw：建议顺序里混色器在色温 / 色调之后，色温 / 色调按对所有颜色同样的 a* / b* 偏移估算
+    ch_r = {c.name: c for c in ac.channel_stats(s_r, weights=w_r)}
+    s_wb = cs.lab_to_srgb8(lc + np.array([0.0, *wb])).astype(np.uint8) if any(wb) else s_c
+    # 曲线之后影调还差多少：曲线对准的那几个分位上（P5…P95）参考减我的，中间按明度插值；曲线拉到位时都是 0
+    tc_ = cs.weighted_percentile(lc[:, 0], w_m, np.array(PCTS))
+    gap_ = np.array(tr) - tc_
+
+    def rest(L: float) -> float:
+        return float(np.interp(L, tc_, gap_))
+
+    diffs = [] if ref_bw else _channel_diffs({c.name: c for c in ac.channel_stats(s_wb, weights=w_m)}, ch_r, rest)
     for d in diffs:
         parts = []
         (hs, hn), (ss, sn), (ls, ln) = (ac.cap_slider(v) for v in (d.hue_slider, d.sat_slider, d.lum_slider))
@@ -270,19 +316,17 @@ def match_reference(mine: np.ndarray, ref: np.ndarray, skin_mine=None, skin_ref=
             adjs.append(Adjustment("Camera Raw 混色器", f"{d.name}（参考占 {d.ref_share:.0%}，我的占 {d.my_share:.0%}）：" + "，".join(parts),
                                    ac.slider_strength(max(abs(hs), abs(ss), abs(ls))), True,
                                    (("色相", hs), ("饱和度", ss), ("明亮度", ls))))
-    has_balance = any(any(v) for v in balance.values())
     if has_balance:
         p = nl.balance(**balance)
         after_curve = "；按做完影调曲线以后的颜色算，放在曲线上方" if curve else ""
         adjs.append(nl.adjustment("colorBalance", p, f"PS 做法（代替上面的色温/色调和颜色分级{after_curve}），勾选“保留明度”：{nl.balance_text(p)}",
                                   "global", "仿色色调 · 色彩平衡"))
-    # PS 色相/饱和度：按“色彩平衡那一层之后”的颜色和参考比（否则整体偏色会被色彩平衡和混色器各修一次）
-    ch_after = ch_m
+    # PS 色相/饱和度：按“色彩平衡那一层之后”的颜色和参考比（色彩平衡的“保留明度”也会让部分颜色变暗，这里一并补）
+    after = s_c
     if has_balance:
         x = s_c.astype(float) / 255.0
         after = np.clip(np.rint(pm_mod.color_balance(x, **{k: v for k, v in balance.items()}) * 255.0), 0, 255).astype(np.uint8)
-        ch_after = {c.name: c for c in ac.channel_stats(after, weights=w_m)}
-    rows = [] if ref_bw else _huesat_rows(ch_after, ch_r)
+    rows = [] if ref_bw else _huesat_rows({c.name: c for c in ac.channel_stats(after, weights=w_m)}, ch_r, rest)
     for params, words in nl.mixer_rows_to_huesat(rows):
         done = "、".join(n for n, on in (("影调曲线", bool(curve)), ("色彩平衡", has_balance)) if on)
         note = f"；数值是做完{done}以后还差的部分，放在{'它' if '、' not in done else '它们'}上方" if done else ""

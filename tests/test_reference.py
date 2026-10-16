@@ -85,6 +85,7 @@ def test_grading_direction_uses_difference():
         L = np.linspace(8, 90, 160)[None, :].repeat(120, 0)
         lab = np.stack([L, np.zeros_like(L), np.where(L < 30, shadow_b, 0.0)], -1)
         img[:] = cs.lab_to_srgb8(lab)
+        img[:24] = cs.lab_to_srgb8(np.array([55.0, 45.0, 30.0]))  # 两边都有一块彩色：参考不是黑白作品（黑白参考先转黑白，阴影本来就是中性的）
         return img
 
     m = rm.match_reference(scene(10.0), scene(3.0))
@@ -104,7 +105,9 @@ def test_no_neutral_pixels_gives_no_grading_advice():
     def scene(sa, sb):
         L = np.linspace(8, 90, 160)[None, :].repeat(120, 0)
         lab = np.stack([L, np.where(L < 30, sa, 0.0), np.where(L < 30, sb, 0.0)], -1)
-        return cs.lab_to_srgb8(lab)
+        img = cs.lab_to_srgb8(lab)
+        img[:24] = cs.lab_to_srgb8(np.array([55.0, 45.0, 30.0]))  # 两边都有一块彩色：参考不是黑白作品（同上）
+        return img
 
     m = rm.match_reference(scene(-12.0, -25.0), scene(-4.0, -6.0))
     g = [a for a in m.adjustments if a.tool == "Camera Raw 颜色分级" and a.instruction.startswith("阴影")]
