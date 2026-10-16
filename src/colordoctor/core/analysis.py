@@ -33,7 +33,7 @@ from colordoctor.core.color_models import (
 )
 from colordoctor.core.perception import de_words
 from colordoctor.core.pixel_table import check_cancel, colour_counts, scope, together
-from colordoctor.core.sampling import grid_downsample, resolution_limit, sample_point
+from colordoctor.core.sampling import grid_downsample, sample_point
 
 MAX_SAMPLES = rs.MAX_SAMPLES
 SEVERITY_FLOOR = {Severity.MILD: 20.0, Severity.NOTABLE: 45.0, Severity.STRONG: 70.0}  # 与 severity_from_score 的分档一致
@@ -61,10 +61,6 @@ def _shared_pixels(fn):
         with scope():
             rep = fn(*args, **kwargs)
         check_cancel()
-        limit, label = resolution_limit()
-        big = any(isinstance(a, np.ndarray) and a.ndim == 3 and a.shape[0] * a.shape[1] > limit for a in args)
-        if label != "full" and big and isinstance(rep, AnalysisReport):
-            rep = dataclasses.replace(rep, precision=label)  # 这次确实是按缩小的图算的
         return rep
 
     return wrapper
@@ -92,13 +88,19 @@ def _blob_text(blobs, limit=3) -> list[str]:
 BAND_MIN_DL = 6.0  # 阴影 / 高光段的平均明度与中间调至少差这么多，才算“另一段”（明暗起伏很小的区域不分段比较）
 
 
-def _bands(region: np.ndarray, mask: np.ndarray | None) -> dict:
-    sub, _ = grid_downsample(region, MAX_SAMPLES)
-    keep_px = None
-    if mask is not None and mask.size == sub.shape[0] * sub.shape[1]:
-        keep_px = mask.reshape(sub.shape[:2]) == ct_mod.MASK_NORMAL
-    # 原图尺寸的每个像素：按“不同的颜色 × 像素数”加权（和脏色检查共用同一份颜色编号）
-    cols, w = colour_counts(sub, keep_px)
+def _bands(region: np.ndarray, mask: np.ndarray | None, normal_counts=None) -> dict:
+    """normal_counts：脏色检查按颜色数好的“正常”像素个数 (像素表, 个数)，给出时不再扫整幅掩码。"""
+    if normal_counts is not None:
+        pt, cnt = normal_counts
+        keep = cnt > 0
+        cols, w = pt.colours[keep], cnt[keep]
+    else:
+        sub, _ = grid_downsample(region, MAX_SAMPLES)
+        keep_px = None
+        if mask is not None and mask.size == sub.shape[0] * sub.shape[1]:
+            keep_px = mask.reshape(sub.shape[:2]) == ct_mod.MASK_NORMAL
+        # 原图尺寸的每个像素：按“不同的颜色 × 像素数”加权（和脏色检查共用同一份颜色编号）
+        cols, w = colour_counts(sub, keep_px)
     keep = ~cs.clipped(cols)  # 被裁切的纯白 / 死黑没有颜色信息
     cols, w = cols[keep], w[keep].astype(np.float64)
     if w.sum() < 20:
@@ -314,7 +316,7 @@ def analyze_region(region: np.ndarray, context: ColorContext, rect=None) -> Anal
         dr.opposite_component(ct),
         dr.hue_dispersion_component(ct),
         chroma,
-        dr.local_cast_bands(_bands(region, ct.mask)),
+        dr.local_cast_bands(_bands(region, ct.mask, ct.normal_counts)),
         dr.lightness_component(stats, chroma.score),
         dr.outlier_component(stats, ct),
     ]

@@ -8,7 +8,7 @@ from enum import Enum
 
 import numpy as np
 
-SKIP_FIELDS = {"mask", "valid_mask", "tile_map"}
+SKIP_FIELDS = {"mask", "valid_mask", "tile_map", "normal_counts"}
 
 
 def to_jsonable(obj, _depth: int = 0):

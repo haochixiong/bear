@@ -175,11 +175,6 @@ class SettingsDialog(QDialog):
         self.bridge = QCheckBox("允许 Photoshop 插件连接（本机服务，只监听 127.0.0.1；重启后生效）")
         self.bridge.setChecked(bool(other.get("bridge", True)))
         form.addRow(self.bridge)
-        self.precision = QComboBox()
-        self.precision.addItem("原图（每个像素都检查；大图先出快速结果，再自动按原图精查）", "full")
-        self.precision.addItem("快速（超过 2400 万像素的图按格平均缩小后分析，一两个像素大的杂色点可能漏掉）", "fast")
-        self.precision.setCurrentIndex(max(0, self.precision.findData(other.get("precision", "full"))))
-        form.addRow("分析精度", self.precision)
         # ---- AI 点评（可选，默认关闭）
         form.addRow(QLabel("<b>AI 点评（可选）</b>"))
         self.ai_enabled = QCheckBox("启用 AI 点评（会把分析数值发送给你选择的 AI）")
@@ -219,8 +214,7 @@ class SettingsDialog(QDialog):
         return {"lock_sample": self.lock.text().strip(), "capture": self.cap.text().strip()}
 
     def other_values(self) -> dict:
-        return {"raw_preview": self.raw_preview.isChecked(), "bridge": self.bridge.isChecked(),
-                "precision": self.precision.currentData()}
+        return {"raw_preview": self.raw_preview.isChecked(), "bridge": self.bridge.isChecked()}
 
     def ai_values(self) -> dict:
         return {
@@ -231,23 +225,6 @@ class SettingsDialog(QDialog):
             "api_key": self.ai_key.text().strip(),
             "model": self.ai_model.text().strip(),
         }
-
-
-def precision_change(quick, full) -> str:
-    """原图精查的结果和先出的快速结果比：结论变了没有。"""
-    def problems(rep):
-        return [f.problem for f in rep.findings if f.severity != Severity.NORMAL]
-
-    added = [p for p in problems(full) if p not in problems(quick)]
-    gone = [p for p in problems(quick) if p not in problems(full)]
-    if quick.overall_severity == full.overall_severity and not added and not gone:
-        return f"结论和快速结果一致（{full.overall_severity.value}）"
-    parts = [f"整体 {quick.overall_severity.value} → {full.overall_severity.value}"]
-    if added:
-        parts.append("新发现：" + "；".join(added[:3]))
-    if gone:
-        parts.append("不再算问题：" + "；".join(gone[:3]))
-    return "结论有变化，" + "，".join(parts)
 
 
 RERUN_DELAY_MS = 250  # 改设置后等这么久再重算：连续改几个选项只算一次
@@ -275,7 +252,6 @@ class MainWindow(QMainWindow):
         self._current: HistoryItem | None = None
         self.ref_image_item: HistoryItem | None = None
         self._tasks = []
-        self._refining: dict[int, threading.Event] = {}  # 历史条目 id -> 它的原图精查（还在后台算）
         self.live_timer = QTimer(self)
         self.live_timer.setInterval(70)
         self.live_timer.timeout.connect(self._live_tick)
@@ -551,8 +527,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("快捷键未生效：" + "；".join(msgs), 8000)
 
     def _load_settings(self):
-        p = str(self.settings.value("analysis/precision", "full"))
-        self.session.precision = p if p in ("full", "fast") else "full"
         mode = str(self.settings.value("mode", "point"))
         self.set_mode(mode if mode in MODES else "point")
         try:
@@ -700,14 +674,12 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         old_ai = self._ai_settings()
         other = {"raw_preview": self.settings.value("raw/use_preview", False, type=bool),
-                 "bridge": self.settings.value("bridge/enabled", True, type=bool), "precision": self.session.precision}
+                 "bridge": self.settings.value("bridge/enabled", True, type=bool)}
         dlg = SettingsDialog(self, self._hotkey_texts(), old_ai, other)
         if dlg.exec():
             o = dlg.other_values()
             self.settings.setValue("raw/use_preview", "true" if o["raw_preview"] else "false")
             self.settings.setValue("bridge/enabled", "true" if o["bridge"] else "false")
-            self.session.precision = o["precision"] if o["precision"] in ("full", "fast") else "full"
-            self.settings.setValue("analysis/precision", self.session.precision)
             ai = dlg.ai_values()
             if ai["enabled"] and not old_ai["enabled"]:
                 ok = QMessageBox.question(
@@ -790,34 +762,25 @@ class MainWindow(QMainWindow):
         rep = item.result
         mm = rep.valid_mask if mode == "skin" and rep.mask_info.get("manual") else None
 
-        holder = {"item": item, "rep": None}
-
-        def compute(stage):
+        def compute():
             if gen != self._rerun_gen:  # 排队时又改了设置：这次不用算了（大图每次要一两秒）
                 return None
             return self.session.compute_rect(item.region, item.context, item.rect, mode, item.lasso, mm,
-                                             part=rep.part if mode == "skin" else None, stage=stage)
+                                             part=rep.part if mode == "skin" else None)
 
-        def done(new_rep, final):
-            cur = holder["item"]
-            prev = holder["rep"]
-            holder["item"] = self._rect_done(item.region, item.rect, new_rep, item.source_label, None, cur, item.lasso,
-                                             previous=prev if prev is not None and prev.precision == "preview" else None)
-            holder["rep"] = new_rep
-            return holder["item"]
-
-        def alive():  # 已有更新的请求，或这条结果已被删除 / 替换：不再继续
-            return gen == self._rerun_gen and self.session.get(holder["item"].id) is not None
+        def done(new_rep):
+            if gen != self._rerun_gen or self.session.get(item.id) is None:
+                return  # 已有更新的请求，或原条目已被删除
+            self._rect_done(item.region, item.rect, new_rep, item.source_label, None, item, item.lasso)
 
         def start():
             if gen != self._rerun_gen:
                 return
-            self._rerun_ev = self._run_staged(self.session.stages(item.region), compute, done, alive)
+            self._rerun_ev = self._run_cancellable(compute, done)
 
-        # 又改了设置：上一次按旧设置的重算（以及这条结果还在做的原图精查）马上停掉
+        # 又改了设置：上一次按旧设置还没算完的重算马上停掉（不和这次抢 CPU）
         if getattr(self, "_rerun_ev", None) is not None:
             self._rerun_ev.set()
-        self._stop_refine(item.id)
 
         self.statusBar().showMessage("正在按新设置重新计算……")
         QTimer.singleShot(RERUN_DELAY_MS, start)  # 连续改几个选项时只算最后一次
@@ -1131,62 +1094,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在分析……")
         if lasso is None and replace is not None:
             lasso = replace.lasso
-        holder = {"item": replace, "rep": None}
+        self._start(self.session.compute_rect, region, ctx, rect, mode, lasso, manual_mask, part=part,
+                    on_done=lambda rep: self._rect_done(region, rect, rep, label, None, replace, lasso))
 
-        def compute(stage):
-            return self.session.compute_rect(region, ctx, rect, mode, lasso, manual_mask, part=part, stage=stage)
-
-        def done(rep, final):
-            prev = holder["rep"]
-            holder["item"] = self._rect_done(region, rect, rep, label, None, holder["item"], lasso,
-                                             previous=prev if prev is not None and prev.precision == "preview" else None)
-            holder["rep"] = rep
-            return holder["item"]
-
-        def alive():  # 快速结果出来后用户删掉了它、或按新设置重算替换了它：原图精查不用再做
-            return holder["rep"] is None or self.session.get(holder["item"].id) is not None
-
-        self._run_staged(self.session.stages(region), compute, done, alive)
-
-    def _run_staged(self, stages, compute, on_result, alive=lambda: True) -> threading.Event:
-        """按 stages 依次计算（先快速结果、再原图精查）；每一步算完调用 on_result(结果, 是否最后一步)，它返回历史条目。
-
-        返回取消用的 Event：设置后，正在算的那一步在下一个检查点停下（不再白占 CPU），后面的也不再算。
-        精查进行中的条目记在 self._refining 里：这条结果被重算、替换或删除时停掉它的精查。
-        """
+    def _run_cancellable(self, compute, on_done) -> threading.Event:
+        """在后台计算 compute()，算完调用 on_done(结果)。返回取消用的 Event：设置后，计算在下一个检查点停下
+        （不再白占 CPU），也不再调用 on_done。"""
         ev = threading.Event()
 
-        def guarded(stage):
+        def guarded():
             try:
                 with cancellable(ev):
-                    return compute(stage)
+                    return compute()
             except Cancelled:
                 return None
 
-        def run(i):
-            def done(rep):
-                if rep is None or ev.is_set() or not alive():
-                    return
-                final = i == len(stages) - 1
-                item = on_result(rep, final)
-                if item is not None:
-                    if final:
-                        self._refining.pop(item.id, None)
-                    else:
-                        self._refining[item.id] = ev
-                if not final and alive():
-                    run(i + 1)
+        def done(rep):
+            if rep is not None and not ev.is_set():
+                on_done(rep)
 
-            self._start(guarded, stage=stages[i], on_done=done)
-
-        run(0)
+        self._start(guarded, on_done=done)
         return ev
-
-    def _stop_refine(self, item_id) -> None:
-        """这条结果的原图精查还在后台算：停掉（结果要被重算 / 替换 / 删除了）。"""
-        ev = self._refining.pop(item_id, None)
-        if ev is not None:
-            ev.set()
 
     def _start(self, fn, *args, on_done, on_fail=None, **kwargs):
         def done(rep):
@@ -1229,12 +1157,10 @@ class MainWindow(QMainWindow):
             self._pending_problem = None
             self._run_rect(region2, rect2, ctx2, label2, step=1)
 
-    def _rect_done(self, region, rect, rep, label, role=None, replace=None, lasso=None, previous=None):
-        """previous：这次是原图精查、替换的是先出的快速结果时，快速结果（用来说明精查后有没有变化）。"""
+    def _rect_done(self, region, rect, rep, label, role=None, replace=None, lasso=None):
         was_ref = replace is not None and replace is self.session.reference
         pos = None
         if replace is not None:
-            self._stop_refine(replace.id)  # 被替换的那条若还在精查：停掉（替换它的就是精查结果时也无妨，那一步已算完）
             pos = next((i for i, h in enumerate(self.session.history) if h.id == replace.id), None)
             self.session.remove(replace.id)
         item = self.session.add_rect(region, rect, rep, label, role=role)
@@ -1250,12 +1176,7 @@ class MainWindow(QMainWindow):
         if choice is not None and choice != self.session.palette_choice() and item is self._current:
             self._rerun(item, "palette")
         sev = rep.overall_severity.value
-        if rep.precision == "preview":
-            self.statusBar().showMessage(f"已出快速结果：{sev}（按约 1200 万像素）。正在按原图逐像素精查，完成后自动更新……")
-        elif previous is not None:
-            self.statusBar().showMessage("已按原图精查：" + precision_change(previous, rep), 10000)
-        else:
-            self.statusBar().showMessage(f"分析完成：{sev}（风险 {rep.overall_risk:.0f}，置信度 {rep.confidence:.2f}）", 8000)
+        self.statusBar().showMessage(f"分析完成：{sev}（风险 {rep.overall_risk:.0f}，置信度 {rep.confidence:.2f}）", 8000)
         return item
 
     def _failed(self, msg: str):
@@ -1382,7 +1303,6 @@ class MainWindow(QMainWindow):
         self._preset_changed()  # 当前的肤色结果按新目标重算
 
     def _history_remove(self, hid: int):
-        self._stop_refine(hid)
         if self.ref_image_item is not None and self.ref_image_item.id == hid:
             self.ref_image_item = None
         self.session.remove(hid)
@@ -1391,8 +1311,6 @@ class MainWindow(QMainWindow):
         self._after_add(None, quiet=True)
 
     def _history_clear(self):
-        for hid in list(self._refining):
-            self._stop_refine(hid)
         self.ref_image_item = None
         self._pending_problem = None
         self._ref_busy = False

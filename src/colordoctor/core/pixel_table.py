@@ -113,22 +113,41 @@ class PixelTable:
         present = np.zeros(1 << 24, dtype=bool)
 
         def pack(y0, y1):
-            # R | G << 8 | B << 16：补一个 0 字节后按小端 uint32 看（不用逐通道移位，快一倍）
-            buf = np.zeros((y1 - y0, w, 4), dtype=np.uint8)
-            buf[..., :3] = px[y0:y1]
-            p = buf.view("<u4").reshape(-1)
-            packed[y0 * w : y1 * w] = p
-            present[p] = True  # 多个线程同时写 True：结果一样
+            # 每个像素编成 R | G << 8 | B << 16：从每个像素的起点按小端读 4 个字节（多读到的是下一个像素的 R），
+            # 去掉最高字节即可，不用补字节、不用逐通道移位（快 4 倍）。这一段最后一个像素后面没有字节了，单独算
+            a, b = y0 * w, y1 * w
+            c = px[y0:y1]
+            if not c.flags.c_contiguous:  # 裁剪出来的视图、RGBA 的前三个通道：先复制这一段
+                c = np.ascontiguousarray(c)
+            cf = c.reshape(-1)
+            m = b - a - 1
+            if m > 0:
+                win = np.ndarray(shape=(m,), dtype="<u4", buffer=cf, offset=0, strides=(3,))
+                np.bitwise_and(win, 0xFFFFFF, out=packed[a : a + m])
+            r, g, bl = (int(v) for v in cf[-3:])
+            packed[b - 1] = r | (g << 8) | (bl << 16)
+            present[packed[a:b]] = True  # 多个线程同时写 True：结果一样
 
         par_rows(pack, h, w)
         uniq = np.flatnonzero(present).astype(np.uint32)
         lut = np.empty(1 << 24, dtype=np.int32)  # 只会读到出现过的颜色
         lut[uniq] = np.arange(uniq.size, dtype=np.int32)
-        index = np.empty(n, dtype=np.int32)
-        par_ranges(lambda a, b: np.take(lut, packed[a:b], out=index[a:b]), n)
+        index = packed.view(np.int32)  # 颜色编号直接写回同一块内存（不再多占一份整幅数组）
+        m = int(uniq.size)
+        small = m <= 2_000_000  # 颜色不太多：顺便按块数好每种颜色的像素数（数据还在缓存里，不用再扫一遍）
+
+        def number(a, b):
+            np.take(lut, packed[a:b], out=index[a:b], mode="clip")
+            return np.bincount(index[a:b], minlength=m) if small else None
+
+        parts = par_ranges(number, n)
         self.index = index.reshape(self.shape)
         self.colours = np.stack([uniq & 255, (uniq >> 8) & 255, (uniq >> 16) & 255], axis=-1).astype(np.uint8)
-        self.n = int(uniq.size)
+        self.n = m
+        if small:
+            self.__dict__["_all_counts"] = np.sum(parts, axis=0)
+        self._mask_counts: dict = {}  # 同一个蒙版只数一次（见 count）
+        self._mask_lock = threading.Lock()
 
     @cached_property
     def lab(self) -> np.ndarray:
@@ -159,10 +178,24 @@ class PixelTable:
         return self._count(None)
 
     def count(self, mask: np.ndarray | None = None) -> np.ndarray:
-        """每种颜色有多少个像素（只数 mask 为 True 的）。"""
+        """每种颜色有多少个像素（只数 mask 为 True 的）。
+
+        蒙版全是 True 时直接用总数；同一个蒙版（同一块内存、内容没变）在统计、脏色、肤色、均匀度里
+        各数一次很浪费：记住最近几个蒙版的结果。"""
         if mask is None:
             return self._all_counts.copy()
-        return self._count(np.asarray(mask, dtype=bool).reshape(-1))
+        mask = np.asarray(mask, dtype=bool)
+        if mask.all():
+            return self._all_counts.copy()
+        k = (_key(mask), _fingerprint_mask(mask))
+        with self._mask_lock:  # 几项分析同时要同一个蒙版的计数：后来的等前面的数完直接用（不重复数）
+            hit = self._mask_counts.get(k)
+            if hit is None:
+                out = self._count(mask.reshape(-1))
+                hit = self._mask_counts[k] = (mask, out)  # 连蒙版一起存着：地址不会被别的数组复用
+                while len(self._mask_counts) > 4:
+                    self._mask_counts.pop(next(iter(self._mask_counts)))
+        return hit[1].copy()
 
     def _count(self, mask) -> np.ndarray:
         idx = self.index.reshape(-1)
@@ -180,7 +213,7 @@ class PixelTable:
         values = np.asarray(values)
         idx = self.index.reshape(-1)
         out = np.empty((idx.size, *values.shape[1:]), dtype=values.dtype)
-        par_ranges(lambda a, b: np.take(values, idx[a:b], axis=0, out=out[a:b]), idx.size)
+        par_ranges(lambda a, b: np.take(values, idx[a:b], axis=0, out=out[a:b], mode="clip"), idx.size)
         return out.reshape(*self.shape, *values.shape[1:])
 
     def colour_counts(self, mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -232,6 +265,13 @@ def _fingerprint(a: np.ndarray) -> int:
     h, w = a.shape[:2]
     sy, sx = max(1, h // 256), max(1, w // 256)
     return zlib.crc32(np.ascontiguousarray(a[::sy, ::sx]).tobytes())
+
+
+def _fingerprint_mask(m: np.ndarray) -> int:
+    """蒙版内容的指纹：True 的个数 + 抽样（蒙版被就地改写过就认不出来，不会用旧的计数）。"""
+    h = m.shape[0] if m.ndim else 1
+    step = max(1, h // 512)
+    return hash((int(np.count_nonzero(m)), zlib.crc32(np.ascontiguousarray(m[::step]).tobytes())))
 
 
 def forget_all() -> None:
@@ -297,18 +337,7 @@ def cached(tag, arr: np.ndarray, make):
 
 
 def colour_counts(rgb: np.ndarray, mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """图像（mask 范围内）-> (不同的颜色, 每种的像素数)。像素不多时直接返回每个像素（权重 1）。
-
-    「快速」精度或“先出结果”时（sampling.resolution），大图先按格平均缩小。"""
-    from colordoctor.core.sampling import grid_downsample, resolution_limit
-
-    if np.asarray(rgb).ndim == 3 and rgb.shape[0] * rgb.shape[1] > resolution_limit()[0]:
-        from colordoctor.core.contamination import downsample_mask
-
-        sub, step = grid_downsample(rgb, resolution_limit()[0])
-        if mask is not None:
-            mask = downsample_mask(mask, step, sub.shape[:2])
-        rgb = sub
+    """图像（mask 范围内）-> (不同的颜色, 每种的像素数)。像素不多时直接返回每个像素（权重 1）。"""
     px = np.asarray(rgb)[..., :3]
     if px.shape[0] * px.shape[1] < cs.PER_COLOUR_MIN or px.dtype != np.uint8:
         flat = px.reshape(-1, 3) if mask is None else px[np.asarray(mask, dtype=bool)]

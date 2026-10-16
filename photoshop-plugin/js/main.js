@@ -97,7 +97,7 @@ function refreshTarget() {
     st.textContent = changed
       ? `设置改过了：下面的结果仍是按“${a.settingsText}”算的。要按新设置，请再点「${analyzeLabel()}」`
       : (stale ? `文档在分析后有改动（不一定是这个图层），结果可能过期，可以再点一次「${analyzeLabel()}」`
-        : precisionStatus(e));
+        : "已分析 · 下面的结果对应这个对象和设置");
   } else if (sameObject) {
     st.className = "status warn";
     st.textContent = `下面的结果是按「${TARGET_NAME[a.target] || a.target}」分析的，现在选的是「${TARGET_NAME[$("target").value] || ""}」`;
@@ -109,70 +109,6 @@ function refreshTarget() {
     st.textContent = "只在点击按钮时分析";
   }
   return info;
-}
-
-// ---------------------------------------------------------------- 分析精度：先出快速结果，原图精查在后台
-const FAST_READ_PIXELS = 24_000_000;  // 「快速」精度：超过这么多像素的图由 PS 缩小读取（读、传、算都快）
-
-function precisionStatus(e) {
-  const r = e && e.result;
-  if (r && r.precision === "preview") {
-    return e.refineError
-      ? `原图精查没有完成（${e.refineError}）：下面是快速结果（约 1200 万像素），也可以按它生成图层，或再点「${analyzeLabel()}」重试`
-      : "已出快速结果（约 1200 万像素）· 正在按原图逐个像素精查，完成后自动更新；生成图层要等精查完成…";
-  }
-  if (e && e.refinedText) return `已按原图精查 · ${e.refinedText}`;
-  return "已分析 · 下面的结果对应这个对象和设置";
-}
-
-// 精查结果和快速结果比：结论变了没有
-function precisionChange(quick, full) {
-  const probs = (r) => (r.findings || []).filter((f) => f.severity !== "正常").map((f) => f.problem);
-  const sev = (r) => (r.summary && r.summary["严重程度"]) || "";
-  const a = probs(quick);
-  const b = probs(full);
-  const added = b.filter((p) => !a.includes(p));
-  const gone = a.filter((p) => !b.includes(p));
-  if (sev(quick) === sev(full) && !added.length && !gone.length) return `结论和快速结果一致（${sev(full)}）`;
-  const parts = [`整体 ${sev(quick)} → ${sev(full)}`];
-  if (added.length) parts.push(`新发现：${added.slice(0, 3).join("；")}`);
-  if (gone.length) parts.push(`不再算问题：${gone.slice(0, 3).join("；")}`);
-  return `结论有变化，${parts.join("，")}`;
-}
-
-// 后台的原图精查：完成后替换快速结果（这期间又分析过、或已经按快速结果生成了图层，就不替换）
-async function refineLater(sub, entry, token) {
-  for (let i = 0; i < 24; i += 1) {  // 每次最多等 25 秒，总共 10 分钟
-    let r;
-    try {
-      r = await bridge.refined(token, 25);
-    } catch (e) {
-      entry.refineToken = null;
-      if (state.bySub[sub] !== entry) return;
-      entry.refineError = e.message || String(e);
-      if (state.sub === sub && !state.busy) { refreshTarget(); updateButtons(); }  // 精查失败：可以按快速结果生成
-      return;
-    }
-    if (r.pending) continue;
-    entry.refineToken = null;
-    if (state.bySub[sub] !== entry) return;  // 已经重新分析过：这次的精查结果用不上了
-    if (entry.made.size) {
-      // 已经按快速结果生成了图层：不替换（卡片和图层要对应），只说明
-      entry.refineError = `你已经按快速结果生成了图层，没有替换；精查${precisionChange(entry.result, r)}。要看精查结果请再点「${analyzeLabel()}」（同一张图会很快）`;
-    } else {
-      const before = entry.result;
-      r.sub = sub;
-      r.notes = [...(r.notes || []), ...(entry.extraNotes || [])];
-      entry.result = r;
-      entry.refinedText = precisionChange(before, r);
-    }
-    if (state.sub === sub && !state.busy) {
-      renderResult();
-      toneHint();
-      refreshTarget();
-    }
-    return;
-  }
 }
 
 const TARGET_NAME = { stack: "到这一层的画面", layer: "只看这个图层", merged: "整个画面（合并可见）" };
@@ -415,7 +351,7 @@ function query(sub) {
 
 function setControlsLocked(locked) {
   // 分析进行中不能切换页面、分析对象和参数：参数和结果必须属于同一个页面
-  document.querySelectorAll(".cat, #subs button, #controls select, #controls button, #controls input, #target, #precision")
+  document.querySelectorAll(".cat, #subs button, #controls select, #controls button, #controls input, #target")
     .forEach((el) => { el.disabled = locked; });
   if (!locked && $("seg") && $("part")) $("part").disabled = $("seg").value === "color";
 }
@@ -462,21 +398,13 @@ async function runAnalyze() {
   const historyBefore = ps.historyStateId(info.doc);
   try {
     // “及以下的画面”：读像素时临时隐藏上方图层（不留历史记录）
-    const fast = $("precision").value === "fast" && mode !== "patch";
-    const px = await ps.readModal(() => (mode === "patch" ? ps.readSelectionPixels(info)
-      : ps.readPixels(info, undefined, fast ? FAST_READ_PIXELS : undefined)), info);
-    if (mode !== "patch") {
-      q.precision = "full";  // 「快速」时 PS 已经缩小读取，服务按收到的像素逐个检查
-      if (!fast) q.progressive = "1";  // 大图：先回快速结果，原图精查在后台继续
-      const prev = state.bySub[sub];
-      if (prev && prev.refineToken) q.supersede = prev.refineToken;  // 上一次还没精查完：让服务停掉，不和这次抢 CPU
-    }
+    const px = await ps.readModal(() => (mode === "patch" ? ps.readSelectionPixels(info) : ps.readPixels(info)), info);
     if (refFile) {
       // 每次分析都重新交给服务（服务只暂存最近几张参考图）
       q.ref = (await bridge.uploadReferenceFile(refFile.name, refFile.data)).ref;
     } else if (mode === "reference") {
       const refInfo = { ok: true, doc: refDoc, layer: null, bounds: { left: 0, top: 0, right: refDoc.width, bottom: refDoc.height } };
-      const refPx = await ps.readModal(() => ps.readPixels(refInfo, undefined, fast ? FAST_READ_PIXELS : undefined));
+      const refPx = await ps.readModal(() => ps.readPixels(refInfo));
       q.ref = await bridge.uploadReference(refPx);
     }
     const sb = px.sourceBounds;
@@ -489,14 +417,9 @@ async function runAnalyze() {
     if (profile && !/srgb/i.test(profile) && mode !== "patch") {
       res.notes = [...(res.notes || []), `文档的颜色配置文件是「${profile}」：分析按 sRGB 换算，但调整图层作用在「${profile}」里，色相范围和曲线点会有偏差。建议在转换为 sRGB 的副本上调（编辑 → 转换为配置文件）`];
     }
-    const extraNotes = [];
-    if (px.scaled && fast) {
-      res.precision = "fast";
-      extraNotes.push(`快速精度：按 ${px.width}×${px.height} 读取分析（约 2400 万像素），一两个像素大的杂色点可能被平均掉。要逐个像素检查，把上面的精度改为「原图精度」`);
-    } else if (px.scaled) {
-      extraNotes.push(`这张图超过 1 亿像素，按 ${px.width}×${px.height} 读取分析（1 亿像素以内都按原图尺寸逐个像素检查）：只有一两个像素大的杂色点可能被平均掉，可以框选局部再查`);
+    if (px.scaled) {
+      res.notes = [...(res.notes || []), `这张图超过 1 亿像素，按 ${px.width}×${px.height} 读取分析（1 亿像素以内都按原图尺寸逐个像素检查）：只有一两个像素大的杂色点可能被平均掉，可以框选局部再查`];
     }
-    res.notes = [...(res.notes || []), ...extraNotes];
     state.bySub[sub] = {
       result: res, made: new Set(),
       analyzed: {
@@ -507,10 +430,7 @@ async function runAnalyze() {
         refName: refFile ? refFile.name : (refDoc ? refDoc.name : null),
         settings, settingsText: settingsText(sub, q),
       },
-      extraNotes,
-      refineToken: res.refine || null,
     };
-    if (res.refine) refineLater(sub, state.bySub[sub], res.refine);
   } catch (e) {
     setBusy(false);
     if (mode === "patch") {
@@ -614,21 +534,17 @@ function updateButtons() {
   const nonRgb = !!docMode && !/rgb/i.test(docMode);
   const blockTitle = nonRgb ? "校正图层按 RGB 设计：请先把文档转换为 RGB（图像 → 模式 → RGB 颜色）" : "";
   const expired = !!(e && e.expired);
-  // 快速结果还在等原图精查：先不生成图层（精查可能改结论，图层要按精查结果建）；精查失败就按快速结果
-  const refining = !!(e && e.refineToken && e.result && e.result.precision === "preview");
-  const waitTitle = refining ? "原图精查还没完成：完成后按精查结果生成（快速结果只供先看）" : "";
-  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb || expired || refining;
-  $("generateAll").title = blockTitle || waitTitle;
+  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb || expired;
+  $("generateAll").title = blockTitle;
   if (e && hasLayers(e)) {
     const rest = e.result.plan.layers.filter((l) => !e.made.has(l.id));
     const mask = rest.some((l) => l.has_mask) ? "（带蒙版）" : "";
     $("generateAll").textContent = rest.length === 0 ? "全部已生成" : (e.made.size ? `生成其余 ${rest.length} 层${mask}` : `一键生成全部${mask}`);
     if (rest.length === 0) $("generateAll").disabled = true;
-    if (refining && rest.length) $("generateAll").textContent = "原图精查中…完成后可生成";
   } else {
     $("generateAll").textContent = "一键生成全部";
   }
-  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || expired || refining || b.dataset.done === "1"; b.title = blockTitle || waitTitle; });
+  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || expired || b.dataset.done === "1"; b.title = blockTitle; });
   document.querySelectorAll("[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc || expired; });
   const acrOk = !busy && hasAcrSource();
   $("acrExport").disabled = !acrOk;
@@ -674,9 +590,6 @@ function renderResult() {
   if (r.mode === "patch") return renderPatch(e);
   if (r.mode === "multipoint") return renderMultipoint(r);
   const cards = [resultHeader(e)];
-  if (r.precision === "preview") {
-    cards.push(`<div class="note">⏳ 快速结果（约 1200 万像素）：正在按原图逐个像素精查，完成后自动替换</div>`);
-  }
   (r.notes || []).forEach((n) => cards.push(`<div class="muted">${esc(n)}</div>`));
   if (r.tone && r.sub === "style") cards.push(toneGrid(r.tone));
   const layers = (r.plan && r.plan.layers) || [];
@@ -1157,7 +1070,6 @@ async function init() {
   }
   if (["stack", "layer", "merged"].includes(prefs.target)) $("target").value = prefs.target;
   $("target").addEventListener("change", () => { savePref("target", $("target").value); refreshTarget(); });
-  remember("precision");  // 分析精度：原图（大图先出快速结果）/ 快速
   $("analyze").addEventListener("click", runAnalyze);
   // 改了影调风格 / 颜色 / 统一色 / 肤色设置：状态栏马上说明“结果是按旧设置算的”
   $("controls").addEventListener("change", () => { if (!state.busy) refreshTarget(); });

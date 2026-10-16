@@ -19,12 +19,6 @@
       </select>
       <button id="analyze" class="primary">分析到这一层</button>
     </div>
-    <div class="row">
-      <select id="precision" aria-label="分析精度">
-        <option value="full" title="每个像素都检查。大图先出快速结果（约 1200 万像素），原图精查在后台进行，完成后自动替换">原图精度（大图先出快速结果）</option>
-        <option value="fast" title="超过 2400 万像素的图由 PS 缩小后读取分析：读、传、算都快，一两个像素大的杂色点可能漏掉">快速（大图按约 2400 万像素）</option>
-      </select>
-    </div>
     <div id="targetName" class="strong">—</div>
     <div id="status" class="status">只在点击按钮时分析</div>
   </section>

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import contextvars
 import math
-from contextlib import contextmanager
 
 import numpy as np
 
@@ -98,25 +96,6 @@ def crop(pixels: np.ndarray, rect) -> np.ndarray:
 
 # 分析按原图尺寸做：每个像素都检查（不降采样），只有超过这个上限的超大图才按格平均缩小
 FULL_RES_MAX = 160_000_000
-PREVIEW_MAX = 12_000_000  # “先出结果”：先按这么多像素（按格平均）算一遍，原图精查在后面
-FAST_MAX = 24_000_000  # 「快速」分析精度：超过这么多像素的图按格平均缩小后分析
-
-# 当前这次分析最多看多少像素、属于哪种精度（"full" / "fast" / "preview"）。用 contextvar：只影响这一次分析
-_LIMIT: contextvars.ContextVar[tuple[int, str]] = contextvars.ContextVar("colordoctor_resolution", default=(FULL_RES_MAX, "full"))
-
-
-@contextmanager
-def resolution(max_pixels: int, label: str):
-    """在这段代码里，分析最多看 max_pixels 个像素（超过的按格平均缩小）。label：精度名称，写进结果。"""
-    token = _LIMIT.set((min(int(max_pixels), FULL_RES_MAX), label))
-    try:
-        yield
-    finally:
-        _LIMIT.reset(token)
-
-
-def resolution_limit() -> tuple[int, str]:
-    return _LIMIT.get()
 
 
 def grid_step(n_pixels: int, max_samples: int) -> int:
@@ -133,7 +112,6 @@ def grid_downsample(pixels: np.ndarray, max_samples: int) -> tuple[np.ndarray, i
     噪点、零星杂色像素的统计差很多，桌面版和插件的结论也就不一样。
     """
     _check_image(pixels)
-    max_samples = min(max_samples, _LIMIT.get()[0])
     h, w = pixels.shape[:2]
     step = grid_step(h * w, max_samples)
     if step == 1:

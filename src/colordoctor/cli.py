@@ -99,6 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tones", help="列出影调风格和九种影调")
     sv = sub.add_parser("serve", help="启动给 Photoshop 插件用的本机服务（只监听 127.0.0.1）")
     sv.add_argument("--port", type=int, default=47321)
+    bn = sub.add_parser("bench", help="测速：这台电脑按原图尺寸分析一张大图要多久")
+    bn.add_argument("image", nargs="?", help="用自己的图片测（JPG / PNG / TIFF / RAW）；不给时用合成人像")
+    bn.add_argument("--mp", default="24,45,100", help="合成人像的大小（百万像素），逗号分隔，默认 24,45,100")
     return p
 
 
@@ -112,6 +115,16 @@ def run(argv: list[str]) -> int:
         from colordoctor.bridge.server import serve
 
         serve(args.port)
+        return 0
+    if args.cmd == "bench":
+        from colordoctor.bench import report
+
+        try:
+            sizes = [float(v) for v in str(args.mp).split(",") if v.strip()]
+        except ValueError:
+            print("错误：--mp 应为逗号分隔的数字，例如 24,45,100", file=sys.stderr)
+            return 2
+        print(report(sizes, args.image))
         return 0
     if args.cmd == "tones":
         for k, s in tcl.TONE_STYLES.items():

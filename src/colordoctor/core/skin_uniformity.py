@@ -16,7 +16,7 @@ import numpy as np
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.contamination import _components, downsample_mask
 from colordoctor.core.region_statistics import weighted_circular_hue
-from colordoctor.core.pixel_table import table, wmedian
+from colordoctor.core.pixel_table import par_ranges, table, wmedian
 from colordoctor.core.sampling import FULL_RES_MAX, grid_downsample
 
 HUE_MILD = 6.0  # 色相偏离（度）：轻微
@@ -81,8 +81,8 @@ def analyze_uniformity(
     # 原图尺寸的每个像素：颜色只算一次（PixelTable），每一小块按“颜色 × 这块里的像素数”统计
     pt = table(sub)
     Lu, Cu, hu = pt.L, pt.C, pt.h
-    valid = valid & (Cu >= 3)[pt.index]
-    wv = pt.count(valid)
+    ok_u = Cu >= 3  # 几乎无彩的颜色不算皮肤：按颜色排除（不建整幅的图）
+    wv = pt.count(None if mask is None else valid) * ok_u
     n_skin = int(wv.sum())
     if n_skin < 20:
         return UniformityResult(n_skin, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, step=step)
@@ -94,23 +94,28 @@ def analyze_uniformity(
     ts = int(max(6, round(min(hh, ww) / 12)))
     th, tw = (hh + ts - 1) // ts, (ww + ts - 1) // ts
     tmap = np.zeros((th, tw, 3), dtype=float)
-    tiles = []
-    for ty in range(th):
-        for tx in range(tw):
+    cells = [(ty, tx) for ty in range(th) for tx in range(tw)]
+
+    def do_tiles(a, b):  # 各小块互不相关：分给几个线程
+        out = []
+        for ty, tx in cells[a:b]:
             sl = (slice(ty * ts, (ty + 1) * ts), slice(tx * ts, (tx + 1) * ts))
-            v = valid[sl]
-            if v.size == 0 or v.mean() < MIN_TILE_SKIN or v.sum() < 6:
+            idx = pt.index[sl]
+            cnt = np.bincount(idx.ravel() if mask is None else idx[valid[sl]], minlength=pt.n)
+            cnt[~ok_u] = 0
+            nv = int(cnt.sum())
+            if idx.size == 0 or nv / idx.size < MIN_TILE_SKIN or nv < 6:
                 continue
-            cnt = np.bincount(pt.index[sl][v], minlength=pt.n)
             k = np.flatnonzero(cnt)
             c = cnt[k].astype(np.float64)
             ht, _, _ = weighted_circular_hue(hu[k], Cu[k] * c)
             if ht is None:
                 continue
-            tiles.append(
-                (ty, tx, float(cs.hue_diff(h0, ht)), wmedian(su[k], c), wmedian(Lu[k], c), int(v.sum()),
-                 (pt.lab[k] * c[:, None]).sum(axis=0) / c.sum())
-            )
+            out.append((ty, tx, float(cs.hue_diff(h0, ht)), wmedian(su[k], c), wmedian(Lu[k], c), nv,
+                        (pt.lab[k] * c[:, None]).sum(axis=0) / c.sum()))
+        return out
+
+    tiles = [t for part in par_ranges(do_tiles, len(cells), 1) for t in part]
     if not tiles:
         return UniformityResult(n_skin, float(h0), s0, 0.0, 0.0, 0.0, 0.0, 100.0, step=step)
 

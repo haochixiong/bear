@@ -12,7 +12,7 @@ from colordoctor.core import analysis as an
 from colordoctor.core import color_spaces as cs
 from colordoctor.core import skin_presets as sp
 from colordoctor.core.color_models import AnalysisReport, ColorContext, PointSample, SkinPreset
-from colordoctor.core.sampling import FAST_MAX, FULL_RES_MAX, PREVIEW_MAX, SampleError, clamp_rect, crop, resolution
+from colordoctor.core.sampling import SampleError, clamp_rect, crop
 
 MODES = {
     "point": "单点取色",
@@ -63,8 +63,6 @@ def ai_skin_mask(region: np.ndarray, ctx: ColorContext, part: str | None):
     return mask, ctx
 
 
-PREVIEW_FROM = 20_000_000  # 原图精度下，比这大的图先出快速结果、再按原图精查
-
 class Session:
     def __init__(self, presets: list[SkinPreset] | None = None):
         self.mode = "point"
@@ -81,7 +79,6 @@ class Session:
         self.style_key: str | None = None
         self.tone_style = ""  # 影调风格（tone_class.TONE_STYLES 的键），空 = 不改影调
         self.tone_target = ""  # 直接选的目标影调（九种之一），优先于影调风格
-        self.precision = "full"  # 分析精度："full" 原图每个像素（大图先出快速结果再精查）；"fast" 大图按约 2400 万像素
         self.family: str | None = None
         self.family_target_lab = None
         self.skin_by_part: dict[str, tuple[float, float, float]] = {}
@@ -128,33 +125,14 @@ class Session:
             return None
         return (p.style.key if p.style else None, p.unity.family if p.unity else None, p.tone_choice)
 
-    def stages(self, *images: np.ndarray, preview: bool = True) -> list[tuple[int, str]]:
-        """这次分析分几步：[(最多看多少像素, 精度名称)]。
-
-        「快速」精度：大图按约 2400 万像素一步算完。原图精度：图大于 PREVIEW_FROM 时先按约 1200 万像素出结果，
-        再按原图精查（第二步的结果替换第一步）；不大的图直接按原图算。
-        """
-        n = max((im.shape[0] * im.shape[1] for im in images if im is not None), default=0)
-        if self.precision == "fast":
-            return [(FAST_MAX, "fast")]
-        if preview and n > PREVIEW_FROM:
-            return [(PREVIEW_MAX, "preview"), (FULL_RES_MAX, "full")]
-        return [(FULL_RES_MAX, "full")]
-
     def compute_rect(
         self, region: np.ndarray, ctx: ColorContext, rect, mode: str | None = None, lasso=None, manual_mask=None,
-        part: str | None = None, plain: bool = False, stage: tuple[int, str] | None = None,
+        part: str | None = None, plain: bool = False,
     ) -> AnalysisReport:
         """part：肤色模式下的部位；None 时用当前选择（重算已有结果时传原结果的部位）。
 
         plain：整图色彩不套用影调风格、颜色模板和统一色（分析仿色的参考作品：它不是要改的图）。
-        stage：(最多看多少像素, 精度名称)，见 stages()；None = 按当前精度一步算完。
         """
-        stage = stage or self.stages(region, preview=False)[-1]
-        with resolution(*stage):
-            return self._compute_rect(region, ctx, rect, mode, lasso, manual_mask, part, plain)
-
-    def _compute_rect(self, region, ctx, rect, mode, lasso, manual_mask, part, plain) -> AnalysisReport:
         mode = mode or self.mode
         if mode == "skin":
             part = part or self.part
@@ -173,19 +151,17 @@ class Session:
             return an.scan_image(region, ctx, rect=rect)
         return an.analyze_region(region, ctx, rect=rect)
 
-    def compute_reference(self, ref: HistoryItem, mine_region: np.ndarray, ctx: ColorContext, rect, skin_mine=None,
-                          stage: tuple[int, str] | None = None):
+    @staticmethod
+    def compute_reference(ref: HistoryItem, mine_region: np.ndarray, ctx: ColorContext, rect, skin_mine=None):
         skin_ref = None
         if isinstance(ref.result, AnalysisReport) and ref.result.skin is not None:
             skin_ref = ref.result.skin.mean_lab
-        with resolution(*(stage or self.stages(mine_region, ref.region, preview=False)[-1])):
-            return an.compare_reference(mine_region, ref.region, ctx, skin_mine=skin_mine if skin_ref else None,
-                                        skin_ref=skin_ref if skin_mine else None, rect=rect)
+        return an.compare_reference(mine_region, ref.region, ctx, skin_mine=skin_mine if skin_ref else None,
+                                    skin_ref=skin_ref if skin_mine else None, rect=rect)
 
-    def compute_compare(self, ref: HistoryItem, prob_region: np.ndarray, ctx: ColorContext, rect, skin: bool = True,
-                        stage: tuple[int, str] | None = None):
-        with resolution(*(stage or self.stages(prob_region, ref.region, preview=False)[-1])):
-            return an.compare_regions(ref.region, prob_region, ctx, skin=skin, ref_rect=ref.rect, prob_rect=rect)
+    @staticmethod
+    def compute_compare(ref: HistoryItem, prob_region: np.ndarray, ctx: ColorContext, rect, skin: bool = True):
+        return an.compare_regions(ref.region, prob_region, ctx, skin=skin, ref_rect=ref.rect, prob_rect=rect)
 
     # ---------------------------------------------------------------- 历史
     def add_point(self, patch: np.ndarray, sample: PointSample, label: str) -> HistoryItem:

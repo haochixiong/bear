@@ -167,6 +167,9 @@ class ContaminationResult:
     mask: object = None  # np.ndarray (h, w) uint8：0 正常 1 无彩/忽略 2 对立色 3 发灰
     mask_scale: float = 1.0  # mask 像素到源像素的倍数
     blobs: tuple[Blob, ...] = ()
+    # 掩码里“正常”的像素按颜色数好的个数（与分析用的像素表的颜色一一对应）：阴影 / 高光分段直接用，
+    # 不必再把整幅掩码扫一遍。不进 JSON
+    normal_counts: object = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -324,6 +327,3 @@ class AnalysisReport:
     mask_info: dict = field(default_factory=dict)
     palette: object = None  # palette.PaletteReport（整图色彩）
     reference: object = None  # reference_match.MatchReport（仿色）
-    # 分析精度："full" 原图每个像素；"fast" 「快速」精度（大图按格平均缩到约 2400 万像素）；
-    # "preview" 先出的结果（约 1200 万像素），原图精查完成后会被替换
-    precision: str = "full"
