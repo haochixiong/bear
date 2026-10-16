@@ -53,11 +53,18 @@ python -m colordoctor
 **方式一：打包好的程序**：`ColorDoctor-mac-arm64.zip`（Apple 芯片）或 `ColorDoctor-mac-x86_64.zip`（Intel），解压得到 `ColorDoctor.app`，拖进“应用程序”。
 
 - 由 GitHub Actions 的 macOS 机器构建（PyInstaller 不能跨平台打包），在仓库的 Actions → 最新一次 ci → Artifacts 里下载；也可以在 Mac 上自己打：`bash packaging/build_mac.sh`。
-- 程序没有 Apple 签名：第一次打开会提示“无法验证开发者”。在 Finder 里**右键 → 打开 → 打开**一次即可（或在终端运行 `xattr -dr com.apple.quarantine /Applications/ColorDoctor.app`）。
-- “框选屏幕 / 实时取色”需要屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕录制 → 打开 ColorDoctor，然后重开程序。没有权限时截到的只有桌面背景。打开图片、PS 插件不需要这个权限。
-- 显示器颜色配置文件从系统读取（系统设置 → 显示器 → 颜色描述文件），和 Photoshop 用的一样。
+- 需要 macOS 13（Ventura）或更新版本。
+- 程序没有经过 Apple 公证：第一次打开会提示“无法验证开发者 / 已阻止打开”。
+  - macOS 15 及以后：先双击一次（会被拦下），再到 **系统设置 → 隐私与安全性**，在下方点 **“仍要打开”**，输入密码确认。
+  - macOS 13 / 14：在 Finder 里 **右键 → 打开 → 打开** 一次即可。
+  - 也可以在终端运行 `xattr -dr com.apple.quarantine /Applications/ColorDoctor.app` 后再打开（各版本都适用）。
+- “框选屏幕 / 实时取色”需要屏幕录制权限：第一次使用时程序会提示并打开系统的授权对话框；到 **系统设置 → 隐私与安全性 → 屏幕录制** 勾选 ColorDoctor，然后退出并重开程序。没有权限时系统只给桌面背景（程序会拦下并提示，不会去分析桌面）。打开图片、PS 插件不需要这个权限。
+  - 程序没有正式签名，**每次更新到新版本后系统可能会把它当成新程序**，需要在屏幕录制里重新勾选一次。
+- 屏幕颜色：截图自带颜色空间标记时以标记为准（系统已换算过就不再换算）；没有标记时读取显示器的颜色配置文件（系统设置 → 显示器 → 颜色描述文件），和 Photoshop 用的一样。Mac 上这部分还需要在真机（尤其是 P3 屏幕）上核对，见 docs/AUDIT.md 第 14 轮。
 - 全局快捷键目前只支持 Windows；Mac 上用窗口里的按钮（窗口内的 ⌘O 等快捷键可用）。
-- 设置和自定义肤色风格保存在 `~/Library/Application Support/ColorDoctor`。
+- 触控板：两指滑动平移图片，双指捏合（或按住 ⌘ 滑动）缩放。
+- 自定义肤色风格、错误日志、AI 模型放在 `~/Library/Application Support/ColorDoctor`；界面设置（包括 AI 点评的 API Key）在 `~/Library/Preferences/com.colordoctor.ColorDoctor.plist`。
+- 从“访达”打开时，AI 点评用的 `claude` / `codex` 命令会在 Homebrew、npm、`~/.local/bin` 等常见位置自动查找；装在别处时在设置里填完整路径。
 
 **方式二：从源码运行**：`python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt && pip install -e . && python -m colordoctor`。
 
@@ -157,7 +164,7 @@ colordoctor tones        （列出影调风格和九种影调）
 所有结果都用**标准 sRGB 数值**和 **Lab D50**（与 Photoshop 信息面板一致）表示。
 
 - **问题在哪**：Photoshop 显示图片前，会先按“显示器 ICC 配置文件”转换颜色，所以屏幕上的像素值和文档里的数值不一样。如果直接把屏幕像素当成 sRGB，同一张图在不同显示器上会读出不同的 Lab。在模拟的 P3 广色域屏上实测，肤色误差约为 ΔE00 2.5，而且读数偏灰。
-- **工具怎么做**：读取 Windows 当前显示器的配置文件（Photoshop 用的也是这一个），把这次转换反推回去，得到与设备无关的数值。实测平均误差约为 ΔE00 0.1。所以 ICC 在这里的作用是**消除**设备差异。
+- **工具怎么做**：读取当前显示器的配置文件（Windows 从系统显示设置、Mac 从 CoreGraphics 读；Photoshop 用的也是这一个），把这次转换反推回去，得到与设备无关的数值。实测平均误差约为 ΔE00 0.1。所以 ICC 在这里的作用是**消除**设备差异。Mac 上如果截图本身已经带了颜色空间标记（系统已经换算过），就按标记换算，不会换算两次。
 - **不做色彩管理的软件**：屏幕像素就是文件数值，这时请在下拉框中选“未做色彩管理的软件”，工具会原样读取。
 - **最精确的方式**：直接打开 JPG。工具会读取内嵌的 ICC 并转换到 sRGB；原图只读，不写回。
 
@@ -299,7 +306,7 @@ colordoctor tones        （列出影调风格和九种影调）
 - 单点模式下可以连续点多个点（回车或 Esc 结束），两个点以上自动做“多点对比”：以第一个点为基准，用“几乎看不出 / 仔细对比才看得出 / 能看出 / 明显 / 很明显 / 差别很大”说明差别和偏向（偏黄、偏暗…），并给出一句结论；也可以在历史里多选取色点后右键对比。
 - 整图色彩的「影调风格」和「颜色」分开选，见上文“整图色彩”。命令行用 `--tone-style japanese|candy|korean|cool|bright|cos|forest|french|chinese|film|western|cinematic|hongkong|moody` 或 `--tone-target 高中调`，`colordoctor tones` 列出全部说明。
 - 界面上的选择（模式、取样大小、肤色目标、部位、套索、整图扫描、影调风格、颜色、统一色、置顶、窗口位置等）会自动保存，下次启动恢复。
-- “AI 点评”的 API Key 以明文保存在本机设置（Windows 注册表 `HKCU\Software\ColorDoctor`，Mac 是 `~/Library/Preferences/com.colordoctor.ColorDoctor.plist`）里；介意的话留空，改用环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY`。
+- “AI 点评”的 API Key 以明文保存在本机设置（Windows 注册表 `HKCU\Software\ColorDoctor\ColorDoctor`，Mac 是 `~/Library/Preferences/com.colordoctor.ColorDoctor.plist`）里；介意的话留空，改用环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY`。
 
 ## 致谢
 

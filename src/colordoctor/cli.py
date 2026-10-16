@@ -38,6 +38,13 @@ def _ints(text: str, n: int) -> tuple[int, ...]:
     return vals
 
 
+def _port(text: str) -> int:
+    v = int(text)
+    if not 1 <= v <= 65535:
+        raise argparse.ArgumentTypeError("端口要在 1–65535 之间")
+    return v
+
+
 def _text(report) -> str:
     from colordoctor.core.color_models import PointSample
 
@@ -98,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("styles", help="列出整图颜色模板")
     sub.add_parser("tones", help="列出影调风格和九种影调")
     sv = sub.add_parser("serve", help="启动给 Photoshop 插件用的本机服务（只监听 127.0.0.1）")
-    sv.add_argument("--port", type=int, default=47321)
+    sv.add_argument("--port", type=_port, default=47321)
     bn = sub.add_parser("bench", help="测速：这台电脑按原图尺寸分析一张大图要多久")
     bn.add_argument("image", nargs="?", help="用自己的图片测（JPG / PNG / TIFF / RAW）；不给时用合成人像")
     bn.add_argument("--mp", default="24,45,100", help="合成人像的大小（百万像素），逗号分隔，默认 24,45,100")
@@ -120,11 +127,17 @@ def run(argv: list[str]) -> int:
         from colordoctor.bench import report
 
         try:
-            sizes = [float(v) for v in str(args.mp).split(",") if v.strip()]
+            sizes = [float(v) for v in str(args.mp).replace("，", ",").split(",") if v.strip()]
         except ValueError:
-            print("错误：--mp 应为逗号分隔的数字，例如 24,45,100", file=sys.stderr)
+            sizes = []
+        if not sizes or not all(0.01 <= v <= 160 for v in sizes):  # 也挡住 nan / inf / 0 / 负数
+            print("错误：--mp 应为 0.01–160 之间、逗号分隔的数字，例如 24,45,100", file=sys.stderr)
             return 2
-        print(report(sizes, args.image))
+        try:
+            print(report(sizes, args.image))
+        except ImageLoadError as e:
+            print(f"错误：{e}", file=sys.stderr)
+            return 2
         return 0
     if args.cmd == "tones":
         for k, s in tcl.TONE_STYLES.items():

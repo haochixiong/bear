@@ -396,6 +396,8 @@ async function runAnalyze() {
   setBusy(true, mode === "patch" ? "正在读取…" : "正在分析…");
   // 在读像素之前记下历史状态：分析过程中如果有改动，会被正确判为“可能过期”
   const historyBefore = ps.historyStateId(info.doc);
+  // 文档尺寸也在读像素之前记下：分析期间改了图像大小，生成时 checkStillValid 才能发现
+  const docSizeBefore = [info.doc.width, info.doc.height];
   try {
     // “及以下的画面”：读像素时临时隐藏上方图层（不留历史记录）
     const px = await ps.readModal(() => (mode === "patch" ? ps.readSelectionPixels(info) : ps.readPixels(info)), info);
@@ -426,7 +428,7 @@ async function runAnalyze() {
         docId: info.doc.id, docName: info.doc.name, layerId: info.layer ? info.layer.id : null,
         layerName: info.layer ? info.layer.name : "合并可见图层", target: $("target").value,
         okHistory: new Set([historyBefore]), bounds: sb,
-        docWidth: info.doc.width, docHeight: info.doc.height, depth: String(info.doc.bitsPerChannel || ""),
+        docWidth: docSizeBefore[0], docHeight: docSizeBefore[1], depth: String(info.doc.bitsPerChannel || ""),
         refName: refFile ? refFile.name : (refDoc ? refDoc.name : null),
         settings, settingsText: settingsText(sub, q),
       },
@@ -655,8 +657,9 @@ function toneGrid(t) {
     const info = ((state.options && state.options.tones) || []).find((x) => x.name === name);
     return `<div class="tcell ${cls}" title="${esc(info ? info.desc : name)}">${esc(name)}${tag ? `<span>${tag}</span>` : ""}</div>`;
   };
-  const grid = `<div class="tgrid"><div></div>${LENGTHS.map((n) => `<div class="thead">${n}调</div>`).join("")}
-    ${KEYS.map((k) => `<div class="thead">${k}调</div>${LENGTHS.map((n) => cell(`${k}${n}调`)).join("")}`).join("")}</div>`;
+  // 按行排（UXP 不支持 CSS Grid）：每行 = 行标题 + 三格
+  const grid = `<div class="tgrid"><div class="trow"><div class="thead rowhead"></div>${LENGTHS.map((n) => `<div class="thead">${n}调</div>`).join("")}</div>
+    ${KEYS.map((k) => `<div class="trow"><div class="thead rowhead">${k}调</div>${LENGTHS.map((n) => cell(`${k}${n}调`)).join("")}</div>`).join("")}</div>`;
   const max = Math.max(...t.histogram, 1e-6);
   const hist = `<div class="thist">${t.histogram.map((v) => `<i style="height:${Math.round(100 * v / max)}%"></i>`).join("")}</div>`;
   const groups = [[], [], []];
@@ -797,7 +800,8 @@ async function generate(ids, single, findingIndex) {
           $("status").textContent = `正在生成 ${i + 1}/${specs.length}：${spec.name}`;
           let m = spec.has_mask ? await bridge.fetchMask(r.session, spec.id, a.bounds, a.docWidth, a.docHeight) : null;
           const id = await ps.makeAdjustmentLayer(spec);
-          if (m) await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 }, a.depth);
+          // 位深按现在的文档取：分析后转成 16 位时，按 8 位写的蒙版会几乎全黑
+          if (m) await ps.putMask(d.id, id, m.data, m.width, m.height, { left: 0, top: 0 }, String(d.bitsPerChannel || a.depth));
           m = null;
           made.push(id);
           madeIds[spec.id] = [id];
@@ -832,7 +836,7 @@ async function makeSelection(id) {
   try {
     const m = await bridge.fetchMask(r.session, id, a.bounds, a.docWidth, a.docHeight);
     await ps.modal("ColorDoctor 选区", async (ctx, d) => {
-      await ps.putSelection(d.id, m.data, m.width, m.height, { left: 0, top: 0 }, a.depth);
+      await ps.putSelection(d.id, m.data, m.width, m.height, { left: 0, top: 0 }, String(d.bitsPerChannel || a.depth));
     }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
     setBusy(false);
     a.okHistory.add(ps.historyStateId(app.activeDocument));  // 建选区不算“文档改动”

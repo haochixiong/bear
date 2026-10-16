@@ -6,6 +6,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY=${PYTHON:-python3}
+# 系统自带的 python3（Xcode 命令行工具）是 3.9，太旧：先检查，给出明白的提示
+if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  echo "需要 Python 3.11 或更新版本（现在的 $PY 是 $("$PY" -V 2>&1)）。"
+  echo "请从 python.org 或 Homebrew 安装，然后用 PYTHON=python3.13 bash packaging/build_mac.sh 运行。"
+  exit 1
+fi
+if [ -d .venv ] && ! .venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  echo "旧的 .venv 用的 Python 版本太旧，重新创建"; rm -rf .venv
+fi
 if [ ! -d .venv ]; then "$PY" -m venv .venv; fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
@@ -14,7 +23,9 @@ python -m pip install --upgrade pip
 pip install -r requirements-dev.txt "pyinstaller>=6.10"
 pip install -e .
 # 可选功能：Claude API、RAW 读取、AI 抠皮肤（Mac 用 CPU 版 onnxruntime）
-pip install "anthropic>=1.0" "rawpy>=0.19" "onnxruntime>=1.17"
+pip install "anthropic>=1.0"
+pip install "rawpy>=0.19" || echo "（rawpy 装不上：这个版本不支持相机 RAW，其他功能正常）"
+pip install "onnxruntime>=1.17" || echo "（onnxruntime 装不上：这个版本没有 AI 抠皮肤，其他功能正常）"
 
 # AI 抠皮肤模型：下载后校验 SHA-256，不一致就删除并停止
 MODEL=packaging/models/selfie_multiclass_256x256.onnx

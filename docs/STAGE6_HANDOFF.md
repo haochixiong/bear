@@ -33,7 +33,7 @@
 
 ## 接手时先做
 
-1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线 **386 passed, 1 skipped**（需要 Node 才会跑插件 JS 测试））。
+1. `pip install -e .[dev]`，`python -m pytest -q`（当前基线见 README“测试”一节（需要 Node 才会跑插件 JS 测试））。
 2. 按“进度”表从第一个 ⏳ 开始。每完成一项：补测试 → 全量测试 → 更新本表 → 提交推送。
 
 ## 校准流程（插件端待实现，见 UXP 部分）

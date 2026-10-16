@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "photoshop-plugin"
 SKIP_DIRS = {"test", "node_modules", ".git"}
 SKIP_SUFFIX = {".md"}
+SKIP_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}  # Mac / Windows 资源管理器自己生成的文件
 
 
 def build(out_dir: Path = ROOT / "dist") -> Path:
@@ -21,11 +22,13 @@ def build(out_dir: Path = ROOT / "dist") -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"ColorDoctor-plugin-{manifest['version']}.ccx"
     files = sorted(p for p in PLUGIN.rglob("*") if p.is_file()
-                   and not (set(p.relative_to(PLUGIN).parts[:-1]) & SKIP_DIRS) and p.suffix not in SKIP_SUFFIX)
+                   and not (set(p.relative_to(PLUGIN).parts[:-1]) & SKIP_DIRS) and p.suffix not in SKIP_SUFFIX
+                   and p.name not in SKIP_NAMES)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for p in files:
             info = zipfile.ZipInfo(p.relative_to(PLUGIN).as_posix(), date_time=(2024, 1, 1, 0, 0, 0))  # 固定时间：同样的内容打出同样的包
             info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16  # 所有人可读：默认的 0600 装到别的用户下 Photoshop 会读不到
             z.writestr(info, p.read_bytes())
     return out
 

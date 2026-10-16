@@ -86,3 +86,28 @@ def display_icc_bytes(display_id: int | None) -> bytes | None:
 
 def icc_at(x: float, y: float) -> bytes | None:
     return display_icc_bytes(display_at(x, y))
+
+
+def screen_capture_allowed() -> bool:
+    """macOS 10.15+：本程序有没有“屏幕录制”权限。没有时截屏只得到桌面背景，系统不会报错。
+    非 macOS 或查询失败时返回 True（不拦）。"""
+    if sys.platform != "darwin":
+        return True
+    try:  # pragma: no cover - macOS only
+        cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics") or _CG)
+        cg.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        return bool(cg.CGPreflightScreenCaptureAccess())
+    except Exception:
+        return True
+
+
+def request_screen_capture() -> None:
+    """弹出系统的屏幕录制授权提示（每次安装只弹一次；之后要到系统设置里打开）。"""
+    if sys.platform != "darwin":
+        return
+    try:  # pragma: no cover - macOS only
+        cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics") or _CG)
+        cg.CGRequestScreenCaptureAccess.restype = ctypes.c_bool
+        cg.CGRequestScreenCaptureAccess()
+    except Exception:
+        pass

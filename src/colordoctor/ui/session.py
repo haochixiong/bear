@@ -42,11 +42,21 @@ class HistoryItem:
     source_label: str = ""
     created: float = field(default_factory=time.time)
     lasso: np.ndarray | None = None  # 套索蒙版（与 region 同尺寸），编辑皮肤蒙版时“恢复自动”要用
+    replaced_by: HistoryItem | None = field(default=None, repr=False)  # 被重算结果替换后指向新条目
 
     @property
     def time_text(self) -> str:
         return time.strftime("%H:%M:%S", time.localtime(self.created))
 
+
+
+def region_mean_lab(region: np.ndarray) -> np.ndarray:
+    """选区全部像素的平均 Lab（按“不同的颜色 × 像素数”算，和逐个像素算一样，但大图快得多）。"""
+    from colordoctor.core.pixel_table import colour_counts
+
+    colours, counts = colour_counts(region[..., :3])
+    lab = np.asarray(cs.srgb8_to_lab(np.asarray(colours, np.uint8).reshape(-1, 3)), np.float64)
+    return np.average(lab, axis=0, weights=np.asarray(counts, np.float64))
 
 def ai_skin_mask(region: np.ndarray, ctx: ColorContext, part: str | None):
     """AI 抠皮肤；不可用或没找到皮肤时返回 (None, 带提示的 ctx)，交给肤色规则处理。"""
@@ -95,7 +105,7 @@ class Session:
         return None
 
     def set_custom_preset_from(self, item: HistoryItem) -> SkinPreset:
-        lab = cs.srgb8_to_lab(item.region.reshape(-1, 3)).mean(axis=0)
+        lab = region_mean_lab(item.region)
         self.custom_preset = sp.preset_from_sample(lab)
         self.preset_key = "custom"
         return self.custom_preset

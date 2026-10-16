@@ -64,7 +64,7 @@ if sys.platform == "darwin":
             "CFBundleDisplayName": "ColorDoctor",
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
-            "LSMinimumSystemVersion": "11.0",
+            "LSMinimumSystemVersion": "13.0",  # PyQt6 6.10 起的 Qt 需要 macOS 13（Ventura）；写低了旧系统会打开就崩
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
         },

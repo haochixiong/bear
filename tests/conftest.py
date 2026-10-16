@@ -11,6 +11,15 @@ gc.disable()
 
 
 @pytest.fixture(autouse=True)
+def _isolated_config_dir(tmp_path_factory, monkeypatch):
+    """测试不读写本机真实的设置目录（用户自己的肤色预设、error.log 等）：
+    打包脚本在开发者电脑上跑测试时，不会因为本机的自定义预设而失败。"""
+    d = tmp_path_factory.getbasetemp() / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(d))
+    monkeypatch.setenv("APPDATA", str(d))
+
+
+@pytest.fixture(autouse=True)
 def _collect_on_main_thread():
     yield
     from colordoctor.core import pixel_table

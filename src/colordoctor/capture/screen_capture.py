@@ -46,11 +46,31 @@ def screen_info(qs) -> ScreenInfo:
 
 
 _icc_cache: dict[str, bytes | None] = {}
+_grab_icc: dict[str, bytes] = {}  # macOS：截图自带的颜色空间（见 _remember_tag）
+
+
+def _remember_tag(name: str, img: QImage) -> None:
+    """macOS 上 Qt 截屏时可能已经让系统（ColorSync）把显示器颜色换算过，并在图上标了颜色空间。
+    图上有标记时以标记为准（标的是 sRGB 就不再换算，避免换算两次）；没有标记才用显示器配置文件。
+    Windows 截到的是显示器原始数值、不带标记，不走这里。"""
+    if sys.platform != "darwin":
+        return
+    try:
+        cs = img.colorSpace()
+        data = bytes(cs.iccProfile()) if cs.isValid() else b""
+    except Exception:  # noqa: BLE001 - 读不到标记就按显示器配置文件处理
+        data = b""
+    if len(data) > 128:
+        _grab_icc[name] = data
+    else:
+        _grab_icc.pop(name, None)
 
 
 def icc_for(name: str, refresh: bool = False, info: ScreenInfo | None = None) -> bytes | None:
     """显示器 ICC。name 是 Qt 屏幕名；info 用来在 Qt 返回型号名时按位置找到 GDI 设备名（Windows）/ 显示器（macOS）。"""
     if sys.platform == "darwin":
+        if name in _grab_icc:
+            return _grab_icc[name]
         return _icc_for_mac(name, refresh, info)
     from colordoctor.capture.windows_display import gdi_device_name
 
@@ -83,8 +103,10 @@ def freeze_all_screens() -> list[ScreenCapture]:
     out = []
     for qs in QGuiApplication.screens():
         pm = qs.grabWindow(0)
-        arr = qimage_to_array(pm.toImage())
+        img = pm.toImage()
+        arr = qimage_to_array(img)
         info = screen_info(qs)
+        _remember_tag(info.name, img)
         out.append(ScreenCapture(info=info, pixels=arr, icc=icc_for(info.name, refresh=True, info=info), qscreen=qs))
     return out
 
@@ -100,7 +122,9 @@ def grab_around_cursor(radius_px: int) -> tuple[np.ndarray, ScreenInfo, tuple[in
     r_log = int(np.ceil((radius_px + 1) / dpr))
     lx, ly = pos.x() - info.x, pos.y() - info.y
     pm = qs.grabWindow(0, lx - r_log, ly - r_log, 2 * r_log + 1, 2 * r_log + 1)
-    arr = qimage_to_array(pm.toImage())
+    img = pm.toImage()
+    _remember_tag(info.name, img)
+    arr = qimage_to_array(img)
     if arr.size == 0:
         return None
     # 光标在抓取图中的设备像素位置

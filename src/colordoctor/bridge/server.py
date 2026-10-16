@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import threading
 import uuid
 from collections import OrderedDict
@@ -57,7 +58,20 @@ class Session:
     shape: tuple[int, int]  # 分析图像（裁剪前）的 (h, w)
     offset: tuple[int, int]  # 裁剪偏移
     doc_size: tuple[int, int]  # 文档 (w, h)
-    opaque: np.ndarray | None = None  # (h, w) bool：图层不透明的地方；None = 全部不透明
+    # 图层不透明的地方：只存裁剪后范围内的 (按位压缩的字节, 高, 宽)，范围外都是透明；None = 全部不透明。
+    # 以前存整幅 (h, w) 布尔图，16 个会话的 1 亿像素透明图层要多占 1.6 GB
+    opaque: tuple[np.ndarray, int, int] | None = None
+
+    def opaque_mask(self) -> np.ndarray | None:
+        """(h, w) 布尔图（用时才展开）。"""
+        if self.opaque is None:
+            return None
+        bits, vh, vw = self.opaque
+        h, w = self.shape
+        out = np.zeros((h, w), bool)
+        ox, oy = self.offset
+        out[oy:oy + vh, ox:ox + vw] = np.unpackbits(bits, count=vh * vw).reshape(vh, vw).astype(bool)
+        return out
 
 
 class Store:
@@ -214,8 +228,7 @@ def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
     h, w = px.shape[:2]
     if h * w > REF_MAX_PIXELS:
         k = (REF_MAX_PIXELS / (h * w)) ** 0.5
-        mode = "RGBA" if px.shape[2] == 4 else "RGB"
-        px = np.asarray(Image.fromarray(np.ascontiguousarray(px), mode=mode).resize(
+        px = np.asarray(Image.fromarray(np.ascontiguousarray(px, dtype=np.uint8)).resize(  # 3 / 4 通道自动认作 RGB / RGBA
             (max(1, round(w * k)), max(1, round(h * k))), Image.Resampling.BOX))
     try:
         prep = pixel_guard.prepare(px)
@@ -238,7 +251,7 @@ _prep_lock = threading.Lock()
 
 
 def _prepared(pixels: np.ndarray):
-    """同一张图（插件换个设置再分析、或先快速再精查，像素内容完全一样）用同一份准备好的数组：
+    """同一张图（插件换个设置再分析，像素内容完全一样）用同一份准备好的数组：
     分析引擎按数组记住了颜色编号，这样第二次不用重新编号。"""
     from colordoctor.core.pixel_table import content_key
 
@@ -267,7 +280,8 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
                 lab = tuple(float(v) for v in q["lab"].split(","))
             except ValueError as e:
                 raise ValueError("lab 参数应为 L,a,b") from e
-            if len(lab) != 3 or not (0 <= lab[0] <= 100):
+            if len(lab) != 3 or not all(np.isfinite(lab)) or not (0 <= lab[0] <= 100) \
+                    or not all(-128 <= v <= 128 for v in lab[1:]):
                 raise ValueError("lab 参数应为 L,a,b")
         return patch_values(pixels, q.get("preset") or "", lab=lab)
     prep = _prepared(pixels)
@@ -276,10 +290,8 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
     h, w = pixels.shape[:2]
     opaque = None
     if prep.valid is not None:  # 分析的是带透明区域的图层：蒙版在透明处必须为 0，否则调整会作用到下面的图层
-        opaque = np.zeros((h, w), bool)
-        ox, oy = prep.offset
         vh, vw = prep.valid.shape
-        opaque[oy:oy + vh, ox:ox + vw] = prep.valid
+        opaque = (np.packbits(prep.valid, axis=None), vh, vw)
     sid = sessions.put(Session(plan, (h, w), prep.offset, doc_size or (w, h), opaque))
     plan_json = plan.to_json()
     # 每条问题带上序号和修它的图层 id（图层的 finding 就是这个序号，顺序与 report.findings 相同）
@@ -373,7 +385,7 @@ class NotFound(LookupError):
     """会话 / 图层不存在（返回 404）。"""
 
 
-MAX_SIDE = 30_000  # 单边像素上限（PS 文档最大 300000，但这里只接受常见尺寸，防止内存耗尽）
+MAX_SIDE = 300_000  # 单边像素上限（与 PS 文档上限相同；长条全景图照样能做蒙版，内存由面积上限控制）
 MAX_MASK_PIXELS = 300_000_000
 MAX_CAL_SAMPLES = 200
 
@@ -400,8 +412,9 @@ def mask_bytes(sess: Session, layer_id: str, width: int | None = None, height: i
         ox, oy = sess.offset
         mh, mw = m.shape
         full[oy:oy + mh, ox:ox + mw] = m
-    if sess.opaque is not None:
-        full[~sess.opaque] = 0
+    opaque = sess.opaque_mask()
+    if opaque is not None:
+        full[~opaque] = 0
     tw = sess.doc_size[0] if width is None else int(width)
     th = sess.doc_size[1] if height is None else int(height)
     _check_size(tw, th, "蒙版")
@@ -582,7 +595,10 @@ class Handler(BaseHTTPRequestHandler):
                                   self.headers.get("X-Layer-Kind", ""), _header_text(self.headers.get("X-Layer-Name", "")))
             return self._send(200, res)
         if url.path == "/reference":
-            prep = pixel_guard.prepare(self._pixels())
+            try:
+                prep = pixel_guard.prepare(self._pixels())
+            except pixel_guard.BlockedError as e:  # pixel_guard 的说法针对“当前图层”；这里是参考图
+                raise pixel_guard.BlockedError(str(e).replace("当前图层是", "参考图是")) from e
             return self._send(200, {"ref": self.refs.put(prep.filled_for_statistics()), "notes": list(prep.notes)})
         if url.path == "/reference-file":
             # 插件直接选的参考图文件（JPG / PNG / TIFF / WebP / 相机 RAW），不用先在 PS 里打开
@@ -650,10 +666,12 @@ class _ExclusiveServer(ThreadingHTTPServer):
     """端口被占用时必须绑定失败（桌面版据此知道已经有一个服务在跑）。
 
     标准库默认打开 SO_REUSEADDR：在 Windows 上这会让第二个程序也绑上同一个端口，两个服务各收一部分请求，
-    插件拿到的会话 / 蒙版时有时无，旧版本也可能来回答。
+    插件拿到的会话 / 蒙版时有时无，旧版本也可能来回答。所以 Windows 上关掉它、改用独占端口。
+    macOS / Linux 上 SO_REUSEADDR 不允许两个程序同时监听同一个地址，只是允许绑定还处在 TIME_WAIT 的端口：
+    不打开的话，退出后半分钟内重开，服务就绑不上（每个请求结束都会留下 TIME_WAIT 连接）。
     """
 
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"
 
     def server_bind(self):
         import socket

@@ -42,6 +42,9 @@ class _Task(QRunnable):
             self._emit("failed", f"{msg}\n\n{'详细信息已写入 ' + logged if logged else ''}".strip())
         else:
             self._emit("done", result)
+        finally:
+            # 算完就放掉选区像素（大图一份上百 MB）；任务对象本身可能还被界面留着一会儿
+            self.fn = self.args = self.kwargs = None
 
     def _emit(self, name, value):
         try:

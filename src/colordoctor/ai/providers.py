@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 
 from colordoctor.ai.prompts import SYSTEM
@@ -76,6 +77,25 @@ def ask(prompt: str, cfg: AIConfig, image_path: str | None = None) -> AIResult:
 
 
 # ------------------------------------------------------------------ 本机命令行会话
+def _cli_env() -> dict:
+    """运行命令行工具用的环境变量。
+
+    macOS 从“访达”打开的 .app 只拿到最小的 PATH（/usr/bin:/bin:/usr/sbin:/sbin），找不到 Homebrew / npm 装的
+    claude、codex，npm 装的命令开头的 #!/usr/bin/env node 也找不到 node：把常见的安装目录补到 PATH 后面。"""
+    env = dict(os.environ)
+    if sys.platform.startswith("win"):
+        return env
+    import glob
+
+    home = os.path.expanduser("~")
+    extra = ["/opt/homebrew/bin", "/usr/local/bin", f"{home}/.local/bin", f"{home}/.npm-global/bin",
+             f"{home}/.volta/bin", f"{home}/.bun/bin", f"{home}/.claude/local",
+             *sorted(glob.glob(f"{home}/.nvm/versions/node/*/bin"), reverse=True)]
+    have = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+    env["PATH"] = os.pathsep.join(have + [d for d in extra if d not in have and os.path.isdir(d)])
+    return env
+
+
 def build_command(cfg: AIConfig, image_path: str | None) -> list[str]:
     import shlex
 
@@ -90,7 +110,7 @@ def build_command(cfg: AIConfig, image_path: str | None) -> list[str]:
             args = args[:2] + ["-i", image_path] + args[2:]
         elif cfg.provider == "claude_code":
             args = args + ["--allowedTools", "Read"]
-    exe = shutil.which(args[0])
+    exe = shutil.which(args[0], path=_cli_env()["PATH"])
     if exe is None:
         raise AIError(f"找不到命令“{args[0]}”。请先安装并登录对应的命令行工具，或在设置中填写完整路径")
     return [exe] + args[1:]
@@ -107,6 +127,7 @@ def _run_cli(prompt: str, cfg: AIConfig, image_path: str | None) -> str:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", creationflags=flags, start_new_session=not win,
+            env=_cli_env(), cwd=tempfile.gettempdir(),  # 从访达打开时当前目录是 /，不让命令行工具在那里干活
         )
     except OSError as e:
         raise AIError(f"无法启动命令：{e}") from e

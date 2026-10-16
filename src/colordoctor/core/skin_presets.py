@@ -31,29 +31,45 @@ def user_config_dir() -> Path:
 DEFAULT_QUICK_RULE = ((10.0, 20.0), (10.0, 20.0), 5.0)
 
 
+def _range(v) -> tuple[float, float]:
+    """[下限, 上限]：必须正好两个有限的数，否则当作文件写错。"""
+    r = tuple(float(x) for x in v)
+    if len(r) != 2 or not all(np.isfinite(r)):
+        raise ValueError(f"范围要写成 [下限, 上限]：{v!r}")
+    return r
+
+
 def _rule(d) -> tuple | None:
     if not d:
         return None
-    return (tuple(float(v) for v in d["a"]), tuple(float(v) for v in d["b"]), float(d["max_diff"]))
+    if not isinstance(d, dict):
+        raise ValueError("quick_rule 格式不对")
+    return (_range(d["a"]), _range(d["b"]), float(d["max_diff"]))
 
 
 def _parse(data: dict) -> list[SkinPreset]:
+    """解析预设文件；写错的单个预设跳过（其他照常用），整个文件不是对象时当作损坏。"""
+    if not isinstance(data, dict) or not isinstance(data.get("presets", []), list):
+        raise ValueError("预设文件格式不对")
     out = []
     for p in data.get("presets", []):
-        out.append(
-            SkinPreset(
-                key=str(p["key"]),
-                name=str(p["name"]),
-                description=str(p.get("description", "")),
-                L=tuple(float(v) for v in p["L"]),
-                a=tuple(float(v) for v in p["a"]),
-                b=tuple(float(v) for v in p["b"]),
-                hue=tuple(float(v) for v in p["hue"]),
-                chroma=tuple(float(v) for v in p["chroma"]),
-                notes=tuple(p.get("notes", ())),
-                quick_rule=_rule(p.get("quick_rule")),
+        try:
+            out.append(
+                SkinPreset(
+                    key=str(p["key"]),
+                    name=str(p["name"]),
+                    description=str(p.get("description", "")),
+                    L=_range(p["L"]),
+                    a=_range(p["a"]),
+                    b=_range(p["b"]),
+                    hue=_range(p["hue"]),
+                    chroma=_range(p["chroma"]),
+                    notes=tuple(str(n) for n in p.get("notes", ())),
+                    quick_rule=_rule(p.get("quick_rule")),
+                )
             )
-        )
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
     return out
 
 
@@ -67,7 +83,7 @@ def global_quick_rule(user_file: Path | None = None) -> tuple:
             r = _rule(loader().get("quick_rule"))
             if r:
                 return r
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
     return DEFAULT_QUICK_RULE
 
@@ -85,7 +101,7 @@ def load_presets(user_file: Path | None = None) -> list[SkinPreset]:
         if path.exists():
             for p in _parse(json.loads(path.read_text(encoding="utf-8"))):
                 presets[p.key] = p
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     return list(presets.values())
 

@@ -45,7 +45,8 @@ def selftest() -> int:
     log = os.environ.get("COLORDOCTOR_SELFTEST_LOG", "selftest.log")
     try:
         _selftest_body()
-        msg, code = "SELFTEST OK", 0
+        extras = _selftest_optional()
+        msg, code = "SELFTEST OK" + "".join(f"\n{x}" for x in extras), 0
     except Exception:
         msg, code = "SELFTEST FAILED\n" + traceback.format_exc(), 1
     try:
@@ -93,36 +94,76 @@ def _selftest_body() -> None:
     win.deleteLater()
 
 
+def _selftest_optional() -> list[str]:
+    """可选组件：装了 / 打进包里就必须真的能用（动态库缺失、模型没打包会在这里暴露）。"""
+    import importlib.util
+
+    out = []
+    if importlib.util.find_spec("rawpy") is not None:
+        import rawpy
+
+        out.append(f"rawpy {rawpy.__version__} (LibRaw {'.'.join(map(str, rawpy.libraw_version))})")
+    else:
+        out.append("rawpy: 未安装（不支持相机 RAW）")
+    if importlib.util.find_spec("onnxruntime") is not None:
+        import onnxruntime as ort
+
+        from colordoctor.core import segmentation as sg
+
+        model = sg.find_model()
+        if getattr(sys, "frozen", False):
+            assert model is not None, "AI 抠皮肤模型没有打进安装包"
+        if model is not None:
+            ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])  # 能加载 = 动态库和模型都没问题
+        out.append(f"onnxruntime {ort.__version__}，模型 {'已找到' if model else '未找到'}")
+    else:
+        out.append("onnxruntime: 未安装（没有 AI 抠皮肤）")
+    return out
+
+
 def _start_bridge(win) -> None:
     """同时启动给 PS 插件用的本机服务（只监听 127.0.0.1）。端口被占用（已有一个在运行）时跳过。"""
     import threading
 
+    from colordoctor.bridge.probe import running_version
     from colordoctor.bridge.server import DEFAULT_PORT, make_server
 
-    if win.settings.value("bridge/enabled", True, type=bool) is False:
+    if not win.setting_bool("bridge/enabled", True):
         return
     try:
         srv = make_server(DEFAULT_PORT)
     except OSError:
+        v = running_version(DEFAULT_PORT)
+        if v:  # 另一个 ColorDoctor 已经在提供服务，插件照样能用
+            win.statusBar().showMessage(f"PS 插件服务由另一个已打开的 ColorDoctor（{v}）提供", 8000)
+        else:
+            win.statusBar().showMessage(
+                f"PS 插件服务没能启动：端口 {DEFAULT_PORT} 被其他程序占用。关掉占用它的程序后重新打开本工具", 0)
         return
     threading.Thread(target=srv.serve_forever, daemon=True, name="colordoctor-bridge").start()
     win.statusBar().showMessage(f"PS 插件服务已就绪：127.0.0.1:{DEFAULT_PORT}（只接受本机连接）", 8000)
 
 
+CLI_COMMANDS = ("analyze", "presets", "styles", "tones", "serve", "bench")
+CLI_FLAGS = ("-h", "--help", "--version")
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv if argv is None else argv)
+    argv = [a for a in argv if not a.startswith("-psn_")]  # 旧版 macOS 从 Finder 打开时会多传一个进程号参数
+    if "--selftest" in argv:
+        return selftest()
+    # 只有认识的命令才走命令行；Qt 自己的参数（-platform、-style）和 Xcode 等传的 -NS... 参数照常打开界面
+    if len(argv) > 1 and (argv[1] in CLI_COMMANDS or argv[1] in CLI_FLAGS):
+        from colordoctor.cli import run
+
+        return run(argv[1:])
+    # 界面相关的模块放在这里才导入：命令行 / 服务在没有图形库的机器上也能用
     from PyQt6.QtWidgets import QApplication
 
     from colordoctor.ui.main_window import MainWindow
     from colordoctor.ui.theme import STYLESHEET
 
-    argv = list(sys.argv if argv is None else argv)
-    argv = [a for a in argv if not a.startswith("-psn_")]  # 旧版 macOS 从 Finder 打开时会多传一个进程号参数
-    if "--selftest" in argv:
-        return selftest()
-    if len(argv) > 1 and (argv[1] in ("analyze", "presets", "styles", "tones", "serve", "bench") or argv[1].startswith("-")):
-        from colordoctor.cli import run
-
-        return run(argv[1:])
     app = QApplication.instance() or QApplication(argv)
     from colordoctor.ui import gc_guard
 

@@ -50,7 +50,8 @@ from colordoctor.ui.keys import CMD, MAC
 from colordoctor.ui.report_html import point_html, report_html
 from colordoctor.ui.result_view import ResultView
 from colordoctor.ui.selection_widget import ImageSelectWidget
-from colordoctor.ui.session import MODES, RADIUS_CHOICES, HistoryItem, Session, crop_selection, point_patch_from
+from colordoctor.ui.session import (MODES, RADIUS_CHOICES, HistoryItem, Session, crop_selection, point_patch_from,
+                                    region_mean_lab)
 from colordoctor.ui.theme import TEXT_DIM
 from colordoctor.ui.worker import run_in_background
 
@@ -232,6 +233,21 @@ class SettingsDialog(QDialog):
 RERUN_DELAY_MS = 250  # 改设置后等这么久再重算：连续改几个选项只算一次
 
 
+
+def _wheel_points(region: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    """色轮只画几千个点：先挑出均匀分布的像素位置再取值，不把整张大图（或蒙版内全部像素）复制一遍。"""
+    from colordoctor.ui.color_wheel import MAX_POINTS
+
+    px = region.reshape(-1, region.shape[-1])[:, :3]
+    if mask is not None and mask.shape == region.shape[:2] and mask.any():
+        idx = np.flatnonzero(mask)  # 只画参与分析的像素（例如皮肤）
+    else:
+        idx = np.arange(px.shape[0])
+    if idx.size > MAX_POINTS:
+        step = int(np.ceil(idx.size / MAX_POINTS))
+        idx = idx[step // 2 :: step]
+    return px[idx]
+
 class MainWindow(QMainWindow):
     def __init__(self, session: Session | None = None, settings: QSettings | None = None):
         super().__init__()
@@ -368,7 +384,7 @@ class MainWindow(QMainWindow):
         self.ai_seg_check = QCheckBox("AI 抠皮肤")
         self.ai_seg_check.setEnabled(seg_ok)
         self.ai_seg_check.setToolTip(f"用 AI 人像分割区分脸部 / 身体皮肤（本机运行：{seg_why}）" if seg_ok else seg_why)
-        self.ai_seg_check.setChecked(seg_ok and self.settings.value("seg/ai", True, type=bool))
+        self.ai_seg_check.setChecked(seg_ok and self.setting_bool("seg/ai", True))
         self.session.ai_seg = self.ai_seg_check.isChecked()
         self.ai_seg_check.toggled.connect(self._toggle_ai_seg)
         self.lasso_check = QCheckBox("套索")
@@ -675,8 +691,8 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         old_ai = self._ai_settings()
-        other = {"raw_preview": self.settings.value("raw/use_preview", False, type=bool),
-                 "bridge": self.settings.value("bridge/enabled", True, type=bool)}
+        other = {"raw_preview": self.setting_bool("raw/use_preview", False),
+                 "bridge": self.setting_bool("bridge/enabled", True)}
         dlg = SettingsDialog(self, self._hotkey_texts(), old_ai, other)
         if dlg.exec():
             o = dlg.other_values()
@@ -713,6 +729,17 @@ class MainWindow(QMainWindow):
                 self._register_hotkeys()
         self.session.presets = sp.load_presets()
         self._fill_presets()
+
+    def setting_bool(self, key: str, default: bool) -> bool:
+        """读开关设置；设置文件被改坏（例如 ini 里写成列表）时用默认值，而不是启动失败。"""
+        v = self.settings.value(key, default)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str) and v.strip().lower() in ("true", "1", "yes", "false", "0", "no"):
+            return v.strip().lower() in ("true", "1", "yes")
+        if isinstance(v, int):
+            return bool(v)
+        return default
 
     # ================================================================ 状态
     def _managed(self) -> bool:
@@ -771,8 +798,11 @@ class MainWindow(QMainWindow):
                                              part=rep.part if mode == "skin" else None)
 
         def done(new_rep):
-            if gen != self._rerun_gen or self.session.get(item.id) is None:
-                return  # 已有更新的请求，或原条目已被删除
+            if gen != self._rerun_gen:
+                return  # 已有更新的请求
+            if self.session.get(item.id) is None:  # 原条目已被删除
+                self.statusBar().clearMessage()
+                return
             self._rect_done(item.region, item.rect, new_rep, item.source_label, None, item, item.lasso)
 
         def start():
@@ -795,6 +825,8 @@ class MainWindow(QMainWindow):
 
     # ================================================================ 实时取色
     def set_live(self, on: bool):
+        if on and not self._screen_capture_ok():
+            on = False
         if on:
             self.live_timer.start()
             lock = (f"按 {self._hotkey_texts()['lock_sample']} 锁定读数" if hk.is_supported()
@@ -841,9 +873,25 @@ class MainWindow(QMainWindow):
         item = self.session.add_point(srgb, sample, f"屏幕 {info.name}")
         self._after_add(item)
 
+    def _screen_capture_ok(self) -> bool:
+        """macOS：没有“屏幕录制”权限时截到的只有桌面背景（系统不报错），先提示去打开权限。"""
+        from colordoctor.capture import mac_display
+
+        if mac_display.screen_capture_allowed():
+            return True
+        mac_display.request_screen_capture()
+        QMessageBox.information(
+            self, "需要屏幕录制权限",
+            "macOS 需要允许本工具“录制屏幕”，才能读取 Photoshop 画面上的颜色。\n\n"
+            "请打开 系统设置 → 隐私与安全性 → 屏幕录制，勾选 ColorDoctor，然后退出并重新打开本工具。\n"
+            "（每次更新本工具后可能需要重新勾选。）")
+        return False
+
     # ================================================================ 屏幕框选
     def start_capture(self):
         if self.capture_session is not None:
+            return
+        if not self._screen_capture_ok():
             return
         self._was_live = self.live_timer.isActive()
         self.live_timer.stop()
@@ -855,6 +903,8 @@ class MainWindow(QMainWindow):
             caps = sc.freeze_all_screens()
         except Exception as e:
             self.show()
+            if getattr(self, "_was_live", False):  # 截屏失败也要恢复之前开着的实时取色
+                self.live_timer.start()
             QMessageBox.warning(self, "截屏失败", str(e))
             return
         steps = STEPS[self.session.mode]
@@ -937,7 +987,7 @@ class MainWindow(QMainWindow):
             if not path:
                 return
         try:
-            self.jpg = load_image(path, use_raw_preview=self.settings.value("raw/use_preview", False, type=bool))
+            self.jpg = load_image(path, use_raw_preview=self.setting_bool("raw/use_preview", False))
         except ImageLoadError as e:
             QMessageBox.warning(self, "无法打开图片", str(e))
             return
@@ -1115,27 +1165,47 @@ class MainWindow(QMainWindow):
             if rep is not None and not ev.is_set():
                 on_done(rep)
 
-        self._start(guarded, on_done=done)
+        def failed(msg):
+            if not ev.is_set():  # 已被取代的计算出错就不打扰用户了
+                self._failed(msg)
+
+        self._start(guarded, on_done=done, on_fail=failed)
         return ev
 
     def _start(self, fn, *args, on_done, on_fail=None, **kwargs):
+        task = None
+
+        def forget():  # 结果交出后不再留着任务：断开回调（回调里引用着选区像素），引用环也就没了
+            if task in self._tasks:
+                self._tasks.remove(task)
+
+            def cut(t=task):  # 不在信号正在送达时断开：留到下一轮事件循环
+                for sig in (t.signals.done, t.signals.failed):
+                    try:
+                        sig.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+
+            QTimer.singleShot(0, cut)
+
         def done(rep):
             # 窗口已关闭（例如分析还没结束就退出）时丢弃结果
             from PyQt6 import sip
 
             if sip.isdeleted(self) or sip.isdeleted(self.history_panel):
                 return
+            forget()
             on_done(rep)
 
         def failed(msg):
             from PyQt6 import sip
 
             if not sip.isdeleted(self):
+                forget()
                 (on_fail or self._failed)(msg)
 
         task = run_in_background(fn, *args, on_done=done, on_failed=failed, **kwargs)
-        self._tasks.append(task)
-        self._tasks = self._tasks[-20:]
+        self._tasks.append(task)  # 保持任务（和它的信号对象）活到结果送回界面
 
     def _ref_image_done(self, region, rect, rep, label):
         item = self.session.add_rect(region, rect, rep, label, role="参考图")
@@ -1160,19 +1230,31 @@ class MainWindow(QMainWindow):
             self._run_rect(region2, rect2, ctx2, label2, step=1)
 
     def _rect_done(self, region, rect, rep, label, role=None, replace=None, lasso=None):
+        if replace is not None:
+            # 要替换的条目在计算期间已被另一个重算结果替换（例如连改两次蒙版）：替换那个新条目；
+            # 已被删除（或因内存上限被清掉）：结果丢弃，不让删掉的记录又冒出来
+            while replace.replaced_by is not None:
+                replace = replace.replaced_by
+            if self.session.get(replace.id) is None:
+                self.statusBar().clearMessage()
+                return None
         was_ref = replace is not None and replace is self.session.reference
+        was_current = replace is None or replace is self._current
         pos = None
         if replace is not None:
             pos = next((i for i, h in enumerate(self.session.history) if h.id == replace.id), None)
             self.session.remove(replace.id)
         item = self.session.add_rect(region, rect, rep, label, role=role)
+        if replace is not None:
+            replace.replaced_by = item
         if pos is not None:  # 按新设置重算：留在原来的位置，不跳到历史最上面
             self.session.history.remove(item)
             self.session.history.insert(pos, item)
         item.lasso = lasso
         if was_ref:
             self.session.set_reference(item)  # 替换的是参考区：新结果继续作为参考区
-        self._after_add(item)
+        # 重算的结果只在用户还看着原条目时显示；已经切到别的记录就只替换历史，不抢走画面
+        self._after_add(item, quiet=not was_current)
         # 计算过程中改了影调风格 / 颜色 / 统一色：结果是按旧选择算的，马上按现在的选择再算一次
         choice = self.session.report_choice(rep)
         if choice is not None and choice != self.session.palette_choice() and item is self._current:
@@ -1180,6 +1262,11 @@ class MainWindow(QMainWindow):
         sev = rep.overall_severity.value
         self.statusBar().showMessage(f"分析完成：{sev}（风险 {rep.overall_risk:.0f}，置信度 {rep.confidence:.2f}）", 8000)
         return item
+
+    def _failed_quiet(self, msg: str):
+        """只报错、不清掉正在进行的框选流程（参考区 / 问题区）的失败处理。"""
+        self.statusBar().showMessage("分析失败", 5000)
+        QMessageBox.warning(self, "分析失败", msg)
 
     def _failed(self, msg: str):
         self._ref_busy = False
@@ -1244,10 +1331,7 @@ class MainWindow(QMainWindow):
         emphasis = None
         if ct is not None and ct.base_hue is not None and not ct.bicolor and rep.mode != "scan":
             emphasis = (ct.base_hue, 60.0 if rep.mode in ("skin", "compare") else 90.0, ct.opposite_threshold)
-        scatter = item.region
-        if rep.valid_mask is not None and rep.valid_mask.shape == item.region.shape[:2] and rep.valid_mask.any():
-            scatter = item.region[rep.valid_mask][None]  # 只画参与分析的像素（例如皮肤）
-        self.wheel.set_scatter(scatter, emphasis)
+        self.wheel.set_scatter(_wheel_points(item.region, rep.valid_mask), emphasis)
         comp = {c.key: c for c in rep.components}.get("opposite")
         show_opp = ct is not None and comp is not None and comp.severity != Severity.NORMAL and ct.opposite_hue is not None
         self.wheel.set_opposite(ct.opposite_hue if show_opp else None)
@@ -1286,13 +1370,14 @@ class MainWindow(QMainWindow):
             return
         skin = self.skin_compare_check.isChecked()
         self._start(self.session.compute_compare, ref, item.region, item.context, item.rect, skin,
-                    on_done=lambda rep: self._rect_done(item.region, item.rect, rep, item.source_label, "对比"))
+                    on_done=lambda rep: self._rect_done(item.region, item.rect, rep, item.source_label, "对比"),
+                    on_fail=self._failed_quiet)
 
     def _history_target(self, hid: int):
         item = self.session.get(hid)
         if item is None:
             return
-        lab = cs.srgb8_to_lab(item.region.reshape(-1, 3)).mean(axis=0)
+        lab = region_mean_lab(item.region)
         if not _looks_like_skin(lab):
             ok = QMessageBox.question(self, "这不像肤色",
                                       f"这条记录的平均颜色 Lab {lab[0]:.0f}, {lab[1]:.0f}, {lab[2]:.0f} 不在常见肤色范围内。\n"
@@ -1421,8 +1506,10 @@ class MainWindow(QMainWindow):
                         pass
 
         def ai_failed(msg):
+            # 不走 _failed：那会清掉正在进行的对比 / 参考区状态，AI 出错和它们无关
             self.ai_btn.setEnabled(True)
-            self._failed(msg)
+            self.statusBar().showMessage("AI 点评失败", 5000)
+            QMessageBox.warning(self, "AI 点评失败", msg)
 
         self._start(ask_and_cleanup, prompt, cfg, image_path, on_done=self._ai_done, on_fail=ai_failed)
 

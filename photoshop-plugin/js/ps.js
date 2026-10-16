@@ -151,8 +151,11 @@ async function readSelectionPixels(info) {
   const px = await readPixels(info, b);
   let selImg = null;
   try {
-    const opts = { documentID: info.doc.id, sourceBounds: b };
-    if (px.width !== b.right - b.left || px.height !== b.bottom - b.top) opts.targetSize = { width: px.width, height: px.height };
+    // 按实际读到的像素范围取选区：“只看这个图层”时选区超出图层的部分读不到像素，
+    // 用框选的范围会把整块选区压缩到较小的像素块上，透明度权重对不上
+    const pb = px.sourceBounds || b;
+    const opts = { documentID: info.doc.id, sourceBounds: pb };
+    if (px.width !== pb.right - pb.left || px.height !== pb.bottom - pb.top) opts.targetSize = { width: px.width, height: px.height };
     const res = await imaging.getSelection(opts);
     selImg = res.imageData;
     const s = await selImg.getData({ chunky: true });

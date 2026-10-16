@@ -165,7 +165,7 @@ def test_windows_quoted_command_path_is_unquoted(monkeypatch):
 
     monkeypatch.setattr(pv.sys, "platform", "win32")
     seen = []
-    monkeypatch.setattr(shutil, "which", lambda a: seen.append(a) or a)
+    monkeypatch.setattr(shutil, "which", lambda a, path=None: seen.append(a) or a)
     cfg = pv.AIConfig(provider="claude_code", command='"C:\\Program Files\\nodejs\\claude.cmd" -p')
     cmd = pv.build_command(cfg, None)
     assert seen[0] == "C:\\Program Files\\nodejs\\claude.cmd" and cmd[1] == "-p"
@@ -181,3 +181,18 @@ def test_cli_timeout_kills_process(tmp_path):
     cfg = pv.AIConfig(provider="codex", command=f'"{sys.executable}" "{script}"', timeout=1.0)
     res = pv.ask("x", cfg)
     assert not res.ok and "停止" in res.text
+
+
+def test_cli_env_keeps_path_and_adds_common_install_dirs(monkeypatch, tmp_path):
+    """从访达打开的 .app 只有最小 PATH：补上常见安装目录（原有的顺序不变、在前面）。"""
+    import sys
+
+    from colordoctor.ai import providers as pv
+
+    if sys.platform.startswith("win"):
+        return
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    parts = pv._cli_env()["PATH"].split(":")
+    assert parts[:2] == ["/usr/bin", "/bin"] and str(tmp_path / ".local" / "bin") in parts

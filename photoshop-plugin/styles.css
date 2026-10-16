@@ -40,8 +40,9 @@ select { text-overflow: ellipsis; }
 .card .muted { color: #9a9a9a; font-size: 11px; }
 .sev-明显, .sev-较强 { color: #ffc274; }
 .blocked { background: #3a2f1f; border-radius: 6px; padding: 10px; color: #f0dcc0; line-height: 1.6; }
-.values { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-family: Consolas, monospace; }
-.values div { background: #262626; border-radius: 4px; padding: 4px 6px; }
+/* UXP 不支持 CSS Grid：一律用 flex 排版 */
+.values { display: flex; flex-wrap: wrap; gap: 4px; font-family: Consolas, monospace; }
+.values div { flex: 1 0 28%; background: #262626; border-radius: 4px; padding: 4px 6px; }
 .swatch { height: 40px; border-radius: 4px; border: 1px solid #555; }
 .acr { padding: 8px 10px; border-top: 1px solid #1a1a1a; display: flex; flex-direction: column; gap: 6px; }
 .acr table { border-collapse: collapse; width: 100%; }
@@ -59,8 +60,11 @@ table.mp .ok { color: #a8e6c8; } table.mp .warn { color: #ffc274; } table.mp .ba
 
 /* 影调九宫格：实底 = 现在的影调，橙框 = 目标影调，虚线 = 接近 */
 .card.tone { border-left: 3px solid #8fb3ff; }
-.tgrid { display: grid; grid-template-columns: auto 1fr 1fr 1fr; gap: 3px; margin: 4px 0; }
-.thead { color: #9a9a9a; font-size: 11px; text-align: center; align-self: center; }
+.tgrid { display: flex; flex-direction: column; gap: 3px; margin: 4px 0; }
+.trow { display: flex; gap: 3px; align-items: center; }
+.trow > div { flex: 1 1 0; }
+.trow > .rowhead { flex: 0 0 34px; }
+.thead { color: #9a9a9a; font-size: 11px; text-align: center; }
 .tcell { border: 1px solid #4a4a4a; border-radius: 4px; padding: 3px 2px; text-align: center; font-size: 11px; color: #cfcfcf; }
 .tcell span { display: block; font-size: 10px; }
 .tcell.now { background: #5a4a3a; color: #fff; border-color: #8a6a4a; }

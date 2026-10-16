@@ -55,7 +55,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt "pyinstaller>=6.10"
-          pip install -e ".[ai,raw,seg]"
+          pip install -e ".[ai,raw]"
+          # 和 build_windows.bat 一样用显卡加速版（DirectML）；装不上时退回 CPU 版
+          pip install "onnxruntime-directml>=1.17" || pip install "onnxruntime>=1.17"
       - name: Download AI skin model (verified)
         shell: pwsh
         run: |

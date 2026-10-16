@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
@@ -146,12 +146,31 @@ class ImageSelectWidget(QWidget):
     def wheelEvent(self, ev):
         if not self.allow_zoom:
             return
-        f = 1.15 if ev.angleDelta().y() > 0 else 1 / 1.15
-        before = self.to_image(ev.position())
+        pd = ev.pixelDelta()
+        ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if not pd.isNull() and not ctrl:  # 触控板两指滑动：平移（缩放用双指捏合或按住 Ctrl / ⌘ 滑动）
+            self.pan += QPointF(pd)
+            self.update()
+            return
+        dy = ev.angleDelta().y()
+        if dy == 0:  # 横向滚动不缩放
+            return
+        self._zoom_at(ev.position(), 1.15 ** (dy / 120))  # 按滚动量缩放：滚轮一格 ×1.15，触控板细滑就细调
+
+    def _zoom_at(self, pos, f: float):
+        before = self.to_image(pos)
         self.zoom = float(np.clip(self.zoom * f, 0.2, 40))
         after = self.to_view(*before)
-        self.pan += ev.position() - after
+        self.pan += pos - after
         self.update()
+
+    def event(self, ev):
+        # macOS 触控板双指捏合
+        if ev.type() == QEvent.Type.NativeGesture and self.allow_zoom:
+            if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self._zoom_at(ev.position(), 1.0 + float(ev.value()))
+                return True
+        return super().event(ev)
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape:
