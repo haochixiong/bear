@@ -288,7 +288,7 @@ colordoctor tones        （列出影调风格和九种影调）
 
 ## 测试
 
-`python -m pytest -q`，目前共 867 个测试（其中 1 个需要真实模型，默认跳过；插件 JS 测试需要 Node.js），覆盖以下方面：
+`python -m pytest -q`，目前共 957 个测试（其中 1 个需要真实模型、1 个只在 Mac 上跑，默认跳过；插件 JS 测试需要 Node.js），覆盖以下方面：
 
 - **色彩换算**：使用 ΔE00 的 Sharma 标准数据校验。
 - **色彩管理**：sRGB、无 ICC、Adobe RGB、P3 显示器。
