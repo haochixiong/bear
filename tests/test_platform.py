@@ -66,3 +66,16 @@ def test_key_names_follow_platform(monkeypatch):
     assert importlib.reload(keys).CMD == "Ctrl+"
     monkeypatch.undo()
     importlib.reload(keys)
+
+
+def test_gc_guard_collects_on_main_thread(qapp):
+    import gc
+
+    from colordoctor.ui import gc_guard
+
+    g = gc_guard.MainThreadGC(interval_ms=60000)
+    assert not gc.isenabled() and g.timer.isActive()
+    g.threshold = (0, 0, 0)
+    g.check()  # 三代都过阈值：全部回收，不报错
+    assert gc.get_count()[0] <= 1
+    g.timer.stop()

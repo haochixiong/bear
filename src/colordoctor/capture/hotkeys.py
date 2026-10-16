@@ -84,8 +84,6 @@ def make_manager(parent=None):
 
     from PyQt6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QObject, pyqtSignal
 
-    global _FILTER
-
     class _Filter(QAbstractNativeEventFilter):
         def __init__(self):
             super().__init__()

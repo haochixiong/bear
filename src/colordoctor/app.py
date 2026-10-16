@@ -124,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
 
         return run(argv[1:])
     app = QApplication.instance() or QApplication(argv)
+    from colordoctor.ui import gc_guard
+
+    gc_guard.install(app)  # 垃圾回收只在主线程做（见 gc_guard）
     app.setApplicationName("ColorDoctor")
     app.setOrganizationName("ColorDoctor")
     app.setStyle("Fusion")

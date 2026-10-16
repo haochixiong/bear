@@ -34,7 +34,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install -e .
+          pip install -e ".[ai]"  # 让 Claude API 请求的测试也在 CI 里跑
       - name: Test
         run: python -m pytest -q
 
@@ -87,9 +87,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14  # Apple 芯片
+          - runner: macos-15  # Apple 芯片
             arch: arm64
-          - runner: macos-13  # Intel
+          - runner: macos-15-intel  # Intel
             arch: x86_64
     steps:
       - uses: actions/checkout@v5
@@ -101,7 +101,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt "pyinstaller>=6.10"
-          pip install -e ".[ai,raw,seg]"
+          pip install -e ".[ai]"
+          # RAW / AI 抠皮肤是可选功能：某个架构没有现成的安装包时照样打包，只是少这个功能
+          pip install "rawpy>=0.19" || echo "::warning::rawpy 没有 ${{ matrix.arch }} 安装包，这个版本不支持相机 RAW"
+          pip install "onnxruntime>=1.17" || echo "::warning::onnxruntime 没有 ${{ matrix.arch }} 安装包，这个版本没有 AI 抠皮肤"
       - name: Download AI skin model (verified)
         run: |
           mkdir -p packaging/models
