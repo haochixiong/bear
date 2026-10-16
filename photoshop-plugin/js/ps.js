@@ -3,6 +3,13 @@
 const { app, action, core, imaging, constants } = require("photoshop");
 
 // 按原图尺寸读像素（每个像素都检查，不先缩小）；只有超过这么多像素的超大文档才缩小读取（本机服务一次最多收 400 MB）
+// 平台：Mac 上快捷键写 ⌘（PS 里 Ctrl 的位置在 Mac 是 Command）
+const IS_MAC = (() => {
+  try { return require("os").platform() === "darwin"; } catch (_) { /* 没有 os 模块 */ }
+  try { return /mac/i.test(navigator.platform || ""); } catch (_) { return false; }
+})();
+const CMD = IS_MAC ? "⌘" : "Ctrl+";
+
 const MAX_READ_PIXELS = 100_000_000;
 
 // 没有像素、不能直接分析的图层类型（与 Python 端 pixel_guard.NO_PIXEL_KINDS 对应）
@@ -74,7 +81,7 @@ function inspectTarget(target) {
   }
   if (NEED_MERGED_KINDS[kind]) {
     // 图层组不能栅格化，只能合并
-    const fix = kind === "group" ? "或先合并这个组（Ctrl+E）" : "或先栅格化（图层 → 栅格化）";
+    const fix = kind === "group" ? `或先合并这个组（${CMD}E）` : "或先栅格化（图层 → 栅格化）";
     return { ok: false, layer, kind, label,
       reason: `「${layer.name}」是${NEED_MERGED_KINDS[kind]}，请把分析对象改为「到这一层的画面」，${fix}。` };
   }
@@ -565,6 +572,7 @@ async function selectLayer(id) {
 }
 
 module.exports = {
+  IS_MAC, CMD,
   selectLayer, selectTopLayer, withoutSelection, liftOutOfGroups, findLayer, findDocument, isCancel, clipToCanvas, acrDescriptorReady, applyCameraRaw, createChartDocument, duplicateLayer, deleteLayer, closeDocument,
   constants, inspectTarget, layersAbove, historyStateId, readPixels, readSelectionPixels, readColorSamplers, foregroundLab,
   makeAdjustmentLayer, putMask, putSelection, groupLayers, modal, readModal, cameraRawLayer,

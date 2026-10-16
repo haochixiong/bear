@@ -116,9 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     from colordoctor.ui.theme import STYLESHEET
 
     argv = list(sys.argv if argv is None else argv)
+    argv = [a for a in argv if not a.startswith("-psn_")]  # 旧版 macOS 从 Finder 打开时会多传一个进程号参数
     if "--selftest" in argv:
         return selftest()
-    if len(argv) > 1 and (argv[1] in ("analyze", "presets", "styles", "tones", "serve") or argv[1].startswith("-")):
+    if len(argv) > 1 and (argv[1] in ("analyze", "presets", "styles", "tones", "serve", "bench") or argv[1].startswith("-")):
         from colordoctor.cli import run
 
         return run(argv[1:])

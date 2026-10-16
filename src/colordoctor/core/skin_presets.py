@@ -23,6 +23,8 @@ def user_config_dir() -> Path:
     if sys.platform.startswith("win"):
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / "ColorDoctor"
+    if sys.platform == "darwin" and not os.environ.get("XDG_CONFIG_HOME"):
+        return Path.home() / "Library" / "Application Support" / "ColorDoctor"
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "colordoctor"
 
 

@@ -1,8 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 打包配置：pyinstaller --noconfirm --clean packaging/colordoctor.spec
-# 生成 dist/ColorDoctor/ColorDoctor(.exe)（onedir：启动快，杀毒误报少）
+# Windows：生成 dist/ColorDoctor/ColorDoctor.exe（onedir：启动快，杀毒误报少）
+# macOS：另外生成 dist/ColorDoctor.app（PyInstaller 不能跨平台打包：Mac 版要在 Mac 上打，见 build_mac.sh）
 
 import os
+import re
+import sys
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 SRC = os.path.join(ROOT, "src")
@@ -47,3 +50,22 @@ exe = EXE(
     upx=False,
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="ColorDoctor")
+
+if sys.platform == "darwin":
+    with open(os.path.join(SRC, "colordoctor", "__init__.py"), encoding="utf-8") as f:
+        VERSION = re.search(r'__version__ = "([^"]+)"', f.read()).group(1)
+    app = BUNDLE(
+        coll,
+        name="ColorDoctor.app",
+        icon=None,
+        bundle_identifier="com.colordoctor.app",
+        info_plist={
+            "CFBundleName": "ColorDoctor",
+            "CFBundleDisplayName": "ColorDoctor",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "LSMinimumSystemVersion": "11.0",
+            "NSHighResolutionCapable": True,
+            "NSRequiresAquaSystemAppearance": False,
+        },
+    )

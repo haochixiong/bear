@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 
 from colordoctor.capture.screen_capture import array_to_qimage
 from colordoctor.core import mask_edit as me
+from colordoctor.ui.keys import CMD
 from colordoctor.ui.selection_widget import ImageSelectWidget
 
 EDIT_PIXELS = 2_000_000  # 编辑用的工作分辨率上限；大图在缩小的副本上编辑，确定时再放大回原尺寸
@@ -271,7 +272,7 @@ class MaskEditorDialog(QDialog):
         bottom.addWidget(self.info, 1)
         bottom.addWidget(bb)
         lay.addLayout(bottom)
-        self.info.setText("左键涂抹/点击；[ ] 调画笔大小；滚轮缩放，右键拖动平移；Ctrl+Z 撤销")
+        self.info.setText(f"左键涂抹/点击；[ ] 调画笔大小；滚轮缩放，右键拖动平移；{CMD}Z 撤销")
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Z and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:

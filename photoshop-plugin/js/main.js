@@ -810,7 +810,7 @@ async function generate(ids, single, findingIndex) {
     }, { docId: a.docId, docSize: [a.docWidth, a.docHeight] });
     e.madeLayers = { ...(e.madeLayers || {}), ...madeIds };
     setBusy(false);
-    markMade(e, specs.map((s) => s.id), `已生成 ${specs.length} 个调整图层${specs.length > 1 ? `，放在「${groupName}」组里` : ""}（Ctrl+Z 可一次撤销）`);
+    markMade(e, specs.map((s) => s.id), `已生成 ${specs.length} 个调整图层${specs.length > 1 ? `，放在「${groupName}」组里` : ""}（${ps.CMD}Z 可一次撤销）`);
     if (state.sub === r.sub) renderResult();
     $("status").className = "status ok";
     $("status").textContent = a.justMadeText;

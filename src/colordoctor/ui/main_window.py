@@ -46,6 +46,7 @@ from colordoctor.core.sampling import SampleError, color_values
 from colordoctor.ui.capture_overlay import CaptureSession
 from colordoctor.ui.color_wheel import ColorWheel
 from colordoctor.ui.history_panel import HistoryPanel
+from colordoctor.ui.keys import CMD, MAC
 from colordoctor.ui.report_html import point_html, report_html
 from colordoctor.ui.result_view import ResultView
 from colordoctor.ui.selection_widget import ImageSelectWidget
@@ -162,6 +163,7 @@ class SettingsDialog(QDialog):
         note = QLabel(
             "全局快捷键会优先于 Photoshop 自己的快捷键。默认的 Ctrl+Alt+Shift+Z / X\n"
             "据 Photoshop 默认快捷键表未被占用；如果与你的自定义快捷键冲突请修改。"
+            + ("\n全局快捷键目前只支持 Windows；Mac 上请用窗口里的按钮。" if MAC else "")
         )
         note.setWordWrap(True)
         form.addRow(note)
@@ -296,7 +298,7 @@ class MainWindow(QMainWindow):
         self.capture_btn = QPushButton("▭ 框选屏幕")
         self.capture_btn.clicked.connect(self.start_capture)
         self.jpg_btn = QPushButton("打开图片")
-        self.jpg_btn.setToolTip("JPG / PNG / TIFF / WebP / 相机 RAW（Ctrl+O，也可以把文件拖进窗口）")
+        self.jpg_btn.setToolTip(f"JPG / PNG / TIFF / WebP / 相机 RAW（{CMD}O，也可以把文件拖进窗口）")
         self.jpg_btn.clicked.connect(lambda: self.open_jpg())
         self.reselect_btn = QPushButton("在图片上重选")
         self.reselect_btn.setToolTip("在已打开的 JPG / RAW 上重新框选或取点")

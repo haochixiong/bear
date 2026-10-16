@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -48,7 +49,9 @@ _icc_cache: dict[str, bytes | None] = {}
 
 
 def icc_for(name: str, refresh: bool = False, info: ScreenInfo | None = None) -> bytes | None:
-    """显示器 ICC。name 是 Qt 屏幕名；info 用来在 Qt 返回型号名时按位置找到 GDI 设备名。"""
+    """显示器 ICC。name 是 Qt 屏幕名；info 用来在 Qt 返回型号名时按位置找到 GDI 设备名（Windows）/ 显示器（macOS）。"""
+    if sys.platform == "darwin":
+        return _icc_for_mac(name, refresh, info)
     from colordoctor.capture.windows_display import gdi_device_name
 
     center = None
@@ -58,6 +61,17 @@ def icc_for(name: str, refresh: bool = False, info: ScreenInfo | None = None) ->
     key = (device, center)  # 两块同型号显示器不会共用缓存
     if refresh or key not in _icc_cache:
         _icc_cache[key] = monitor_icc_bytes(device)
+    return _icc_cache[key]
+
+
+def _icc_for_mac(name: str, refresh: bool, info: ScreenInfo | None) -> bytes | None:
+    from colordoctor.capture.mac_display import icc_at
+
+    # macOS：Qt 的全局坐标就是“点”，和 CoreGraphics 一致：用屏幕中心点找显示器
+    center = (info.x + info.width / 2, info.y + info.height / 2) if info is not None else (0.0, 0.0)
+    key = ("mac", name, center)
+    if refresh or key not in _icc_cache:
+        _icc_cache[key] = icc_at(*center)
     return _icc_cache[key]
 
 

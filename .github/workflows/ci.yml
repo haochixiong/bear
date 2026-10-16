@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
@@ -77,3 +77,61 @@ jobs:
         with:
           name: ColorDoctor-windows
           path: dist/ColorDoctor
+
+  build-macos:
+    name: Build macOS app (${{ matrix.arch }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14  # Apple 芯片
+            arch: arm64
+          - runner: macos-13  # Intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pyinstaller>=6.10"
+          pip install -e ".[ai,raw,seg]"
+      - name: Download AI skin model (verified)
+        run: |
+          mkdir -p packaging/models
+          m=packaging/models/selfie_multiclass_256x256.onnx
+          curl -fL -o "$m" https://huggingface.co/FreeHugsForRobots/ps-skin-seg/resolve/main/selfie_multiclass_256x256.onnx
+          test "$(shasum -a 256 "$m" | cut -d' ' -f1)" = "13961350bb2099688eb96182ffe26f24eb12c77b1df278a2ec95bbdc923136e1" || { rm -f "$m"; echo "model hash mismatch"; exit 1; }
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/colordoctor.spec
+      - name: Self test of packaged app
+        run: |
+          COLORDOCTOR_SELFTEST_LOG="$PWD/selftest.log" QT_QPA_PLATFORM=offscreen dist/ColorDoctor.app/Contents/MacOS/ColorDoctor --selftest || true
+          cat selftest.log
+          grep -q "SELFTEST OK" selftest.log
+      - name: Zip app
+        run: ditto -c -k --sequesterRsrc --keepParent dist/ColorDoctor.app dist/ColorDoctor-mac-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ColorDoctor-mac-${{ matrix.arch }}
+          path: dist/ColorDoctor-mac-${{ matrix.arch }}.zip
+
+  build-plugin:
+    name: Photoshop plugin package (.ccx, Windows + Mac)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python packaging/build_plugin.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ColorDoctor-plugin
+          path: dist/*.ccx

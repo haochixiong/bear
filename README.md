@@ -48,6 +48,19 @@ python -m colordoctor
 - 想用 Claude API 做 AI 点评，需要额外运行 `pip install anthropic`。用 Claude Code 会话、Codex 会话或 DeepSeek 不需要安装额外的包。
 - 运行测试：`python -m pytest -q`。
 
+## 安装与运行（Mac）
+
+**方式一：打包好的程序**：`ColorDoctor-mac-arm64.zip`（Apple 芯片）或 `ColorDoctor-mac-x86_64.zip`（Intel），解压得到 `ColorDoctor.app`，拖进“应用程序”。
+
+- 由 GitHub Actions 的 macOS 机器构建（PyInstaller 不能跨平台打包），在仓库的 Actions → 最新一次 ci → Artifacts 里下载；也可以在 Mac 上自己打：`bash packaging/build_mac.sh`。
+- 程序没有 Apple 签名：第一次打开会提示“无法验证开发者”。在 Finder 里**右键 → 打开 → 打开**一次即可（或在终端运行 `xattr -dr com.apple.quarantine /Applications/ColorDoctor.app`）。
+- “框选屏幕 / 实时取色”需要屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕录制 → 打开 ColorDoctor，然后重开程序。没有权限时截到的只有桌面背景。打开图片、PS 插件不需要这个权限。
+- 显示器颜色配置文件从系统读取（系统设置 → 显示器 → 颜色描述文件），和 Photoshop 用的一样。
+- 全局快捷键目前只支持 Windows；Mac 上用窗口里的按钮（窗口内的 ⌘O 等快捷键可用）。
+- 设置和自定义肤色风格保存在 `~/Library/Application Support/ColorDoctor`。
+
+**方式二：从源码运行**：`python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt && pip install -e . && python -m colordoctor`。
+
 ---
 
 ## 使用方法
@@ -286,7 +299,7 @@ colordoctor tones        （列出影调风格和九种影调）
 - 单点模式下可以连续点多个点（回车或 Esc 结束），两个点以上自动做“多点对比”：以第一个点为基准，用“几乎看不出 / 仔细对比才看得出 / 能看出 / 明显 / 很明显 / 差别很大”说明差别和偏向（偏黄、偏暗…），并给出一句结论；也可以在历史里多选取色点后右键对比。
 - 整图色彩的「影调风格」和「颜色」分开选，见上文“整图色彩”。命令行用 `--tone-style japanese|candy|korean|cool|bright|cos|forest|french|chinese|film|western|cinematic|hongkong|moody` 或 `--tone-target 高中调`，`colordoctor tones` 列出全部说明。
 - 界面上的选择（模式、取样大小、肤色目标、部位、套索、整图扫描、影调风格、颜色、统一色、置顶、窗口位置等）会自动保存，下次启动恢复。
-- “AI 点评”的 API Key 以明文保存在本机设置（Windows 注册表 `HKCU\Software\ColorDoctor`）里；介意的话留空，改用环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY`。
+- “AI 点评”的 API Key 以明文保存在本机设置（Windows 注册表 `HKCU\Software\ColorDoctor`，Mac 是 `~/Library/Preferences/com.colordoctor.ColorDoctor.plist`）里；介意的话留空，改用环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY`。
 
 ## 致谢
 
