@@ -32,7 +32,7 @@ from colordoctor.core.color_models import (
     severity_from_score,
 )
 from colordoctor.core.perception import de_words
-from colordoctor.core.pixel_table import colour_counts, scope, together
+from colordoctor.core.pixel_table import check_cancel, colour_counts, scope, together
 from colordoctor.core.sampling import grid_downsample, resolution_limit, sample_point
 
 MAX_SAMPLES = rs.MAX_SAMPLES
@@ -57,8 +57,10 @@ def _shared_pixels(fn):
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        check_cancel()
         with scope():
             rep = fn(*args, **kwargs)
+        check_cancel()
         limit, label = resolution_limit()
         big = any(isinstance(a, np.ndarray) and a.ndim == 3 and a.shape[0] * a.shape[1] > limit for a in args)
         if label != "full" and big and isinstance(rep, AnalysisReport):

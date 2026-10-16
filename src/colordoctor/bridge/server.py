@@ -12,7 +12,8 @@
        头：X-Width X-Height X-Components(3|4) [X-Doc-Width X-Doc-Height X-Layer-Kind X-Layer-Name]
        体：width*height*components 字节（行优先、交错 RGB(A)）
        [&precision=full|fast][&progressive=1]：原图精度且图很大时先返回快速结果（precision="preview"，
-       带 refine 令牌），原图精查在后台继续，用 GET /refined?token=&wait=秒 取（没算完返回 202 {"pending": true}）
+       带 refine 令牌），原图精查在后台继续，用 GET /refined?token=&wait=秒 取（没算完返回 202 {"pending": true}）；
+       [&supersede=令牌]：上一次还没精查完的分析，马上停掉
   POST /reference   同上的像素格式，存为参考图，返回 {"ref": id}
   GET  /mask?session=&layer=[&w=&h=][&left=&top=&doc_w=&doc_h=]  ->  灰度字节（255 = 作用）；
        给出 doc_w/doc_h 时返回整幅文档大小，图层范围以外为 0
@@ -318,14 +319,20 @@ class Refine:
 
     def __init__(self):
         self.done = threading.Event()
+        self.cancel = threading.Event()  # 插件又分析了一次（supersede=令牌）：这次精查不用再算
         self.result: dict | None = None
         self.error: tuple[int, str] | None = None
 
 
 def analyze_progressive(pixels: np.ndarray, mode: str, q: dict, sessions: Store, refs: Store, refines: Store,
                         doc_size=None, layer_kind: str = "", layer_name: str = "") -> dict:
-    """progressive=1：原图精度的大图先按约 1200 万像素出结果（马上返回），原图精查在后台线程继续。"""
-    q = {k: v for k, v in q.items() if k != "progressive"}
+    """progressive=1：原图精度的大图先按约 1200 万像素出结果（马上返回），原图精查在后台线程继续。
+
+    supersede=令牌：同一页面上一次分析还没精查完——那次精查马上停下，不和这次抢 CPU。"""
+    old = refines.get(q.get("supersede", "")) if q.get("supersede") else None
+    if old is not None:
+        old.cancel.set()
+    q = {k: v for k, v in q.items() if k not in ("progressive", "supersede")}
     big = pixels.shape[0] * pixels.shape[1] > PREVIEW_FROM
     if mode == "patch" or (q.get("precision") or "full") != "full" or not big:
         return analyze_request(pixels, mode, q, sessions, refs, doc_size, layer_kind, layer_name)
@@ -334,8 +341,13 @@ def analyze_progressive(pixels: np.ndarray, mode: str, q: dict, sessions: Store,
     token = refines.put(job)
 
     def run():
+        from colordoctor.core.pixel_table import Cancelled, cancellable
+
         try:
-            job.result = analyze_request(pixels, mode, q, sessions, refs, doc_size, layer_kind, layer_name)
+            with cancellable(job.cancel):
+                job.result = analyze_request(pixels, mode, q, sessions, refs, doc_size, layer_kind, layer_name)
+        except Cancelled:
+            job.error = (409, "原图精查已停止：之后又分析过一次")
         except pixel_guard.BlockedError as e:
             job.error = (422, str(e))
         except ValueError as e:

@@ -118,8 +118,8 @@ function precisionStatus(e) {
   const r = e && e.result;
   if (r && r.precision === "preview") {
     return e.refineError
-      ? `原图精查没有完成（${e.refineError}）：下面是快速结果（约 1200 万像素）。可以再点「${analyzeLabel()}」重试`
-      : "已出快速结果（约 1200 万像素）· 正在按原图逐个像素精查，完成后自动更新…";
+      ? `原图精查没有完成（${e.refineError}）：下面是快速结果（约 1200 万像素），也可以按它生成图层，或再点「${analyzeLabel()}」重试`
+      : "已出快速结果（约 1200 万像素）· 正在按原图逐个像素精查，完成后自动更新；生成图层要等精查完成…";
   }
   if (e && e.refinedText) return `已按原图精查 · ${e.refinedText}`;
   return "已分析 · 下面的结果对应这个对象和设置";
@@ -147,12 +147,14 @@ async function refineLater(sub, entry, token) {
     try {
       r = await bridge.refined(token, 25);
     } catch (e) {
+      entry.refineToken = null;
       if (state.bySub[sub] !== entry) return;
       entry.refineError = e.message || String(e);
-      if (state.sub === sub && !state.busy) refreshTarget();
+      if (state.sub === sub && !state.busy) { refreshTarget(); updateButtons(); }  // 精查失败：可以按快速结果生成
       return;
     }
     if (r.pending) continue;
+    entry.refineToken = null;
     if (state.bySub[sub] !== entry) return;  // 已经重新分析过：这次的精查结果用不上了
     if (entry.made.size) {
       // 已经按快速结果生成了图层：不替换（卡片和图层要对应），只说明
@@ -466,6 +468,8 @@ async function runAnalyze() {
     if (mode !== "patch") {
       q.precision = "full";  // 「快速」时 PS 已经缩小读取，服务按收到的像素逐个检查
       if (!fast) q.progressive = "1";  // 大图：先回快速结果，原图精查在后台继续
+      const prev = state.bySub[sub];
+      if (prev && prev.refineToken) q.supersede = prev.refineToken;  // 上一次还没精查完：让服务停掉，不和这次抢 CPU
     }
     if (refFile) {
       // 每次分析都重新交给服务（服务只暂存最近几张参考图）
@@ -504,6 +508,7 @@ async function runAnalyze() {
         settings, settingsText: settingsText(sub, q),
       },
       extraNotes,
+      refineToken: res.refine || null,
     };
     if (res.refine) refineLater(sub, state.bySub[sub], res.refine);
   } catch (e) {
@@ -609,17 +614,21 @@ function updateButtons() {
   const nonRgb = !!docMode && !/rgb/i.test(docMode);
   const blockTitle = nonRgb ? "校正图层按 RGB 设计：请先把文档转换为 RGB（图像 → 模式 → RGB 颜色）" : "";
   const expired = !!(e && e.expired);
-  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb || expired;
-  $("generateAll").title = blockTitle;
+  // 快速结果还在等原图精查：先不生成图层（精查可能改结论，图层要按精查结果建）；精查失败就按快速结果
+  const refining = !!(e && e.refineToken && e.result && e.result.precision === "preview");
+  const waitTitle = refining ? "原图精查还没完成：完成后按精查结果生成（快速结果只供先看）" : "";
+  $("generateAll").disabled = busy || !hasLayers(e) || !!offDoc || nonRgb || expired || refining;
+  $("generateAll").title = blockTitle || waitTitle;
   if (e && hasLayers(e)) {
     const rest = e.result.plan.layers.filter((l) => !e.made.has(l.id));
     const mask = rest.some((l) => l.has_mask) ? "（带蒙版）" : "";
     $("generateAll").textContent = rest.length === 0 ? "全部已生成" : (e.made.size ? `生成其余 ${rest.length} 层${mask}` : `一键生成全部${mask}`);
     if (rest.length === 0) $("generateAll").disabled = true;
+    if (refining && rest.length) $("generateAll").textContent = "原图精查中…完成后可生成";
   } else {
     $("generateAll").textContent = "一键生成全部";
   }
-  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || expired || b.dataset.done === "1"; b.title = blockTitle; });
+  document.querySelectorAll("[data-make],[data-make-all]").forEach((b) => { b.disabled = busy || !!offDoc || nonRgb || expired || refining || b.dataset.done === "1"; b.title = blockTitle || waitTitle; });
   document.querySelectorAll("[data-sel]").forEach((b) => { b.disabled = busy || !!offDoc || expired; });
   const acrOk = !busy && hasAcrSource();
   $("acrExport").disabled = !acrOk;

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import threading
 
 import numpy as np
 from PyQt6.QtCore import QByteArray, QSettings, Qt, QTimer, QUrl
@@ -40,6 +41,7 @@ from colordoctor.core import recommendations as rec
 from colordoctor.core import skin_presets as sp
 from colordoctor.core.color_management import RAW_EXTS, ImageLoadError, load_image, screen_pixels_to_srgb
 from colordoctor.core.color_models import AnalysisReport, PointSample, Severity
+from colordoctor.core.pixel_table import Cancelled, cancellable
 from colordoctor.core.sampling import SampleError, color_values
 from colordoctor.ui.capture_overlay import CaptureSession
 from colordoctor.ui.color_wheel import ColorWheel
@@ -273,6 +275,7 @@ class MainWindow(QMainWindow):
         self._current: HistoryItem | None = None
         self.ref_image_item: HistoryItem | None = None
         self._tasks = []
+        self._refining: dict[int, threading.Event] = {}  # 历史条目 id -> 它的原图精查（还在后台算）
         self.live_timer = QTimer(self)
         self.live_timer.setInterval(70)
         self.live_timer.timeout.connect(self._live_tick)
@@ -801,6 +804,7 @@ class MainWindow(QMainWindow):
             holder["item"] = self._rect_done(item.region, item.rect, new_rep, item.source_label, None, cur, item.lasso,
                                              previous=prev if prev is not None and prev.precision == "preview" else None)
             holder["rep"] = new_rep
+            return holder["item"]
 
         def alive():  # 已有更新的请求，或这条结果已被删除 / 替换：不再继续
             return gen == self._rerun_gen and self.session.get(holder["item"].id) is not None
@@ -808,7 +812,12 @@ class MainWindow(QMainWindow):
         def start():
             if gen != self._rerun_gen:
                 return
-            self._run_staged(self.session.stages(item.region), compute, done, alive)
+            self._rerun_ev = self._run_staged(self.session.stages(item.region), compute, done, alive)
+
+        # 又改了设置：上一次按旧设置的重算（以及这条结果还在做的原图精查）马上停掉
+        if getattr(self, "_rerun_ev", None) is not None:
+            self._rerun_ev.set()
+        self._stop_refine(item.id)
 
         self.statusBar().showMessage("正在按新设置重新计算……")
         QTimer.singleShot(RERUN_DELAY_MS, start)  # 连续改几个选项时只算最后一次
@@ -1132,26 +1141,52 @@ class MainWindow(QMainWindow):
             holder["item"] = self._rect_done(region, rect, rep, label, None, holder["item"], lasso,
                                              previous=prev if prev is not None and prev.precision == "preview" else None)
             holder["rep"] = rep
+            return holder["item"]
 
         def alive():  # 快速结果出来后用户删掉了它、或按新设置重算替换了它：原图精查不用再做
             return holder["rep"] is None or self.session.get(holder["item"].id) is not None
 
         self._run_staged(self.session.stages(region), compute, done, alive)
 
-    def _run_staged(self, stages, compute, on_result, alive=lambda: True):
-        """按 stages 依次计算（先快速结果、再原图精查）；每一步算完调用 on_result(结果, 是否最后一步)。"""
+    def _run_staged(self, stages, compute, on_result, alive=lambda: True) -> threading.Event:
+        """按 stages 依次计算（先快速结果、再原图精查）；每一步算完调用 on_result(结果, 是否最后一步)，它返回历史条目。
+
+        返回取消用的 Event：设置后，正在算的那一步在下一个检查点停下（不再白占 CPU），后面的也不再算。
+        精查进行中的条目记在 self._refining 里：这条结果被重算、替换或删除时停掉它的精查。
+        """
+        ev = threading.Event()
+
+        def guarded(stage):
+            try:
+                with cancellable(ev):
+                    return compute(stage)
+            except Cancelled:
+                return None
+
         def run(i):
             def done(rep):
-                if rep is None or not alive():
+                if rep is None or ev.is_set() or not alive():
                     return
                 final = i == len(stages) - 1
-                on_result(rep, final)
+                item = on_result(rep, final)
+                if item is not None:
+                    if final:
+                        self._refining.pop(item.id, None)
+                    else:
+                        self._refining[item.id] = ev
                 if not final and alive():
                     run(i + 1)
 
-            self._start(compute, stage=stages[i], on_done=done)
+            self._start(guarded, stage=stages[i], on_done=done)
 
         run(0)
+        return ev
+
+    def _stop_refine(self, item_id) -> None:
+        """这条结果的原图精查还在后台算：停掉（结果要被重算 / 替换 / 删除了）。"""
+        ev = self._refining.pop(item_id, None)
+        if ev is not None:
+            ev.set()
 
     def _start(self, fn, *args, on_done, on_fail=None, **kwargs):
         def done(rep):
@@ -1199,6 +1234,7 @@ class MainWindow(QMainWindow):
         was_ref = replace is not None and replace is self.session.reference
         pos = None
         if replace is not None:
+            self._stop_refine(replace.id)  # 被替换的那条若还在精查：停掉（替换它的就是精查结果时也无妨，那一步已算完）
             pos = next((i for i, h in enumerate(self.session.history) if h.id == replace.id), None)
             self.session.remove(replace.id)
         item = self.session.add_rect(region, rect, rep, label, role=role)
@@ -1346,6 +1382,7 @@ class MainWindow(QMainWindow):
         self._preset_changed()  # 当前的肤色结果按新目标重算
 
     def _history_remove(self, hid: int):
+        self._stop_refine(hid)
         if self.ref_image_item is not None and self.ref_image_item.id == hid:
             self.ref_image_item = None
         self.session.remove(hid)
@@ -1354,6 +1391,8 @@ class MainWindow(QMainWindow):
         self._after_add(None, quiet=True)
 
     def _history_clear(self):
+        for hid in list(self._refining):
+            self._stop_refine(hid)
         self.ref_image_item = None
         self._pending_problem = None
         self._ref_busy = False

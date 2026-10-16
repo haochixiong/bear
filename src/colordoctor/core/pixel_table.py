@@ -41,17 +41,45 @@ def _executor() -> ThreadPoolExecutor:
         return _pool
 
 
+# ---------------------------------------------------------------- 取消
+class Cancelled(Exception):
+    """这次分析已经被新的分析取代（例如原图精查还没算完，用户又分析了一次）。"""
+
+
+_cancel: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar("colordoctor_cancel", default=None)
+
+
+@contextmanager
+def cancellable(event: threading.Event):
+    """在这段代码里，event 一被设置，分析就在下一个检查点停下（抛 Cancelled），不再白占 CPU。"""
+    token = _cancel.set(event)
+    try:
+        yield
+    finally:
+        _cancel.reset(token)
+
+
+def check_cancel() -> None:
+    ev = _cancel.get()
+    if ev is not None and ev.is_set():
+        raise Cancelled("这次分析已被新的分析取代")
+
+
 def par_ranges(fn, n: int, min_chunk: int = CHUNK) -> list:
     """把 [0, n) 分成几段并行执行 fn(start, stop)，按顺序返回结果。
 
     fn 内只做释放 GIL 的 numpy 操作。已经在这个线程池里时直接顺序执行（不嵌套等待）。
+    每次调用前后检查是否已被取消（一次分析里有几十次，取消后很快停下）。
     """
+    check_cancel()
     k = min(THREADS * 2, max(1, n // max(1, min_chunk)))
     if k <= 1 or threading.current_thread().name.startswith("cd-px"):
         return [fn(0, n)]
     edges = np.linspace(0, n, k + 1).astype(int)
     futs = [_executor().submit(fn, int(a), int(b)) for a, b in zip(edges[:-1], edges[1:], strict=True)]
-    return [f.result() for f in futs]
+    out = [f.result() for f in futs]
+    check_cancel()
+    return out
 
 
 def par_rows(fn, h: int, w: int) -> list:
@@ -62,6 +90,7 @@ def par_rows(fn, h: int, w: int) -> list:
 def together(*fns) -> list:
     """同时执行几项互不依赖的分析（各自内部也会多线程），按顺序返回结果；共用 scope() 的缓存。"""
     global _tasks
+    check_cancel()
     if len(fns) <= 1 or threading.current_thread().name.startswith(("cd-task", "cd-px")):
         return [f() for f in fns]
     with _pool_lock:

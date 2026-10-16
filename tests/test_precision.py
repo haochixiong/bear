@@ -216,3 +216,75 @@ def test_bridge_precision_param_and_reuse(monkeypatch):
     other = img.copy()
     other[5, 5] = (1, 2, 3)
     assert bs._prepared(other) is not p1
+
+
+# ------------------------------------------------------------------ 取消：又分析了一次，旧的原图精查马上停下
+def test_cancelled_analysis_stops():
+    import threading
+
+    from colordoctor.core.pixel_table import Cancelled, cancellable
+
+    ev = threading.Event()
+    ev.set()
+    with cancellable(ev), pytest.raises(Cancelled):
+        an.scan_image(_speckled(), CTX)
+    an.scan_image(_speckled(), CTX)  # 不在取消范围内：照常算
+
+
+def test_bridge_supersede_cancels_old_refine(monkeypatch):
+    import time
+
+    from colordoctor.bridge import server as bs
+    from colordoctor.core.pixel_table import check_cancel
+
+    monkeypatch.setattr(bs, "PREVIEW_FROM", 10)
+
+    def fake(pixels, mode, q, *a, **k):
+        if q.get("precision") == "preview":
+            return {"precision": "preview", "session": "s"}
+        for _ in range(500):  # 原图精查：很慢，期间不断检查是否被取消
+            check_cancel()
+            time.sleep(0.01)
+        return {"precision": "full"}
+
+    monkeypatch.setattr(bs, "analyze_request", fake)
+    refines = bs.Store()
+    px = np.zeros((10, 10, 3), np.uint8)
+    first = bs.analyze_progressive(px, "dirty", {"progressive": "1"}, bs.Store(), bs.Store(), refines)
+    job = refines.get(first["refine"])
+    t = time.perf_counter()
+    bs.analyze_progressive(px, "dirty", {"progressive": "1", "supersede": first["refine"]}, bs.Store(), bs.Store(), refines)
+    assert job.done.wait(3) and time.perf_counter() - t < 3
+    assert job.error[0] == 409 and job.result is None
+
+
+def test_desktop_stops_refine_when_result_is_replaced(win, qtbot):
+    import time
+
+    from colordoctor.core.pixel_table import check_cancel
+
+    seen = []
+
+    class Item:
+        id = 4242
+
+    def compute(stage):
+        if stage[1] == "preview":
+            return "quick"
+        for _ in range(500):
+            check_cancel()
+            time.sleep(0.01)
+        return "full"
+
+    def on_result(rep, final):
+        seen.append(rep)
+        return Item()
+
+    win._run_staged([(1, "preview"), (2, "full")], compute, on_result)
+    qtbot.waitUntil(lambda: 4242 in win._refining, timeout=5000)
+    t = time.perf_counter()
+    ev = win._refining[4242]
+    win._stop_refine(4242)  # 这条结果被重算 / 替换 / 删除
+    qtbot.waitUntil(lambda: ev.is_set(), timeout=1000)
+    qtbot.wait(300)
+    assert seen == ["quick"] and time.perf_counter() - t < 3  # 精查停下，没有替换，也没有报错弹窗

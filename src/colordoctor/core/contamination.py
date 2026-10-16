@@ -21,6 +21,7 @@ import numpy as np
 
 from colordoctor.core import color_spaces as cs
 from colordoctor.core.color_models import Blob, ContaminationResult
+from colordoctor.core.pixel_table import _cancel as _cancel_var
 from colordoctor.core.pixel_table import par_ranges, par_rows, table, wmedian
 from colordoctor.core.region_statistics import weighted_circular_hue
 from colordoctor.core.sampling import FULL_RES_MAX, grid_downsample
@@ -595,6 +596,10 @@ def _neutral_result(mask, step, chrom_frac) -> ContaminationResult:
     )
 
 
+def _cancel_event():
+    return _cancel_var.get()
+
+
 def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> ContaminationResult:
     """整图扫描：按瓦片判断“局部主色里的散点对立色”，按色相族判断局部发灰。
 
@@ -616,8 +621,12 @@ def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> Conta
 
     all_valid = vsub is None or bool(vsub.all())
 
+    cancel = _cancel_event()
+
     def scan_tiles(a, b):  # 各块互不重叠：多个线程同时写 opp_all 的不同块
         for y0, x0 in tiles[a:b]:
+            if cancel is not None and cancel.is_set():
+                return  # 已被取消：par_ranges 结束后会抛 Cancelled
             sl = (slice(y0, y0 + ts), slice(x0, x0 + ts))
             idx_t = pt.index[sl]
             # 先数这一块里每种颜色有几个有彩色像素，主色相、对立色有多少都按颜色算（和逐像素算一样）；
