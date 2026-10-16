@@ -33,7 +33,7 @@ from colordoctor.core.color_models import (
 )
 from colordoctor.core.perception import de_words
 from colordoctor.core.pixel_table import colour_counts, scope, together
-from colordoctor.core.sampling import grid_downsample, sample_point
+from colordoctor.core.sampling import grid_downsample, resolution_limit, sample_point
 
 MAX_SAMPLES = rs.MAX_SAMPLES
 SEVERITY_FLOOR = {Severity.MILD: 20.0, Severity.NOTABLE: 45.0, Severity.STRONG: 70.0}  # 与 severity_from_score 的分档一致
@@ -58,7 +58,12 @@ def _shared_pixels(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         with scope():
-            return fn(*args, **kwargs)
+            rep = fn(*args, **kwargs)
+        limit, label = resolution_limit()
+        big = any(isinstance(a, np.ndarray) and a.ndim == 3 and a.shape[0] * a.shape[1] > limit for a in args)
+        if label != "full" and big and isinstance(rep, AnalysisReport):
+            rep = dataclasses.replace(rep, precision=label)  # 这次确实是按缩小的图算的
+        return rep
 
     return wrapper
 

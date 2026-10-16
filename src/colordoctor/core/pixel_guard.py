@@ -40,6 +40,12 @@ class Prepared:
         这样颜色和明度的分布与只统计不透明像素相同，不会多出一块“灰色”。"""
         if self.valid is None:
             return self.rgb
+        if getattr(self, "_filled", None) is not None:  # 同一张图再分析时用同一个数组（颜色编号可以复用）
+            return self._filled
+        self._filled = self._fill()
+        return self._filled
+
+    def _fill(self) -> np.ndarray:
         out = self.rgb.copy()
         rng = np.random.default_rng(0)
         # 从不透明像素里抽一部分（最多 100 万）当填充的来源：分布一样，不必把几千万个像素整个复制一遍

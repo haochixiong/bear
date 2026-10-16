@@ -324,3 +324,6 @@ class AnalysisReport:
     mask_info: dict = field(default_factory=dict)
     palette: object = None  # palette.PaletteReport（整图色彩）
     reference: object = None  # reference_match.MatchReport（仿色）
+    # 分析精度："full" 原图每个像素；"fast" 「快速」精度（大图按格平均缩到约 2400 万像素）；
+    # "preview" 先出的结果（约 1200 万像素），原图精查完成后会被替换
+    precision: str = "full"

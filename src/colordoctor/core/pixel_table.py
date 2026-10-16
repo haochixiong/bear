@@ -16,6 +16,8 @@ from __future__ import annotations
 import contextvars
 import os
 import threading
+import zlib
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import cached_property
@@ -182,21 +184,102 @@ def _key(a: np.ndarray):
 
 
 def table(rgb: np.ndarray) -> PixelTable:
-    """rgb 的像素表；在 scope() 内同一个数组只建一次。"""
-    cache = _cache.get()
-    if cache is None or not isinstance(rgb, np.ndarray) or rgb.ndim != 3:
+    """rgb 的像素表；在 scope() 内同一个数组只建一次，分析之间也复用（见 _recent）。"""
+    if not isinstance(rgb, np.ndarray) or rgb.ndim != 3:
         return PixelTable(rgb)
-    k = _key(rgb)
+    return cached("table", rgb, lambda: PixelTable(rgb))
+
+
+# ---------------------------------------------------------------- 分析之间复用
+# 同一张图换个影调风格 / 颜色模板 / 肤色风格再分析、或者先出快速结果再精查时，不必重新给颜色编号。
+# 按数组本身（地址、形状）记住最近两张图的结果；连数组一起存着，地址就不会被别的图复用。
+# 每次取用前核对一遍内容指纹（抽样），数组被就地改写过就不用旧结果。
+RECENT_IMAGES = 2
+_recent: OrderedDict = OrderedDict()
+_recent_lock = threading.Lock()
+
+
+def _fingerprint(a: np.ndarray) -> int:
+    h, w = a.shape[:2]
+    sy, sx = max(1, h // 256), max(1, w // 256)
+    return zlib.crc32(np.ascontiguousarray(a[::sy, ::sx]).tobytes())
+
+
+def forget_all() -> None:
+    with _recent_lock:
+        _recent.clear()
+
+
+def _recent_get(tag, arr):
+    k = _key(arr)
+    with _recent_lock:
+        e = _recent.get(k)
+        if e is None:
+            return None
+        _recent.move_to_end(k)
+    if e["fp"] != _fingerprint(arr):
+        with _recent_lock:
+            _recent.pop(k, None)
+        return None
+    return e["items"].get(tag)
+
+
+def _recent_put(tag, arr, value) -> None:
+    if arr.ndim != 3:
+        return
+    k = _key(arr)
+    fp = _fingerprint(arr)
+    with _recent_lock:
+        e = _recent.get(k)
+        if e is None or e["fp"] != fp:
+            e = _recent[k] = {"arr": arr, "fp": fp, "items": {}}
+        e["items"][tag] = value
+        _recent.move_to_end(k)
+        while len(_recent) > RECENT_IMAGES * 3:  # 一张图的缩小图也算一项
+            _recent.popitem(last=False)
+
+
+def content_key(a: np.ndarray) -> tuple:
+    """整块像素内容的指纹（形状 + 分 4 段的 CRC32，多线程）：插件每次重新传来的同一张图认得出来。"""
+    flat = np.ascontiguousarray(a).reshape(-1).view(np.uint8)
+    edges = np.linspace(0, flat.size, 5).astype(int)
+    crcs = par_ranges(lambda i, j: [zlib.crc32(memoryview(flat[edges[k]:edges[k + 1]])) for k in range(i, j)], 4, 1)
+    return (a.shape, a.dtype.str, *(c for part in crcs for c in part))
+
+
+def cached(tag, arr: np.ndarray, make):
+    """按 (tag, 数组) 缓存 make() 的结果（像素表、同一张图的缩小图）：scope() 内只算一次，分析之间也复用。"""
+    if not isinstance(arr, np.ndarray):
+        return make()
+    cache = _cache.get()
+    if cache is None:
+        return make()
+    k = (tag, _key(arr))
     with cache["lock"]:  # 两项并行的分析同时要同一张图时，后来的等前面的建完直接用
         hit = cache.get(k)
         if hit is None:
+            value = _recent_get(tag, arr)
+            if value is None:
+                value = make()
+                _recent_put(tag, arr, value)
             # 连数组一起存着：数组活着，同一个地址就不会被别的图复用
-            hit = cache[k] = (rgb, PixelTable(rgb))
+            hit = cache[k] = (arr, value)
     return hit[1]
 
 
 def colour_counts(rgb: np.ndarray, mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """图像（mask 范围内）-> (不同的颜色, 每种的像素数)。像素不多时直接返回每个像素（权重 1）。"""
+    """图像（mask 范围内）-> (不同的颜色, 每种的像素数)。像素不多时直接返回每个像素（权重 1）。
+
+    「快速」精度或“先出结果”时（sampling.resolution），大图先按格平均缩小。"""
+    from colordoctor.core.sampling import grid_downsample, resolution_limit
+
+    if np.asarray(rgb).ndim == 3 and rgb.shape[0] * rgb.shape[1] > resolution_limit()[0]:
+        from colordoctor.core.contamination import downsample_mask
+
+        sub, step = grid_downsample(rgb, resolution_limit()[0])
+        if mask is not None:
+            mask = downsample_mask(mask, step, sub.shape[:2])
+        rgb = sub
     px = np.asarray(rgb)[..., :3]
     if px.shape[0] * px.shape[1] < cs.PER_COLOUR_MIN or px.dtype != np.uint8:
         flat = px.reshape(-1, 3) if mask is None else px[np.asarray(mask, dtype=bool)]

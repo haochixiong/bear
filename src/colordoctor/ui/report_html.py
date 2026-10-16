@@ -100,6 +100,12 @@ def _finding_html(f: Finding) -> str:
     return "<div>" + "".join(parts) + "</div><hr>"
 
 
+PRECISION_NOTES = {
+    "preview": "⏳ 快速结果（按约 1200 万像素）：正在按原图逐像素精查，完成后自动替换",
+    "fast": "快速精度：这张图按约 2400 万像素分析，一两个像素大的杂色点可能被平均掉（设置 → 分析精度 可改为原图）",
+}
+
+
 def report_html(r: AnalysisReport, details: bool = False) -> str:
     mode_name = {
         "general": "脏色检查（区域）",
@@ -125,6 +131,9 @@ def report_html(r: AnalysisReport, details: bool = False) -> str:
         head = f"<h2>{escape(mode_name)}：与参考相似度 {r.reference.similarity:.0f}/100</h2>"
     else:
         head = f"<h2>{escape(mode_name)}：{_badge(r.overall_severity.value)} 脏色风险 {r.overall_risk:.0f}/100</h2>"
+    note = PRECISION_NOTES.get(r.precision)
+    if note:
+        head += f"<p><b>{escape(note)}</b></p>"
     head += (
         f"<p style='color:{TEXT_DIM}'>总分 = 最高分项 + 其余分项之和 × 0.2；结论是风险倾向而不是绝对事实。"
         f"整体置信度 {r.confidence:.2f}</p>"

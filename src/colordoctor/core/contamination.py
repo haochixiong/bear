@@ -85,16 +85,16 @@ _SMOOTH = np.linalg.matrix_power(
     sum(w / 16.0 * np.roll(np.eye(HIST_BINS), d, axis=0) for d, w in zip(range(-2, 3), (1, 4, 6, 4, 1), strict=True)), 2)
 
 
-def _tile_peak(ci, h32, c32, hb, ccos, csin) -> float:
-    """和 _peak_hue(h, C) 一样（平滑色相直方图的峰，再在峰两侧 40° 内按色度加权求平均色相）。
-
-    ci：这一块里有彩色像素的颜色编号；直方图格、色度 × cos / sin 事先按颜色算好（小表，查起来快），
-    这里只查表、求和，不建整幅的逐像素数组。"""
-    hist = _SMOOTH @ np.bincount(hb[ci], weights=c32[ci], minlength=HIST_BINS)
+def _tile_peak(u, w_u, h32, c32, hb, ccos, csin) -> float:
+    """和 _peak_hue(这一块有彩色像素的色相, 色度) 一样（平滑色相直方图的峰，再在峰两侧 40° 内按色度加权求平均色相），
+    按颜色算：u 是这一块里出现的颜色编号，w_u 是每种颜色的像素数；直方图格、色度 × cos / sin 事先按颜色算好。"""
+    cw = c32[u] * w_u
+    hist = _SMOOTH @ np.bincount(hb[u], weights=cw, minlength=HIST_BINS)
     peak = (int(np.argmax(hist)) + 0.5) * (360.0 / HIST_BINS)
-    near = ci[np.abs((h32[ci] - np.float32(peak) + 180) % 360 - 180) <= 40.0]
-    c, s = float(ccos[near].sum(dtype=np.float64)), float(csin[near].sum(dtype=np.float64))
-    tot = float(c32[near].sum(dtype=np.float64))
+    near = np.abs((h32[u] - np.float32(peak) + 180) % 360 - 180) <= 40.0
+    c = float((ccos[u][near] * w_u[near]).sum(dtype=np.float64))
+    s = float((csin[u][near] * w_u[near]).sum(dtype=np.float64))
+    tot = float(cw[near].sum(dtype=np.float64))
     if tot <= 0 or np.hypot(c, s) < 1e-12 * tot:
         return peak
     return float(np.degrees(np.arctan2(s, c)) % 360.0)
@@ -186,18 +186,62 @@ def _isolated_fraction(m: np.ndarray) -> float:
 
 
 def _base_mask(chromatic, vsub, all_valid) -> np.ndarray:
-    mask = np.where(chromatic, MASK_NORMAL, MASK_IGNORED).astype(np.uint8)
+    # 有彩色 = MASK_NORMAL(0)，其余 = MASK_IGNORED(1)：直接把“不是有彩色”当 0/1 字节用（不经过 64 位的中间数组）
+    mask = np.logical_not(chromatic).view(np.uint8)
     if not all_valid:
         mask[~vsub] = MASK_OUTSIDE
     return mask
 
 
-def _edge_map(pt) -> np.ndarray:
-    """边缘（明度梯度大）和被裁切的颜色：都不参与发灰判断。"""
-    edge = _edges(pt.pix(pt.L.astype(np.float32)))
-    if pt.clipped.any():
-        edge |= pt.pix(pt.clipped)  # 被裁切的亮部 / 死黑颜色被压淡，不是“发灰”：和边缘一样不参与发灰判断
-    return edge
+def _drop_edges(pt, cand: np.ndarray) -> None:
+    """从发灰候选 cand 里去掉边缘（明度梯度大）和被裁切的颜色（就地修改）。
+
+    只在候选像素上算（和对整幅图 np.gradient 再取这些位置完全一样）：候选少时按坐标取上下左右的明度，
+    多时只算含有候选的那几段行。被裁切的亮部 / 死黑颜色被压淡，不是“发灰”：和边缘一样不参与发灰判断。
+    """
+    hh, ww = cand.shape
+    n = int(np.count_nonzero(cand))
+    if n == 0:
+        return
+    L32 = pt.L.astype(np.float32)
+    lim = np.float32(EDGE_GRAD) ** 2
+    if n < 0.05 * cand.size:
+        ys, xs = np.nonzero(cand)
+        drop = pt.clipped[pt.index[ys, xs]] if pt.clipped.any() else np.zeros(n, dtype=bool)
+        if hh >= 2 and ww >= 2:
+            drop |= _grad2_at(pt.index, L32, ys, xs, 0) + _grad2_at(pt.index, L32, ys, xs, 1) > lim
+        cand[ys[drop], xs[drop]] = False
+        return
+    clipped = pt.clipped if pt.clipped.any() else None
+
+    def part(y0, y1):
+        c = cand[y0:y1]
+        if not c.any():
+            return
+        if clipped is not None:
+            c &= ~clipped[pt.index[y0:y1]]
+        if hh >= 2 and ww >= 2:
+            a, b = max(0, y0 - 1), min(hh, y1 + 1)
+            g = np.gradient(L32[pt.index[a:b]])
+            gy, gx = g[0][y0 - a : y0 - a + (y1 - y0)], g[1][y0 - a : y0 - a + (y1 - y0)]
+            c &= ~(gx * gx + gy * gy > lim)
+
+    par_rows(part, hh, ww)
+
+
+def _grad2_at(index, L32, ys, xs, axis) -> np.ndarray:
+    """(ys, xs) 处沿 axis 的 np.gradient 分量的平方（内部中心差分，两端单侧差分；float32，与整幅计算一致）。"""
+    size = index.shape[axis]
+    pos = ys if axis == 0 else xs
+    lo, hi = np.maximum(pos - 1, 0), np.minimum(pos + 1, size - 1)
+
+    def val(p):
+        return L32[index[p, xs]] if axis == 0 else L32[index[ys, p]]
+
+    d = val(hi) - val(lo)
+    inner = (pos > 0) & (pos < size - 1)
+    g = np.where(inner, d / np.float32(2.0), d).astype(np.float32)
+    return g * g
 
 
 def _edges(Lp: np.ndarray) -> np.ndarray:
@@ -280,8 +324,8 @@ def _shift_valid(th: int, tw: int, dy: int, dx: int) -> np.ndarray:
 
 def _blobs(mask, kind_value, kind, pt, step, offset, base_name, min_count, min_density, max_blobs=12):
     """base_name 为 None 时（整图扫描）按每一处自己的主色命名。色度、色相按像素的颜色编号查 pt。"""
-    def ch_of(sel):
-        ci = pt.index[sel]
+    def ch_of(box, sel):
+        ci = pt.index[box][sel]
         return pt.C[ci], pt.h[ci]
 
     hh, ww = mask.shape
@@ -289,9 +333,14 @@ def _blobs(mask, kind_value, kind, pt, step, offset, base_name, min_count, min_d
     th, tw = (hh + bt - 1) // bt, (ww + bt - 1) // bt
     m = mask == kind_value
     rows, cols = np.arange(0, hh, bt), np.arange(0, ww, bt)
-    ys, xs = np.nonzero(m)  # 问题像素一般很少：按坐标数每块有几个
-    counts = np.bincount((ys // bt) * tw + xs // bt, minlength=th * tw).reshape(th, tw).astype(float)
-    del ys, xs
+    counts = np.zeros((th, tw))
+
+    def count_rows(t0, t1):  # 每一行小块：先按列数，再把列合并成块（不列出几千万个坐标）
+        for ty in range(t0, t1):
+            colsum = np.count_nonzero(m[ty * bt : (ty + 1) * bt], axis=0)
+            counts[ty] = np.add.reduceat(colsum, cols)
+
+    par_ranges(count_rows, th, 1)
     sizes = np.outer(np.minimum(bt, hh - rows), np.minimum(bt, ww - cols)).astype(float)
     flags = (counts >= min_count) & (counts / np.maximum(sizes, 1) >= min_density)
     total = hh * ww
@@ -301,20 +350,23 @@ def _blobs(mask, kind_value, kind, pt, step, offset, base_name, min_count, min_d
         xs = [t[1] for t in comp]
         y0, y1 = min(ys) * bt, min(hh, (max(ys) + 1) * bt)
         x0, x1 = min(xs) * bt, min(ww, (max(xs) + 1) * bt)
-        region = np.zeros_like(m)
+        # 只在这一处的外框里算（不建整幅的图）
+        box = (slice(y0, y1), slice(x0, x1))
+        region = np.zeros((y1 - y0, x1 - x0), dtype=bool)
         for ty, tx in comp:
-            region[ty * bt : (ty + 1) * bt, tx * bt : (tx + 1) * bt] = True
-        sel = m & region
+            region[ty * bt - y0 : (ty + 1) * bt - y0, tx * bt - x0 : (tx + 1) * bt - x0] = True
+        sel = m[box] & region
         n = int(sel.sum())
         share = n / max(1, int(region.sum()))
-        c_sel, h_sel = ch_of(sel)
+        c_sel, h_sel = ch_of(box, sel)
         c_mean = float(c_sel.mean()) if n else 0.0
         hue, _, _ = weighted_circular_hue(h_sel, c_sel)
         cname = cs.hue_name(hue, c_mean) if (hue is not None and kind == "opposite") else None
         bname = base_name
         if bname is None:
-            own = region & ((mask == MASK_NORMAL) | (mask == MASK_GRAYING))
-            c_own, h_own = ch_of(own)
+            mb = mask[box]
+            own = region & ((mb == MASK_NORMAL) | (mb == MASK_GRAYING))
+            c_own, h_own = ch_of(box, own)
             bh, _, _ = weighted_circular_hue(h_own, c_own) if c_own.size else (None, 0, None)
             bname = cs.hue_name(bh, float(np.median(c_own))) if bh is not None else "局部主色"
         ev = [f"该处 {share:.1%} 的像素为{('“' + cname + '”') if cname else '发灰'}像素，平均色度 C* {c_mean:.1f}"]
@@ -398,7 +450,7 @@ def analyze(
         if not all_valid:
             chromatic &= vsub
         mask = _base_mask(chromatic, vsub, all_valid)
-        return _scan(pt, wv, step, offset, chromatic, _edge_map(pt), mask, chrom_frac, vsub)
+        return _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub)
 
     opp_angle = SKIN_OPP_ANGLE if mode == "skin" else OPP_ANGLE
     if base_hue is None:
@@ -467,7 +519,7 @@ def analyze(
 
     if (gray_u & (wv > 0)).any():
         gray = (codes & 8).astype(bool)
-        gray &= ~_edge_map(pt)  # 边缘只在有发灰候选时才算
+        _drop_edges(pt, gray)  # 边缘只在发灰候选像素上算
         mask[gray] = MASK_GRAYING
         n_gray = int(np.count_nonzero(gray))
     else:
@@ -543,7 +595,7 @@ def _neutral_result(mask, step, chrom_frac) -> ContaminationResult:
     )
 
 
-def _scan(pt, wv, step, offset, chromatic, edge, mask, chrom_frac, vsub=None) -> ContaminationResult:
+def _scan(pt, wv, step, offset, chromatic, mask, chrom_frac, vsub=None) -> ContaminationResult:
     """整图扫描：按瓦片判断“局部主色里的散点对立色”，按色相族判断局部发灰。
 
     整图没有语义（不知道哪里是一件衣服），因此只在“散点状混杂”时报告对立色；
@@ -557,26 +609,42 @@ def _scan(pt, wv, step, offset, chromatic, edge, mask, chrom_frac, vsub=None) ->
     hr = np.radians(hu)
     hb = ((hu / (360.0 / HIST_BINS)).astype(int) % HIST_BINS).astype(np.uint8)
     ccos, csin = (Cu * np.cos(hr)).astype(np.float32), (Cu * np.sin(hr)).astype(np.float32)
+    chrom_u = Cu >= C_MIN
     ts = int(max(8, round(min(hh, ww) / 12)))
     opp_all = np.zeros((hh, ww), dtype=bool)
     tiles = [(y0, x0) for y0 in range(0, hh, ts) for x0 in range(0, ww, ts)]
 
+    all_valid = vsub is None or bool(vsub.all())
+
     def scan_tiles(a, b):  # 各块互不重叠：多个线程同时写 opp_all 的不同块
         for y0, x0 in tiles[a:b]:
             sl = (slice(y0, y0 + ts), slice(x0, x0 + ts))
-            ch = chromatic[sl]
-            n_ch = int(np.count_nonzero(ch))
-            if n_ch < 0.3 * ch.size:
-                continue
             idx_t = pt.index[sl]
-            tb = _tile_peak(idx_t[ch], h32, c32, hb, ccos, csin)
-            # 每种颜色和这块主色的 |色相差| 只取这块里出现的颜色：按块查表
-            hd = np.abs((h32[idx_t] - np.float32(tb) + 180) % 360 - 180)
-            opp = ch & (hd >= OPP_ANGLE) & (c32[idx_t] >= OPP_C_MIN)
-            n = int(np.count_nonzero(opp))
+            # 先数这一块里每种颜色有几个有彩色像素，主色相、对立色有多少都按颜色算（和逐像素算一样）；
+            # 大多数块到这里就知道没有散点，不用逐像素建图
+            if all_valid:
+                cnt = np.bincount(idx_t.ravel(), minlength=pt.n)
+                cnt[~chrom_u] = 0
+            else:
+                cnt = np.bincount(idx_t[chromatic[sl]], minlength=pt.n)
+            u = np.flatnonzero(cnt)
+            w_u = cnt[u]
+            n_ch = int(w_u.sum())
+            if n_ch < 0.3 * idx_t.size:
+                continue
+            tb = _tile_peak(u, w_u, h32, c32, hb, ccos, csin)
+            hd = np.abs((h32[u] - np.float32(tb) + 180) % 360 - 180)
+            opp_c = (hd >= OPP_ANGLE) & (c32[u] >= OPP_C_MIN)
+            n = int(w_u[opp_c].sum())
             if n < 2 or n / max(1, n_ch) >= 0.2:
                 continue
-            fam = ch & (hd <= FAMILY_HALF_WIDTH)
+            ch = chromatic[sl]
+            lut = np.zeros(pt.n, dtype=np.uint8)
+            lut[u[opp_c]] = 1
+            lut[u[hd <= FAMILY_HALF_WIDTH]] |= 2
+            code = lut[idx_t]
+            opp = ch & (code & 1).astype(bool)
+            fam = ch & (code & 2).astype(bool)
             if _pairs(opp, fam) / n < 2.0:  # 成片 -> 物体边界/小物件，不算混杂
                 continue
             opp_all[sl] |= opp
@@ -599,7 +667,7 @@ def _scan(pt, wv, step, offset, chromatic, edge, mask, chrom_frac, vsub=None) ->
         gray = pt.pix(gray_any)
         gray &= chromatic
         gray &= ~opp_all
-        gray &= ~edge
+        _drop_edges(pt, gray)
     else:
         gray = np.zeros((hh, ww), dtype=bool)
 

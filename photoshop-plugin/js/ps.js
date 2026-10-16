@@ -93,14 +93,15 @@ function clipToCanvas(b, doc) {
   return { left: Math.max(0, b.left), top: Math.max(0, b.top), right: Math.min(doc.width, b.right), bottom: Math.min(doc.height, b.bottom) };
 }
 
-// 读取像素（sRGB、8 位、交错），按原图尺寸（超大文档才缩小到 MAX_READ_PIXELS）。必须在 executeAsModal 里调用。
-async function readPixels(info, sourceBounds) {
+// 读取像素（sRGB、8 位、交错），按原图尺寸（超大文档才缩小到 maxPixels，默认 MAX_READ_PIXELS）。
+// 「快速」分析精度时 maxPixels 较小：PS 直接缩小读取，读和传都快。必须在 executeAsModal 里调用。
+async function readPixels(info, sourceBounds, maxPixels = MAX_READ_PIXELS) {
   // 图层可能超出画布（移出去一部分）：只读画布内的部分，返回的坐标才能和蒙版对齐
   const b = clipToCanvas(sourceBounds || info.bounds, info.doc);
   const w = b.right - b.left;
   const h = b.bottom - b.top;
   if (w < 1 || h < 1) throw new Error("要分析的范围在画布之外。");
-  const scale = Math.min(1, Math.sqrt(MAX_READ_PIXELS / (w * h)));
+  const scale = Math.min(1, Math.sqrt(Math.min(maxPixels, MAX_READ_PIXELS) / (w * h)));
   const opts = {
     documentID: info.doc.id,
     sourceBounds: b,

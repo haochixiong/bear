@@ -288,10 +288,13 @@ function dirtySky(w, h) {
       return { level: 0, sourceBounds: o.sourceBounds, imageData: { width: 40, height: 30, components: 4, getData: async () => new Uint8Array(40 * 30 * 4), dispose() {} } };
     };
     await ps.readModal(() => ps.readPixels(sinfo), sinfo);
+    assert.strictEqual(seenOpts.targetSize, undefined);  // 原图精度：不缩小读取
     assert.deepStrictEqual(seenVis, [false, false, false, true, true, true]);  // 读的时候上方都隐藏
     assert.strictEqual(seenOpts.layerID, undefined);  // 读合成画面，不是单个图层
     assert.deepStrictEqual([top.visible, inner.visible, hiddenAlready.visible], [true, true, false]);  // 读完恢复原样
     assert.deepStrictEqual(resumes, [[77, false]]);  // 这一步不进历史记录
+    await ps.readModal(() => ps.readPixels(sinfo, undefined, 300), sinfo);
+    assert.deepStrictEqual(seenOpts.targetSize, { width: 20 });  // 「快速」：40×30 按 300 像素上限缩小读取
     fakePs.core.executeAsModal = realCore;
     fakePs.app.activeDocument = prevDoc;
   }

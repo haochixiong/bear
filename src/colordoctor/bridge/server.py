@@ -11,6 +11,8 @@
   POST /analyze?mode=dirty|skin|palette|reference[&preset=&part=&style=&family=&tone_style=&tone_target=&ref=]
        头：X-Width X-Height X-Components(3|4) [X-Doc-Width X-Doc-Height X-Layer-Kind X-Layer-Name]
        体：width*height*components 字节（行优先、交错 RGB(A)）
+       [&precision=full|fast][&progressive=1]：原图精度且图很大时先返回快速结果（precision="preview"，
+       带 refine 令牌），原图精查在后台继续，用 GET /refined?token=&wait=秒 取（没算完返回 202 {"pending": true}）
   POST /reference   同上的像素格式，存为参考图，返回 {"ref": id}
   GET  /mask?session=&layer=[&w=&h=][&left=&top=&doc_w=&doc_h=]  ->  灰度字节（255 = 作用）；
        给出 doc_w/doc_h 时返回整幅文档大小，图层范围以外为 0
@@ -46,7 +48,9 @@ CLIENT_HEADER = "X-ColorDoctor-Client"
 MAX_BODY = 400 * 1024 * 1024  # 约 1 亿像素的 RGBA
 MAX_SESSIONS = 16
 # 插件和服务的协议版本：加了接口 / 参数就加 1。插件发现服务的版本比自己要求的旧，就提示更新桌面版
-PROTOCOL = 3  # 1：基础分析；2：/multipoint、/reference-file；3：影调风格（tone_style / tone_target / tone）
+PROTOCOL = 4  # 1：基础分析；2：/multipoint、/reference-file；3：影调风格（tone_style / tone_target / tone）；
+# 4：分析精度（precision=full|fast）、先出快速结果再精查（progressive=1 + GET /refined）
+PREVIEW_FROM = 20_000_000  # progressive=1 时，比这大的图先按约 1200 万像素出结果，再在后台按原图精查
 MODES = ("dirty", "skin", "palette", "reference", "patch")
 
 
@@ -232,6 +236,29 @@ def reference_from_file(data: bytes, name: str, refs: Store) -> dict:
     return {**out, "ref": ref}
 
 
+_prep_cache: OrderedDict = OrderedDict()  # 像素内容 -> (像素, pixel_guard.prepare 的结果)
+_prep_lock = threading.Lock()
+
+
+def _prepared(pixels: np.ndarray):
+    """同一张图（插件换个设置再分析、或先快速再精查，像素内容完全一样）用同一份准备好的数组：
+    分析引擎按数组记住了颜色编号，这样第二次不用重新编号。"""
+    from colordoctor.core.pixel_table import content_key
+
+    key = content_key(pixels)
+    with _prep_lock:
+        hit = _prep_cache.get(key)
+        if hit is not None:
+            _prep_cache.move_to_end(key)
+            return hit
+    prep = pixel_guard.prepare(pixels)
+    with _prep_lock:
+        _prep_cache[key] = prep
+        while len(_prep_cache) > 2:
+            _prep_cache.popitem(last=False)
+    return prep
+
+
 def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, refs: Store,
                     doc_size: tuple[int, int] | None = None, layer_kind: str = "", layer_name: str = "") -> dict:
     """服务端核心逻辑（与 HTTP 解耦，便于测试）。不能分析时抛 pixel_guard.BlockedError。"""
@@ -246,8 +273,15 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
             if len(lab) != 3 or not (0 <= lab[0] <= 100):
                 raise ValueError("lab 参数应为 L,a,b")
         return patch_values(pixels, q.get("preset") or "", lab=lab)
-    prep = pixel_guard.prepare(pixels)
-    report = run_analysis(prep, mode, q, refs, layer_name)
+    prep = _prepared(pixels)
+    precision = q.get("precision") or "full"
+    if precision not in ("full", "fast", "preview"):
+        raise ValueError(f"不认识的分析精度：{precision}")
+    from colordoctor.core.sampling import FAST_MAX, FULL_RES_MAX, PREVIEW_MAX, resolution
+
+    limit = {"full": FULL_RES_MAX, "fast": FAST_MAX, "preview": PREVIEW_MAX}[precision]
+    with resolution(limit, precision):
+        report = run_analysis(prep, mode, q, refs, layer_name)
     plan = layer_plan.plan_from_report(report, prep.rgb.shape)
     h, w = pixels.shape[:2]
     opaque = None
@@ -275,7 +309,44 @@ def analyze_request(pixels: np.ndarray, mode: str, q: dict, sessions: Store, ref
         "acr_params": acr_preset.params_for_report(report),
         "acr_calibrated": acr_channels.is_calibrated(),
         "tone": tone_json(report),
+        "precision": report.precision,
     }
+
+
+class Refine:
+    """后台的原图精查：完成后 result / error 之一有值。"""
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.result: dict | None = None
+        self.error: tuple[int, str] | None = None
+
+
+def analyze_progressive(pixels: np.ndarray, mode: str, q: dict, sessions: Store, refs: Store, refines: Store,
+                        doc_size=None, layer_kind: str = "", layer_name: str = "") -> dict:
+    """progressive=1：原图精度的大图先按约 1200 万像素出结果（马上返回），原图精查在后台线程继续。"""
+    q = {k: v for k, v in q.items() if k != "progressive"}
+    big = pixels.shape[0] * pixels.shape[1] > PREVIEW_FROM
+    if mode == "patch" or (q.get("precision") or "full") != "full" or not big:
+        return analyze_request(pixels, mode, q, sessions, refs, doc_size, layer_kind, layer_name)
+    quick = analyze_request(pixels, mode, {**q, "precision": "preview"}, sessions, refs, doc_size, layer_kind, layer_name)
+    job = Refine()
+    token = refines.put(job)
+
+    def run():
+        try:
+            job.result = analyze_request(pixels, mode, q, sessions, refs, doc_size, layer_kind, layer_name)
+        except pixel_guard.BlockedError as e:
+            job.error = (422, str(e))
+        except ValueError as e:
+            job.error = (400, str(e))
+        except Exception as e:  # noqa: BLE001 —— 后台线程里的错误交给 /refined 报告
+            job.error = (500, f"原图精查失败：{e}")
+        finally:
+            job.done.set()
+
+    threading.Thread(target=run, name="cd-refine", daemon=True).start()
+    return {**quick, "refine": token}
 
 
 def tone_json(report) -> dict | None:
@@ -532,6 +603,20 @@ class Handler(BaseHTTPRequestHandler):
                 raise NotFound("没有这个图层，请重新分析") from e
             data, w, h = mask_bytes(sess, q.get("layer", ""), num("w"), num("h"), place)
             return self._send(200, data, "application/octet-stream", {"X-Width": w, "X-Height": h})
+        if url.path == "/refined":
+            job = self.refines.get(q.get("token", ""))
+            if job is None:
+                return self._send(404, {"error": "原图精查的结果已过期，请重新分析"})
+            try:
+                wait = min(60.0, max(0.0, float(q.get("wait", "25"))))
+            except ValueError as e:
+                raise ValueError("wait 应为秒数") from e
+            if not job.done.wait(wait):
+                return self._send(202, {"pending": True})
+            if job.error is not None:
+                code, msg = job.error
+                return self._send(code, {"blocked": msg} if code == 422 else {"error": msg})
+            return self._send(200, job.result)
         if url.path == "/calibration/chart":
             from colordoctor.core import acr_calibration as cal
 
@@ -553,9 +638,9 @@ class Handler(BaseHTTPRequestHandler):
             dw, dh = self._int("X-Doc-Width"), self._int("X-Doc-Height")
             if dw is not None or dh is not None:
                 _check_size(dw or 0, dh or 0, "文档")
-            res = analyze_request(self._pixels(), mode, q, self.sessions, self.refs,
-                                  (dw, dh) if dw and dh else None,
-                                  self.headers.get("X-Layer-Kind", ""), _header_text(self.headers.get("X-Layer-Name", "")))
+            res = analyze_progressive(self._pixels(), mode, q, self.sessions, self.refs, self.refines,
+                                      (dw, dh) if dw and dh else None,
+                                      self.headers.get("X-Layer-Kind", ""), _header_text(self.headers.get("X-Layer-Name", "")))
             return self._send(200, res)
         if url.path == "/reference":
             prep = pixel_guard.prepare(self._pixels())
@@ -640,7 +725,7 @@ class _ExclusiveServer(ThreadingHTTPServer):
 
 
 def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4), "calibration": {},
+    handler = type("BoundHandler", (Handler,), {"sessions": Store(), "refs": Store(4), "refines": Store(8), "calibration": {},
                                                 "cal_lock": threading.Lock()})
     srv = _ExclusiveServer((HOST, port), handler)
     srv.daemon_threads = True

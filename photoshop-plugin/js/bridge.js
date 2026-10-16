@@ -76,6 +76,12 @@ async function analyze(px, mode, query, { docWidth, docHeight, layerKind, layerN
   return res.json();
 }
 
+// 原图精查的结果（分析时带了 progressive=1、拿到 refine 令牌）：没算完时返回 {pending: true}，再调一次接着等
+async function refined(token, wait = 25) {
+  const res = await call(`/refined?${new URLSearchParams({ token, wait: String(wait) })}`);
+  return res.json();
+}
+
 async function uploadReference(px) {
   const res = await call("/reference", { method: "POST", headers: pixelHeaders(px), body: px.data });
   return (await res.json()).ref;
@@ -154,6 +160,6 @@ async function calibrationFit(acrVersion) {
 }
 
 module.exports = {
-  BridgeError, onStatus, health, options, analyze, uploadReference, uploadReferenceFile, multipoint, fetchMask, acrPreset,
+  BridgeError, onStatus, health, options, analyze, refined, uploadReference, uploadReferenceFile, multipoint, fetchMask, acrPreset,
   calibrationChart, calibrationPlan, calibrationSample, calibrationFit,
 };
